@@ -12,10 +12,10 @@ PyJS is a pure Python JavaScript interpreter with a lexer, parser, tree-walking 
 ## Quick Start
 
 ```bash
-python main.py
-python main.py --repl
-python main.py -e "console.log(1 + 2)"
-pytest
+python3 main.py
+python3 main.py --repl
+python3 main.py -e "console.log(1 + 2)"
+python3 -m pytest
 ```
 
 ## Package Entry Point
