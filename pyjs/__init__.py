@@ -14,6 +14,8 @@ from .environment import Environment
 from .runtime import Interpreter
 from .modules import ModuleLoader
 from .plugin import PyJSPlugin, PluginContext
+from .inspect_val import js_inspect
+from .completer import JsCompleter
 from .plugins import (
     AssertPlugin,
     ChildProcessPlugin,
@@ -45,6 +47,7 @@ __all__ = [
     'JS_FALSE',
     'JS_NULL',
     'JS_TRUE',
+    'JsCompleter',
     'JsValue',
     'Lexer',
     'ModuleLoader',
@@ -60,6 +63,7 @@ __all__ = [
     'UtilPlugin',
     'evaluate',
     'evaluate_file',
+    'js_inspect',
     'parse_source',
     'repl',
     'tokenize_source',
@@ -125,26 +129,22 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
 
     interp = Interpreter(log_level=log_level, plugins=plugins or [])
 
-    # ── Tab completion ────────────────────────────────────────────────
+    # ── Tab completion (DevTools-style) ───────────────────────────────
+    _completer_obj = None
     if _has_readline:
-        def _completer(text: str, state: int) -> str | None:
-            env = interp.genv
-            names = list(env.bindings.keys())
-            names += [
-                'function', 'class', 'const', 'let', 'var', 'return',
-                'if', 'else', 'for', 'while', 'do', 'switch', 'case',
-                'break', 'continue', 'throw', 'try', 'catch', 'finally',
-                'new', 'delete', 'typeof', 'instanceof', 'void',
-                'true', 'false', 'null', 'undefined', 'this',
-                'async', 'await', 'import', 'export', 'from', 'of', 'in',
-                '.help', '.exit', '.clear', '.break', '.load ', '.save ',
-                '.version', '.stack',
-            ]
-            matches = [n for n in names if n.startswith(text)]
-            return matches[state] if state < len(matches) else None
+        from .completer import JsCompleter
+        _completer_obj = JsCompleter(interp)
+        _completer_obj._use_color = _use_color
 
-        _readline.set_completer(_completer)
+        _readline.set_completer(_completer_obj.complete)
+        _readline.set_completer_delims(' \t\n;,|&<>()[]{}')  # keep `.` in words
         _readline.parse_and_bind("tab: complete")
+        try:
+            _readline.set_completion_display_matches_hook(
+                _completer_obj.display_matches_hook
+            )
+        except AttributeError:
+            pass  # some readline builds omit this
 
         history_file = os.path.expanduser("~/.pyjs_history")
         try:
@@ -398,6 +398,10 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
             with contextlib.redirect_stdout(stdout_buf):
                 interp.run(run_source)
 
+            # Invalidate completer property cache after each execution
+            if _completer_obj is not None:
+                _completer_obj._cache.clear()
+
             printed = stdout_buf.getvalue()
             if printed:
                 print(printed, end='' if printed.endswith('\n') else '\n')
@@ -407,12 +411,17 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
                 print(_format_js_error(interp._last_error, verbose=_verbose_errors),
                       file=sys.stderr)
 
-            # ── Value display ─────────────────────────────────────────
+            # ── Value display (with DevTools-style pre-render type hint) ──
             elif is_expr:
                 last = getattr(interp, '_last_value', None)
                 if last is not None:
                     result_str = js_inspect(last, interp, depth=3, colors=_use_color)
                     print(result_str)
+                    # Pre-render: dim type annotation below the value
+                    if _use_color and last.type not in ('undefined',):
+                        from .completer import _type_tag
+                        tag = _type_tag(last)
+                        print(_ansi('dim', f'// {tag}', True))
 
         except SystemExit:
             raise

@@ -107,8 +107,10 @@ def js_inspect(
         name = ''
         if isinstance(val.value, dict):
             name = val.value.get('name', '') or ''
-        prefix = 'class' if t == 'class' else 'Function'
-        label = f"[{prefix}: {name}]" if name else f"[{prefix} (anonymous)]"
+        if t == 'class':
+            label = f"[class {name}]" if name else '[class (anonymous)]'
+        else:
+            label = f"[Function: {name}]" if name else '[Function (anonymous)]'
         return _c('cyan', label, colors)
 
     if t == 'array':
@@ -117,8 +119,13 @@ def js_inspect(
             return _c('cyan', '[Circular *]', colors)
         if not isinstance(val.value, list):
             return '[]'
+        n = len(val.value)
+        # DevTools-style length prefix: (3) [ 1, 2, 3 ]
+        len_tag = _c('dim', f'({n}) ', colors) if n else ''
+        if n == 0:
+            return '[]'
         if _current_depth >= depth:
-            return _c('cyan', f'[ ... {len(val.value)} items ]', colors)
+            return len_tag + _c('cyan', f'[ ... {n} more items ]', colors)
         _seen.add(obj_id)
         try:
             items = [
@@ -128,15 +135,13 @@ def js_inspect(
             ]
         finally:
             _seen.discard(obj_id)
-        if not items:
-            return '[]'
         inner = ', '.join(items)
         if compact and len(inner) <= 72:
-            return f'[ {inner} ]'
+            return f'{len_tag}[ {inner} ]'
         indent = '  ' * (_current_depth + 1)
         lines = ',\n'.join(f"{indent}{item}" for item in items)
         close_indent = '  ' * _current_depth
-        return f'[\n{lines}\n{close_indent}]'
+        return f'{len_tag}[\n{lines}\n{close_indent}]'
 
     if t == 'object':
         obj_id = id(val)
@@ -154,7 +159,7 @@ def js_inspect(
             stack_str = stack.value if isinstance(stack, JsValue) else ''
             header = _c('red', f"{err_type.value}: {msg_str}", colors)
             if stack_str and '\n' in stack_str:
-                frames = stack_str.split('\n')[1:]  # skip first "ErrorType: msg" line
+                frames = stack_str.split('\n')[1:]
                 frame_lines = '\n'.join(_c('dim', f"  {f.strip()}", colors) for f in frames if f.strip())
                 return f"{header}\n{frame_lines}" if frame_lines else header
             return header
@@ -165,12 +170,12 @@ def js_inspect(
             if kind.value == 'Generator':
                 return _c('cyan', 'Object [Generator] {}', colors)
             if kind.value == 'Map':
-                # __store__ is a Python list of (JsValue_key, JsValue_val) tuples
                 store = val.value.get('__store__', [])
-                if not store:
+                n = len(store)
+                if n == 0:
                     return _c('cyan', 'Map(0) {}', colors)
                 if _current_depth >= depth:
-                    return _c('cyan', f'Map({len(store)}) {{ ... }}', colors)
+                    return _c('cyan', f'Map({n}) {{ ... }}', colors)
                 pairs = []
                 for k_val, v_val in store:
                     ks = js_inspect(k_val, interp, depth=depth, colors=colors,
@@ -179,27 +184,40 @@ def js_inspect(
                                     _seen=_seen, _current_depth=_current_depth+1, compact=compact)
                     pairs.append(f"{ks} => {vs}")
                 inner = ', '.join(pairs)
-                return _c('cyan', f'Map({len(store)}) {{ {inner} }}', colors)
+                header = _c('cyan', f'Map({n})', colors)
+                if compact and len(inner) <= 60:
+                    return f'{header} {{ {inner} }}'
+                indent = '  ' * (_current_depth + 1)
+                lines = ',\n'.join(f"{indent}{p}" for p in pairs)
+                ci = '  ' * _current_depth
+                return f'{header} {{\n{lines}\n{ci}}}'
             if kind.value == 'Set':
-                # __store__ is a Python list of JsValue items
                 store = val.value.get('__store__', [])
-                if not store:
+                n = len(store)
+                if n == 0:
                     return _c('cyan', 'Set(0) {}', colors)
                 if _current_depth >= depth:
-                    return _c('cyan', f'Set({len(store)}) {{ ... }}', colors)
+                    return _c('cyan', f'Set({n}) {{ ... }}', colors)
                 items_str = ', '.join(
                     js_inspect(item, interp, depth=depth, colors=colors,
                                _seen=_seen, _current_depth=_current_depth+1, compact=compact)
                     for item in store
                 )
-                return _c('cyan', f'Set({len(store)}) {{ {items_str} }}', colors)
+                header = _c('cyan', f'Set({n})', colors)
+                return f'{header} {{ {items_str} }}'
+
+        # Class instance — show constructor name prefix like DevTools: `ClassName { ... }`
+        class_name = ''
+        cn_tag = val.value.get('__class_name__')
+        if isinstance(cn_tag, JsValue) and cn_tag.type == 'string':
+            class_name = cn_tag.value
 
         if _current_depth >= depth:
-            return _c('dim', '[Object]', colors)
+            prefix = _c('cyan', class_name + ' ', colors) if class_name else ''
+            return prefix + _c('dim', '[Object]', colors)
 
         _seen.add(obj_id)
         try:
-            # Only show non-internal keys
             pairs = []
             for k, v in val.value.items():
                 if k.startswith('__') and k.endswith('__'):
@@ -213,15 +231,17 @@ def js_inspect(
         finally:
             _seen.discard(obj_id)
 
+        name_prefix = (_c('cyan', class_name, colors) + ' ') if class_name else ''
+
         if not pairs:
-            return '{}'
+            return f'{name_prefix}{{}}'
         inner = ', '.join(pairs)
         if compact and len(inner) <= 72:
-            return f'{{ {inner} }}'
+            return f'{name_prefix}{{ {inner} }}'
         indent = '  ' * (_current_depth + 1)
         lines = ',\n'.join(f"{indent}{p}" for p in pairs)
         close_indent = '  ' * _current_depth
-        return f'{{\n{lines}\n{close_indent}}}'
+        return f'{name_prefix}{{\n{lines}\n{close_indent}}}'
 
     # Fallback
     if interp is not None:

@@ -2596,6 +2596,8 @@ class Interpreter:
                     interp._call_js(parent_class, args, this_val)
                 return this_val
             ctor = JsValue("intrinsic", {"fn": _default_ctor, "name": cname})
+        # Always stamp the declared class name onto the constructor
+        ctor.value["name"] = cname
         ctor.value["prototype"] = proto
         proto.value["constructor"] = ctor
         ctor.value["superClass"] = parent_class
@@ -3482,6 +3484,11 @@ class Interpreter:
             proto = callee.value.get("prototype")
             if proto and proto.type == "object":
                 new_obj.value["__proto__"] = proto
+            # Tag with constructor/class name for DevTools-style rendering
+            ctor_name = callee.value.get("name", "") if isinstance(callee.value, dict) else ""
+            if ctor_name and ctor_name not in ("Object", "Array", "Function"):
+                from .values import JsValue as _JV
+                new_obj.value["__class_name__"] = _JV("string", ctor_name)
             instance_fields = callee.value.get("__instance_fields__", []) if isinstance(callee.value, dict) else []
             if instance_fields:
                 field_env = Environment(env)
