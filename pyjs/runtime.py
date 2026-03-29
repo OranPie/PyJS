@@ -1693,7 +1693,15 @@ class Interpreter:
                     return py_to_js(parts)
                 sep = sep_arg.value if sep_arg.type != 'undefined' else None
                 lim = int(lim_jsval.value) if lim_jsval.type == 'number' else None
-                parts = s.split(sep, lim) if sep is not None else list(s)
+                if sep is None:
+                    parts = list(s)
+                elif sep == '':
+                    # JS: "abc".split("") → ["a","b","c"]
+                    parts = list(s)
+                elif lim is None:
+                    parts = s.split(sep)
+                else:
+                    parts = s.split(sep, lim)
                 if lim is not None: parts = parts[:lim]
                 return py_to_js(parts)
             if name == 'replace':

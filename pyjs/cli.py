@@ -128,7 +128,7 @@ def _load_source(args: argparse.Namespace) -> tuple[str | None, str]:
     if args.file:
         path = Path(args.file)
         return path.read_text(encoding='utf-8'), str(path)
-    if args.no_demo:
+    if args.no_demo or getattr(args, 'repl', False):
         return None, ''
     return DEMO_SOURCE, '<demo>'
 
