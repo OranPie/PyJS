@@ -19,6 +19,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .core import JSTypeError, js_to_py, py_to_js
+from .plugin import PyJSPlugin, PluginContext
 from .lexer import Lexer
 from .parser import N, Parser
 from .trace import configure as _configure_trace, get_logger
@@ -63,7 +64,7 @@ class Interpreter:
     MAX_CALL_DEPTH = 200
     MAX_EXEC_STEPS = 10_000_000
 
-    def __init__(self, log_level: str | None = None):
+    def __init__(self, log_level: str | None = None, plugins: list | None = None):
         _configure_trace(log_level)
         # Ensure Python's recursion limit can accommodate our JS call depth
         _min_py_limit = self.MAX_CALL_DEPTH * 6
@@ -87,16 +88,49 @@ class Interpreter:
         self._module_loader = None
         self._module_file: str | None = None
         self._module_url: str | None = None
+        self._plugins: list[PyJSPlugin] = []
+        self._plugin_contexts: list[PluginContext] = []
+        self._plugin_methods: dict = {}
+        if plugins:
+            for plugin in plugins:
+                self.use(plugin)
+
+
+    def use(self, plugin: PyJSPlugin) -> 'Interpreter':
+        """Register a plugin with this interpreter.
+
+        The plugin's setup() method is called immediately.
+        Returns self for chaining: interp.use(A()).use(B())
+        """
+        ctx = PluginContext(self)
+        self._plugins.append(plugin)
+        self._plugin_contexts.append(ctx)
+        plugin.setup(ctx)
+        # Sync any new bindings with globalThis
+        if hasattr(self, '_global_object'):
+            for name in ctx._registered_globals:
+                if name in self.genv.bindings:
+                    self._global_object.value[name] = self.genv.bindings[name][1]
+        return self
 
 
     def _make_intrinsic(self, fn, name='?'):
+        _self = self  # capture interpreter for closure
         def wrapper(this_val, args, interp):
             try:
                 return fn(this_val, args, interp)
-            except (_JSReturn, _JSError):
+            except (_JSReturn, _JSError, _JSBreak, _JSContinue):
                 raise
+            except TypeError as exc:
+                raise _JSError(_self._make_js_error('TypeError', str(exc)))
+            except ValueError as exc:
+                raise _JSError(_self._make_js_error('RangeError', str(exc)))
+            except (KeyError, IndexError) as exc:
+                raise _JSError(_self._make_js_error('ReferenceError', str(exc)))
+            except OverflowError as exc:
+                raise _JSError(_self._make_js_error('RangeError', str(exc)))
             except Exception as exc:
-                raise _JSError(py_to_js(str(exc)))
+                raise _JSError(_self._make_js_error('Error', str(exc)))
         return JsValue("intrinsic", {"fn": wrapper, "name": name})
 
     def _is_callable(self, value):
@@ -331,6 +365,11 @@ class Interpreter:
                 ),
                 'Promise.finally',
             )
+        # Check plugin-registered methods
+        plugin_key = ('promise', name)
+        if self._plugin_methods and plugin_key in self._plugin_methods:
+            handler = self._plugin_methods[plugin_key]
+            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), name)
         return UNDEFINED
 
     def _promise_all(self, values):
@@ -558,7 +597,7 @@ class Interpreter:
         if v.type == 'undefined': return float('nan')
         if v.type == 'string':
             try: return float(v.value.strip() or 0)
-            except: return float('nan')
+            except (ValueError, TypeError, OverflowError): return float('nan')
         return float('nan')
 
     def _to_str(self, v: JsValue) -> str:
@@ -938,6 +977,11 @@ class Interpreter:
                 pass
             if obj.extras and key in obj.extras:
                 return obj.extras[key]
+            # Check plugin-registered methods
+            plugin_key = ('array', key)
+            if self._plugin_methods and plugin_key in self._plugin_methods:
+                handler = self._plugin_methods[plugin_key]
+                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
             return UNDEFINED
         if obj.type == 'string':
             if key == 'length':
@@ -966,10 +1010,20 @@ class Interpreter:
                     return JsValue("string", obj.value[idx])
             except ValueError:
                 pass
+            # Check plugin-registered methods
+            plugin_key = ('string', key)
+            if self._plugin_methods and plugin_key in self._plugin_methods:
+                handler = self._plugin_methods[plugin_key]
+                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
             return UNDEFINED
         if obj.type == 'promise':
             if key in self.PROMISE_METHODS:
                 return self._promise_method(obj, key)
+            # Check plugin-registered methods
+            plugin_key = ('promise', key)
+            if self._plugin_methods and plugin_key in self._plugin_methods:
+                handler = self._plugin_methods[plugin_key]
+                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
             return UNDEFINED
         if obj.type in ('object', 'function', 'intrinsic', 'class'):
             # WeakRef: deref() returns stored target
@@ -1065,10 +1119,20 @@ class Interpreter:
             if obj.type in ('function', 'intrinsic') and key == 'toString':
                 name = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
                 return self._make_intrinsic(lambda tv, a, i, n=name: JsValue('string', f'function {n}() {{ [native code] }}'), 'Function.toString')
+            # Check plugin-registered methods for object type
+            plugin_key = ('object', key)
+            if self._plugin_methods and plugin_key in self._plugin_methods:
+                handler = self._plugin_methods[plugin_key]
+                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
             return UNDEFINED
         if obj.type == 'number':
             if key in self.NUMBER_METHODS:
                 return self._num_method(obj, key)
+            # Check plugin-registered methods
+            plugin_key = ('number', key)
+            if self._plugin_methods and plugin_key in self._plugin_methods:
+                handler = self._plugin_methods[plugin_key]
+                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
         if obj.type == 'symbol':
             sym_str = self._to_str(obj)
             if key == 'toString':
@@ -1166,7 +1230,7 @@ class Interpreter:
                 idx = int(key)
                 if 0 <= idx < len(obj.value):
                     obj.value[idx] = UNDEFINED; return True
-            except: pass
+            except (ValueError, TypeError): pass
         return False
 
     # --------------------------------------------------------- built-in methods
@@ -1415,6 +1479,10 @@ class Interpreter:
                 if 0 <= idx < len(copy):
                     copy[idx] = val
                 return JsValue('array', copy)
+            # Check plugin-registered methods
+            plugin_key = ('array', name)
+            if interp._plugin_methods and plugin_key in interp._plugin_methods:
+                return interp._plugin_methods[plugin_key](this_val, args, interp)
             return UNDEFINED
         return JsValue("intrinsic", {"fn": fn, "name": f"Array.{name}"})
 
@@ -1698,6 +1766,10 @@ class Interpreter:
             if name == 'codePointAt':
                 i = int(interp._to_num(args[0])) if args else 0
                 return JsValue("number", ord(s[i]) if 0 <= i < len(s) else float('nan'))
+            # Check plugin-registered methods
+            plugin_key = ('string', name)
+            if interp._plugin_methods and plugin_key in interp._plugin_methods:
+                return interp._plugin_methods[plugin_key](this_val, args, interp)
             return UNDEFINED
         return JsValue("intrinsic", {"fn": fn, "name": f"String.{name}"})
 
@@ -1739,6 +1811,10 @@ class Interpreter:
                 return JsValue("string", str(n))
             if name == 'valueOf':
                 return nval
+            # Check plugin-registered methods
+            plugin_key = ('number', name)
+            if interp._plugin_methods and plugin_key in interp._plugin_methods:
+                return interp._plugin_methods[plugin_key](this_val, args, interp)
             return UNDEFINED
         return JsValue("intrinsic", {"fn": fn, "name": f"Number.{name}"})
 
@@ -2676,17 +2752,22 @@ class Interpreter:
                         else:
                             catch_env.declare(param, e.value, 'let')
                     self._exec(handler["body"], catch_env)
-            except Exception:
+            except (_JSReturn, _JSBreak, _JSContinue):
+                raise
+            except Exception as e:
                 handler = node.get("handler")
                 if handler:
                     catch_env = Environment(env)
                     param = handler.get("param")
+                    err_val = self._make_js_error('Error', str(e))
                     if param:
                         if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
-                            self._bind_pattern(param, py_to_js("Python exception"), catch_env, 'let', True)
+                            self._bind_pattern(param, err_val, catch_env, 'let', True)
                         else:
-                            catch_env.declare(param, py_to_js("Python exception"), 'let')
+                            catch_env.declare(param, err_val, 'let')
                     self._exec(handler["body"], catch_env)
+                else:
+                    raise
             finally:
                 if node.get("finalizer"):
                     self._exec(node["finalizer"], env)

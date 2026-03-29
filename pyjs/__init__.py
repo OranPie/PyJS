@@ -9,6 +9,7 @@ from .values import JsValue, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE
 from .environment import Environment
 from .runtime import Interpreter
 from .modules import ModuleLoader
+from .plugin import PyJSPlugin, PluginContext
 
 
 __all__ = [
@@ -21,6 +22,8 @@ __all__ = [
     'ModuleLoader',
     'N',
     'Parser',
+    'PluginContext',
+    'PyJSPlugin',
     'Token',
     'UNDEFINED',
     'JsValue',
