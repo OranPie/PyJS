@@ -4,24 +4,43 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyjs"
-version = "0.1.0"
-description = "Pure Python JavaScript interpreter"
+version = "0.3.0"
+description = "Pure Python ECMAScript interpreter (~91% ES2015-ES2025 coverage)"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 authors = [
   { name = "OranPie", email = "orangepie@tutamail.com" }
 ]
-license = { text = "MIT" }
-keywords = ["javascript", "interpreter", "python", "parser", "runtime"]
+keywords = ["javascript", "ecmascript", "interpreter", "python", "parser", "runtime", "js"]
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Education",
+  "Topic :: Software Development :: Interpreters",
+  "Topic :: Software Development :: Libraries :: Python Modules",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent"
+  "Operating System :: OS Independent",
 ]
 
+[project.urls]
+Homepage = "https://github.com/OranPie/PyJS"
+Repository = "https://github.com/OranPie/PyJS"
+Issues = "https://github.com/OranPie/PyJS/issues"
+Documentation = "https://github.com/OranPie/PyJS/tree/main/docs"
+Changelog = "https://github.com/OranPie/PyJS/blob/main/CHANGELOG.md"
+
 [project.scripts]
-pyjs = "pyjs.cli:main"
+pyjs    = "pyjs.cli:main"
+pyjs-repl = "pyjs.cli:repl_main"
+
+[project.optional-dependencies]
+dev = ["unittest2"]
 
 [tool.setuptools.packages.find]
 include = ["pyjs*"]

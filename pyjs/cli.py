@@ -93,3 +93,21 @@ def main(argv: list[str] | None = None) -> int:
     if source is None and not args.repl:
         parser.print_help()
     return 0
+
+
+def repl_main(argv: list[str] | None = None) -> int:
+    """Entry point for the ``pyjs-repl`` command — starts REPL immediately."""
+    import argparse
+    parser = argparse.ArgumentParser(description='PyJS interactive REPL (Node.js-style)')
+    parser.add_argument('--log-level', metavar='LEVEL', default=None,
+                        help='Set logging level (TRACE, DEBUG, INFO, WARNING)')
+    parser.add_argument('--log-filter', metavar='LOGGERS', default=None,
+                        help='Comma-separated loggers to show (e.g. call,scope)')
+    args = parser.parse_args(argv)
+
+    if args.log_level or args.log_filter:
+        from .trace import configure as _ct
+        _ct(level=args.log_level, log_filter=args.log_filter)
+
+    repl(log_level=args.log_level)
+    return 0

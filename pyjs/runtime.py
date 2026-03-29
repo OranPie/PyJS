@@ -3923,12 +3923,20 @@ class Interpreter:
     # --------------------------------------------------------- main run
     def run(self, source: str) -> str:
         self._exec_steps = 0
+        self._last_value = None
         start = len(self.output)
         try:
             tokens = Lexer(source).tokenize()
             ast = Parser(tokens).parse()
-            self._exec(ast, self.genv)
-            self._run_event_loop()
+            # Track last expression value for REPL display
+            body = ast.get('body', [])
+            if (len(body) == 1 and
+                    body[0].get('type') == 'ExpressionStatement'):
+                self._last_value = self._eval(body[0]['expression'], self.genv)
+                self._run_event_loop()
+            else:
+                self._exec(ast, self.genv)
+                self._run_event_loop()
         except _JSReturn:
             pass
         except _JSError as e:

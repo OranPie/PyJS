@@ -1634,7 +1634,8 @@ console.log(orig[0] + '|' + copy[0] + '|' + copy.length);
         """Loggers produce output at DEBUG level."""
         import logging
         from pyjs.trace import get_logger
-        logger = get_logger("exec")
+        # Use "eval" logger since expression statements go through _eval
+        logger = get_logger("eval")
         handler = logging.Handler()
         records = []
         handler.emit = lambda r: records.append(r)
@@ -1644,7 +1645,7 @@ console.log(orig[0] + '|' + copy[0] + '|' + copy.length);
         try:
             Interpreter(log_level="DEBUG").run("1 + 2")
             self.assertTrue(len(records) > 0)
-            self.assertTrue(any("exec" in r.getMessage() for r in records))
+            self.assertTrue(any("eval" in r.getMessage() or "BinaryExpression" in r.getMessage() for r in records))
         finally:
             logger.removeHandler(handler)
             logger.setLevel(old_level)
