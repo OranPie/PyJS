@@ -94,58 +94,72 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
     Features:
     - Multi-line input (continues when braces/brackets/parens are unclosed)
     - Prints expression values automatically (like Node.js)
-    - Tab completion for globals
-    - .help  .exit  .clear  .break  .load <file>  .save <file>  .version commands
-    - Readline history
+    - Full JS error tracebacks with stack frames
+    - Python internal error tracebacks (set PYJS_DEBUG=1 or --log-level DEBUG)
+    - Tab completion for globals and JS keywords
+    - Persistent readline history (~/.pyjs_history)
+    - Dot commands: .help .exit .clear .break .load .save .version .stack
     """
     import sys
     import os
-    import traceback
+    import io
+    import contextlib
+    import traceback as _traceback_mod
 
     try:
-        import readline
-        import rlcompleter  # noqa: F401
+        import readline as _readline
         _has_readline = True
     except ImportError:
         _has_readline = False
+
+    _use_color = sys.stdout.isatty()
+    _use_color_err = sys.stderr.isatty()
+
+    # ANSI helpers
+    def _ansi(code: str, text: str, enabled: bool = True) -> str:
+        if not enabled:
+            return text
+        codes = {'red': '31', 'green': '32', 'yellow': '33', 'cyan': '36',
+                 'dim': '2', 'bold': '1', 'reset': '0', 'magenta': '35', 'blue': '34'}
+        return f"\033[{codes.get(code, code)}m{text}\033[0m"
 
     interp = Interpreter(log_level=log_level, plugins=plugins or [])
 
     # ── Tab completion ────────────────────────────────────────────────
     if _has_readline:
         def _completer(text: str, state: int) -> str | None:
-            try:
-                env = interp._global_env
-            except AttributeError:
-                env = interp.genv
+            env = interp.genv
             names = list(env.bindings.keys())
-            # Also add JS keywords
-            names += ['function', 'class', 'const', 'let', 'var', 'return',
-                      'if', 'else', 'for', 'while', 'do', 'switch', 'case',
-                      'break', 'continue', 'throw', 'try', 'catch', 'finally',
-                      'new', 'delete', 'typeof', 'instanceof', 'void',
-                      'true', 'false', 'null', 'undefined', 'this',
-                      'async', 'await', 'import', 'export', 'from', 'of',
-                      '.help', '.exit', '.clear', '.break', '.load', '.save', '.version']
+            names += [
+                'function', 'class', 'const', 'let', 'var', 'return',
+                'if', 'else', 'for', 'while', 'do', 'switch', 'case',
+                'break', 'continue', 'throw', 'try', 'catch', 'finally',
+                'new', 'delete', 'typeof', 'instanceof', 'void',
+                'true', 'false', 'null', 'undefined', 'this',
+                'async', 'await', 'import', 'export', 'from', 'of', 'in',
+                '.help', '.exit', '.clear', '.break', '.load ', '.save ',
+                '.version', '.stack',
+            ]
             matches = [n for n in names if n.startswith(text)]
             return matches[state] if state < len(matches) else None
 
-        readline.set_completer(_completer)
-        readline.parse_and_bind("tab: complete")
+        _readline.set_completer(_completer)
+        _readline.parse_and_bind("tab: complete")
 
-        # History file
         history_file = os.path.expanduser("~/.pyjs_history")
         try:
-            readline.read_history_file(history_file)
+            _readline.read_history_file(history_file)
+            _readline.set_history_length(2000)
         except FileNotFoundError:
             pass
 
     # ── REPL helpers ─────────────────────────────────────────────────
     def _count_balance(code: str) -> int:
-        """Return open-bracket depth (>0 means incomplete input)."""
+        """Return net open-bracket count (>0 means input is incomplete)."""
         depth = 0
         in_str: str | None = None
         escape = False
+        in_tpl = 0  # template literal nesting
         for ch in code:
             if escape:
                 escape = False
@@ -153,10 +167,15 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
             if ch == '\\' and in_str:
                 escape = True
                 continue
+            if in_str == '`':
+                if ch == '`':
+                    in_str = None
+                continue
             if in_str:
                 if ch == in_str:
                     in_str = None
-            elif ch in ('"', "'", '`'):
+                continue
+            if ch in ('"', "'", '`'):
                 in_str = ch
             elif ch in ('{', '[', '('):
                 depth += 1
@@ -164,49 +183,78 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
                 depth -= 1
         return depth
 
-    def _format_value(val_str: str) -> str:
-        """Colorise output like Node.js (basic ANSI if terminal)."""
-        if not sys.stdout.isatty():
-            return val_str
-        # Number
-        try:
-            float(val_str)
-            return f"\033[33m{val_str}\033[0m"  # yellow
-        except (ValueError, TypeError):
-            pass
-        if val_str in ('true', 'false'):
-            return f"\033[33m{val_str}\033[0m"  # yellow
-        if val_str in ('null', 'undefined'):
-            return f"\033[2m{val_str}\033[0m"   # dim
-        if val_str.startswith(("'", '"', '`')):
-            return f"\033[32m{val_str}\033[0m"  # green
-        return val_str
-
     def _save_history() -> None:
         if _has_readline:
             try:
-                readline.write_history_file(history_file)
+                _readline.write_history_file(history_file)
             except Exception:
                 pass
+
+    def _print_error(text: str) -> None:
+        """Print error text to stderr (red if TTY)."""
+        print(_ansi('red', text, _use_color_err), file=sys.stderr)
+
+    def _print_dim(text: str) -> None:
+        print(_ansi('dim', text, _use_color_err), file=sys.stderr)
+
+    def _format_js_error(last_error: dict, *, verbose: bool = False) -> str:
+        """Format a JS or internal error for REPL display."""
+        lines = []
+        if last_error.get('js_error'):
+            err_type = last_error.get('error_type', 'Error')
+            msg = last_error.get('message', '')
+            # Main error line
+            lines.append(_ansi('red', f"{err_type}: {msg}", _use_color_err))
+            # Stack frames (everything after the first line in .stack)
+            stack = last_error.get('stack', '')
+            if stack:
+                frame_lines = stack.split('\n')[1:]  # skip "ErrorType: msg"
+                for fl in frame_lines:
+                    if fl.strip():
+                        lines.append(_ansi('dim', f"  {fl.strip()}", _use_color_err))
+        else:
+            # Internal Python error
+            err_type = last_error.get('error_type', 'InternalError')
+            msg = last_error.get('message', '')
+            lines.append(_ansi('red', f"InternalError ({err_type}): {msg}", _use_color_err))
+            if verbose or os.environ.get('PYJS_DEBUG'):
+                tb = last_error.get('python_traceback', '')
+                if tb:
+                    lines.append(_ansi('dim', 'Python traceback:', _use_color_err))
+                    for tbl in tb.strip().splitlines():
+                        lines.append(_ansi('dim', f"  {tbl}", _use_color_err))
+            else:
+                lines.append(_ansi('dim',
+                    '  (set PYJS_DEBUG=1 or use --log-level DEBUG for full Python traceback)',
+                    _use_color_err))
+        return '\n'.join(lines)
+
+    from .inspect_val import js_inspect
+    from .values import UNDEFINED as _UNDEF
+
+    _verbose_errors = bool(os.environ.get('PYJS_DEBUG')) or (log_level or '').upper() in ('DEBUG', 'TRACE')
 
     WELCOME = (
         f"Welcome to PyJS v{__version__} (ECMAScript 2015-2025)\n"
         f"Type JavaScript code to evaluate. Special commands:\n"
-        f"  .help    — show this help\n"
-        f"  .exit    — exit the REPL\n"
-        f"  .clear   — reset interpreter state\n"
-        f"  .break   — abort multi-line input\n"
-        f"  .load <file> — load and run a JS file\n"
-        f"  .save <file> — save session history to a JS file\n"
-        f"  .version — show version info\n"
+        f"  .help         — show this help\n"
+        f"  .exit         — exit the REPL\n"
+        f"  .clear        — reset interpreter state\n"
+        f"  .break        — abort multi-line input\n"
+        f"  .stack        — show current JS call stack\n"
+        f"  .load <file>  — load and run a JS file\n"
+        f"  .save <file>  — save session history to a JS file\n"
+        f"  .version      — show version info\n"
+        f"Set PYJS_DEBUG=1 for full Python tracebacks on internal errors."
     )
     print(WELCOME)
+    print()
 
     buffer: list[str] = []
     session_lines: list[str] = []
 
     while True:
-        prompt = "... " if buffer else "> "
+        prompt = _ansi('dim', '... ', _use_color) if buffer else _ansi('bold', '> ', _use_color)
         try:
             line = input(prompt)
         except (EOFError, KeyboardInterrupt):
@@ -221,7 +269,7 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
         # ── Dot commands ─────────────────────────────────────────────
         stripped = line.strip()
 
-        if stripped == '.exit' or stripped in ('quit', 'exit'):
+        if stripped in ('.exit', 'quit', 'exit'):
             _save_history()
             break
 
@@ -230,8 +278,6 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
             continue
 
         if stripped == '.clear':
-            interp.__class__(log_level=log_level, plugins=plugins or [])
-            # Reinitialise interpreter in-place is tricky; recreate instead
             interp = Interpreter(log_level=log_level, plugins=plugins or [])
             print("Interpreter state cleared.")
             buffer.clear()
@@ -243,29 +289,51 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
             continue
 
         if stripped == '.version':
-            print(f"PyJS v{__version__} — Python {sys.version.split()[0]}")
+            import platform
+            print(f"PyJS v{__version__} — Python {platform.python_version()} "
+                  f"[{platform.python_implementation()}]")
+            continue
+
+        if stripped == '.stack':
+            stack = interp._js_call_stack if hasattr(interp, '_js_call_stack') else []
+            if stack:
+                print("Current JS call stack:")
+                for i, f in enumerate(reversed(stack)):
+                    print(f"  #{i}  {f['name']} ({f['file']}:{f['line']})")
+            else:
+                print("(empty call stack)")
             continue
 
         if stripped.startswith('.load '):
             load_path = stripped[6:].strip()
             try:
                 src = Path(load_path).read_text(encoding='utf-8')
-                interp.run(src)
-                session_lines.append(f"// .load {load_path}")
-                session_lines.append(src)
+                stdout_buf = io.StringIO()
+                with contextlib.redirect_stdout(stdout_buf):
+                    interp.run(src)
+                printed = stdout_buf.getvalue()
+                if printed:
+                    print(printed, end='' if printed.endswith('\n') else '\n')
+                if interp._last_error:
+                    print(_format_js_error(interp._last_error, verbose=_verbose_errors),
+                          file=sys.stderr)
+                else:
+                    session_lines.append(f"// .load {load_path}\n{src}")
             except FileNotFoundError:
-                print(f"Error: file not found: {load_path}")
+                _print_error(f"Error: file not found: {load_path}")
             except Exception as exc:
-                print(f"Error: {exc}")
+                _print_error(f"Error loading file: {exc}")
+                if _verbose_errors:
+                    _traceback_mod.print_exc(file=sys.stderr)
             continue
 
         if stripped.startswith('.save '):
             save_path = stripped[6:].strip()
             try:
-                Path(save_path).write_text('\n'.join(session_lines), encoding='utf-8')
+                Path(save_path).write_text('\n\n'.join(session_lines), encoding='utf-8')
                 print(f"Session saved to {save_path}")
             except Exception as exc:
-                print(f"Error saving: {exc}")
+                _print_error(f"Error saving: {exc}")
             continue
 
         # ── Multi-line accumulation ───────────────────────────────────
@@ -273,10 +341,8 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
         code = '\n'.join(buffer)
 
         if _count_balance(code) > 0:
-            # Still open — keep reading
             continue
 
-        # Ends with backslash continuation?
         if line.endswith('\\'):
             buffer[-1] = line[:-1]
             continue
@@ -290,64 +356,78 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
 
         session_lines.append(source)
 
+        # Determine if this is a pure expression (to print its value).
+        # If source starts with `{`, try wrapping in `(...)` first
+        # (handles object literals and blocks ambiguity like Node.js).
+        is_expr = False
+        run_source = source
         try:
-            # Wrap in parens to allow expression statements like {a:1} or functions
-            # Try as expression first to get a printable result
-            is_expr = True
-            try:
-                from .parser import Parser as _Parser
-                from .lexer import Lexer as _Lexer
-                ast = _Parser(_Lexer(source).tokenize()).parse()
-                body = ast.get('body', [])
-                # If single ExpressionStatement, print its value
-                if (len(body) == 1 and
-                        body[0].get('type') == 'ExpressionStatement' and
-                        body[0].get('expression', {}).get('type') not in
-                        ('AssignmentExpression',)):
-                    pass  # will print result
-                else:
-                    is_expr = False
-            except Exception:
-                is_expr = False
+            from .parser import Parser as _Parser
+            from .lexer import Lexer as _Lexer
 
-            # Always run through interpreter
-            # Capture printed output separately from expression value
-            import io, contextlib
+            def _try_parse(src: str):
+                return _Parser(_Lexer(src).tokenize()).parse()
+
+            # Try original source first
+            try:
+                _ast = _try_parse(source)
+                _body = _ast.get('body', [])
+                if (len(_body) == 1 and
+                        _body[0].get('type') == 'ExpressionStatement' and
+                        _body[0].get('expression', {}).get('type') != 'AssignmentExpression'):
+                    is_expr = True
+            except SyntaxError:
+                if source.startswith('{') and source.endswith('}'):
+                    # Try as parenthesised expression
+                    try:
+                        wrapped = f"({source})"
+                        _ast2 = _try_parse(wrapped)
+                        _body2 = _ast2.get('body', [])
+                        if (len(_body2) == 1 and
+                                _body2[0].get('type') == 'ExpressionStatement'):
+                            run_source = wrapped
+                            is_expr = True
+                    except SyntaxError:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            # Redirect stdout to capture console.log output
             stdout_buf = io.StringIO()
             with contextlib.redirect_stdout(stdout_buf):
-                interp.run(source)
+                interp.run(run_source)
+
             printed = stdout_buf.getvalue()
             if printed:
                 print(printed, end='' if printed.endswith('\n') else '\n')
 
-            # For expression statements: also display the last evaluated value
-            if is_expr:
-                try:
-                    from .values import UNDEFINED as _UNDEF
-                    last = interp._last_value if hasattr(interp, '_last_value') else None
-                    if last is not None and last is not _UNDEF:
-                        val_str = interp._to_str(last)
-                        # For objects/arrays, use JSON-like inspect
-                        if last.type in ('object', 'array', 'function', 'intrinsic', 'class'):
-                            try:
-                                import json
-                                from .core import js_to_py
-                                py_val = js_to_py(last)
-                                val_str = json.dumps(py_val, default=str, ensure_ascii=False)
-                            except Exception:
-                                pass
-                        print(_format_value(val_str))
-                except Exception:
-                    pass
+            # ── Error display ─────────────────────────────────────────
+            if interp._last_error:
+                print(_format_js_error(interp._last_error, verbose=_verbose_errors),
+                      file=sys.stderr)
+
+            # ── Value display ─────────────────────────────────────────
+            elif is_expr:
+                last = getattr(interp, '_last_value', None)
+                if last is not None:
+                    result_str = js_inspect(last, interp, depth=3, colors=_use_color)
+                    print(result_str)
 
         except SystemExit:
             raise
         except KeyboardInterrupt:
-            print("\n(interrupted)")
+            print(_ansi('yellow', '\n(interrupted)', _use_color))
+            buffer.clear()
         except Exception as exc:
-            print(f"Uncaught exception: {exc}")
-            if os.environ.get('PYJS_REPL_TRACEBACK'):
-                traceback.print_exc()
+            # Unexpected Python exception from the REPL machinery itself
+            _print_error(f"InternalError: {exc}")
+            if _verbose_errors:
+                _traceback_mod.print_exc(file=sys.stderr)
+            else:
+                _print_dim("  (set PYJS_DEBUG=1 for full traceback)")
 
-    print("(To exit, press Ctrl+C again or type .exit)")
+    print(_ansi('dim', '(bye)', _use_color))
+
+
 

@@ -125,10 +125,21 @@ def register_promise_builtins(interp, g, intr):
         def _ctor(args, interp):
             msg = args[0] if args else UNDEFINED
             opts = args[1] if len(args) > 1 else UNDEFINED
+            msg_str = interp._to_str(msg) if msg.type != 'undefined' else ''
+            # Build stack trace from live call stack
+            frames = list(reversed(interp._js_call_stack))
+            if frames:
+                frame_lines = '\n'.join(
+                    f"    at {f['name']} ({f['file']}:{f['line']})"
+                    for f in frames
+                )
+                stack_str = f"{err_name}: {msg_str}\n{frame_lines}"
+            else:
+                stack_str = f"{err_name}: {msg_str}"
             obj = JsValue('object', {
-                'message': msg if msg.type != 'undefined' else py_to_js(''),
+                'message': py_to_js(msg_str),
                 'name': py_to_js(err_name),
-                'stack': py_to_js(f"{err_name}: {interp._to_str(msg) if msg.type != 'undefined' else ''}"),
+                'stack': py_to_js(stack_str),
                 '__error_type__': py_to_js(err_name),
             })
             if opts and opts.type == 'object' and 'cause' in opts.value:

@@ -94,6 +94,7 @@ def register_core_builtins(interp, g, intr):
     g.declare('atob', intr(_atob, 'atob'), 'var')
 
     # -- console --
+    import sys as _sys
     console = JsValue("object", {})
     def _log(args, interp):
         parts = [interp._to_str(a) for a in args]
@@ -101,11 +102,19 @@ def register_core_builtins(interp, g, intr):
         indent = '  ' * interp._console_indent
         interp.output.append(indent + line)
         print(indent + line)
+    def _log_stderr(args, interp, prefix=''):
+        parts = [interp._to_str(a) for a in args]
+        line = ' '.join(parts)
+        indent = '  ' * interp._console_indent
+        full = indent + (prefix + line if prefix else line)
+        print(full, file=_sys.stderr)
     def _make_log_method(fn_name):
         return intr(lambda a,i: _log(a,i), fn_name)
+    def _make_stderr_method(fn_name, prefix=''):
+        return intr(lambda a,i: _log_stderr(a,i,prefix), fn_name)
     console.value['log']   = _make_log_method('log')
-    console.value['error'] = _make_log_method('error')
-    console.value['warn']  = _make_log_method('warn')
+    console.value['error'] = _make_stderr_method('error')
+    console.value['warn']  = _make_stderr_method('warn', 'Warning: ')
     console.value['info']  = _make_log_method('info')
     console.value['table'] = _make_log_method('table')
     def _assert(args, interp):

@@ -99,6 +99,10 @@ class Interpreter:
         self._plugins: list[PyJSPlugin] = []
         self._plugin_contexts: list[PluginContext] = []
         self._plugin_methods: dict = {}
+        # JS call stack frames for error.stack traces: list of {'name': str, 'file': str, 'line': int}
+        self._js_call_stack: list = []
+        # Last error from run() — set on JS throw or internal Python error
+        self._last_error: dict | None = None
         if plugins:
             for plugin in plugins:
                 self.use(plugin)
@@ -606,11 +610,21 @@ class Interpreter:
             raise _JSError(self._make_js_error('RangeError', 'Execution step limit exceeded (possible infinite loop)'))
 
     # --------------------------------------------------------- error helpers
-    def _make_js_error(self, name, msg):
+    def _make_js_error(self, name: str, msg: str) -> JsValue:
+        """Build a JS Error object with name, message and stack trace."""
+        frames = list(reversed(self._js_call_stack))
+        if frames:
+            frame_lines = '\n'.join(
+                f"    at {f['name']} ({f['file']}:{f['line']})"
+                for f in frames
+            )
+            stack_str = f"{name}: {msg}\n{frame_lines}"
+        else:
+            stack_str = f"{name}: {msg}"
         return JsValue('object', {
             'message': py_to_js(msg),
             'name': py_to_js(name),
-            'stack': py_to_js(f"{name}: {msg}"),
+            'stack': py_to_js(stack_str),
             '__error_type__': py_to_js(name),
         })
 
@@ -700,6 +714,12 @@ class Interpreter:
         if v.type == 'proxy':     return self._to_str(v.value.target)
         if v.type in ('object', 'function', 'intrinsic', 'class'):
             if isinstance(v.value, dict):
+                # Error objects → "ErrorType: message"
+                err_type = v.value.get('__error_type__')
+                if isinstance(err_type, JsValue) and err_type.type == 'string':
+                    msg = v.value.get('message')
+                    msg_str = msg.value if isinstance(msg, JsValue) else ''
+                    return f"{err_type.value}: {msg_str}"
                 kind = v.value.get('__kind__')
                 if isinstance(kind, JsValue) and kind.value == 'Generator':
                     return '[object Generator]'
@@ -3253,11 +3273,19 @@ class Interpreter:
         if op == "/":
             if l.type == "bigint" and r.type == "bigint":
                 return JsValue("bigint", l.value // r.value) if r.value != 0 else JsValue("bigint", 0)
-            return JsValue("number", self._to_num(l) / self._to_num(r))
+            lv, rv = self._to_num(l), self._to_num(r)
+            if rv == 0:
+                if lv == 0 or (isinstance(lv, float) and math.isnan(lv)):
+                    return JsValue("number", float('nan'))
+                return JsValue("number", math.copysign(float('inf'), lv * rv if rv != 0 else lv))
+            return JsValue("number", lv / rv)
         if op == "%":
             if l.type == "bigint" and r.type == "bigint":
                 return JsValue("bigint", l.value % r.value)
-            return JsValue("number", self._to_num(l) % self._to_num(r))
+            lv, rv = self._to_num(l), self._to_num(r)
+            if rv == 0 or (isinstance(lv, float) and math.isnan(lv)):
+                return JsValue("number", float('nan'))
+            return JsValue("number", math.fmod(lv, rv))
         if op == "**":
             if l.type == "bigint" and r.type == "bigint":
                 return JsValue("bigint", l.value ** r.value)
@@ -3819,11 +3847,16 @@ class Interpreter:
             self._call_depth -= 1
             pop_depth()
             raise _JSError(self._make_js_error('RangeError', 'Maximum call stack size exceeded'))
+        # Push JS call stack frame for error.stack traces
+        frame = {'name': fn_name, 'file': self._module_file or '<anonymous>', 'line': 0}
+        self._js_call_stack.append(frame)
         _call_result = None
         try:
             _call_result = self._call_js_impl(fn_val, args, this_val, extra_args, is_new_call)
             return _call_result
         finally:
+            if self._js_call_stack and self._js_call_stack[-1] is frame:
+                self._js_call_stack.pop()
             self._call_depth -= 1
             if _log_call.isEnabledFor(TRACE):
                 _log_call.log(TRACE, "← %s = %s", fn_name, self._to_str(_call_result)[:80] if _call_result is not None else "undefined")
@@ -3922,8 +3955,11 @@ class Interpreter:
 
     # --------------------------------------------------------- main run
     def run(self, source: str) -> str:
+        import sys as _sys
         self._exec_steps = 0
         self._last_value = None
+        self._last_error = None
+        self._js_call_stack.clear()
         start = len(self.output)
         try:
             tokens = Lexer(source).tokenize()
@@ -3940,11 +3976,44 @@ class Interpreter:
         except _JSReturn:
             pass
         except _JSError as e:
-            _log_error.info("uncaught %s", self._to_str(e.value)[:80])
-            self.output.append(f"Error: {self._to_str(e.value)}")
-        except Exception as e:  # Catches non-control-flow errors at top level
-            _log_error.info("uncaught Python error: %s", str(e)[:80])
-            self.output.append(f"Python Error: {e}")
+            err_str = self._to_str(e.value)
+            _log_error.info("uncaught JS error: %s", err_str[:120])
+            # Build structured error info
+            stack_str = ''
+            if isinstance(e.value.value, dict):
+                stack_val = e.value.value.get('stack')
+                stack_str = stack_val.value if isinstance(stack_val, JsValue) and stack_val.type == 'string' else ''
+            err_type = ''
+            if isinstance(e.value.value, dict):
+                t = e.value.value.get('__error_type__')
+                err_type = t.value if isinstance(t, JsValue) else ''
+            msg = ''
+            if isinstance(e.value.value, dict):
+                m = e.value.value.get('message')
+                msg = m.value if isinstance(m, JsValue) else self._to_str(e.value)
+            else:
+                msg = self._to_str(e.value)
+            self._last_error = {
+                'js_error': True,
+                'error_type': err_type or 'Error',
+                'message': msg,
+                'stack': stack_str,
+                'python_exc': None,
+            }
+            self.output.append(f"{err_type or 'Error'}: {msg}" if err_type else f"Error: {msg}")
+        except Exception as e:  # Catches non-control-flow Python errors at top level
+            import traceback as _tb
+            tb_str = _tb.format_exc()
+            _log_error.error("uncaught Python error: %s\n%s", str(e)[:80], tb_str[:500])
+            self._last_error = {
+                'js_error': False,
+                'error_type': type(e).__name__,
+                'message': str(e),
+                'stack': '',
+                'python_exc': e,
+                'python_traceback': tb_str,
+            }
+            self.output.append(f"InternalError: {e}")
         return '\n'.join(self.output[start:])
 
     def run_module(self, source: str) -> None:

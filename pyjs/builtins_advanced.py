@@ -425,6 +425,7 @@ def register_advanced_builtins(interp, g, intr):
             return UNDEFINED
 
         map_obj.value['__kind__'] = JsValue('string', 'Map')
+        map_obj.value['__store__'] = store  # raw list of (key, val) tuples for inspector
         map_obj.value['set'] = intr(_map_set, 'Map.set')
         map_obj.value['get'] = intr(_map_get, 'Map.get')
         map_obj.value['has'] = intr(_map_has, 'Map.has')
@@ -498,6 +499,7 @@ def register_advanced_builtins(interp, g, intr):
             return UNDEFINED
 
         set_obj.value['__kind__'] = JsValue('string', 'Set')
+        set_obj.value['__store__'] = store  # raw list for inspector
         set_obj.value['add'] = intr(_set_add, 'Set.add')
         set_obj.value['has'] = intr(_set_has, 'Set.has')
         set_obj.value['delete'] = intr(_set_delete, 'Set.delete')
