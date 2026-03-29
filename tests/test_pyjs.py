@@ -1805,6 +1805,288 @@ console.log(orig[0] + '|' + copy[0] + '|' + copy.length);
         )
         self.assertEqual(result.strip(), "undefined\n5")
 
+    # ── Phase 20A: Plugin system tests ───────────────────────────────────
+
+    def test_plugin_add_global_function(self):
+        """Plugin can add a global function."""
+        from pyjs.plugin import PyJSPlugin, PluginContext
+        from pyjs.core import py_to_js
+
+        class HelloPlugin(PyJSPlugin):
+            name = "hello"
+            def setup(self, ctx):
+                ctx.add_global('hello', lambda this, args, interp: py_to_js(f"hi {args[0].value}"))
+
+        result = Interpreter(plugins=[HelloPlugin()]).run('console.log(hello("world"))')
+        self.assertEqual(result.strip(), "hi world")
+
+    def test_plugin_add_global_object(self):
+        """Plugin can add a global object with methods."""
+        from pyjs.plugin import PyJSPlugin
+        from pyjs.core import py_to_js
+        from pyjs.values import UNDEFINED
+
+        class MathExtPlugin(PyJSPlugin):
+            name = "math-ext"
+            def setup(self, ctx):
+                ctx.add_global_object('mathExt', {
+                    'double': lambda this, args, interp: py_to_js(args[0].value * 2),
+                    'square': lambda this, args, interp: py_to_js(args[0].value ** 2),
+                })
+
+        result = Interpreter(plugins=[MathExtPlugin()]).run(
+            'console.log(mathExt.double(5), mathExt.square(4))'
+        )
+        self.assertEqual(result.strip(), "10 16")
+
+    def test_plugin_add_method_to_string(self):
+        """Plugin can add a method to String type."""
+        from pyjs.plugin import PyJSPlugin
+        from pyjs.core import py_to_js
+
+        class ShoutPlugin(PyJSPlugin):
+            name = "shout"
+            def setup(self, ctx):
+                ctx.add_method('string', 'shout', lambda this, args, interp: py_to_js(this.value.upper() + "!"))
+
+        result = Interpreter(plugins=[ShoutPlugin()]).run('console.log("hello".shout())')
+        self.assertEqual(result.strip(), "HELLO!")
+
+    def test_plugin_ordering(self):
+        """Plugins are loaded in order; later plugins can see earlier globals."""
+        from pyjs.plugin import PyJSPlugin
+        from pyjs.core import py_to_js
+
+        class PluginA(PyJSPlugin):
+            name = "a"
+            def setup(self, ctx):
+                ctx.add_global('valA', py_to_js(10))
+
+        class PluginB(PyJSPlugin):
+            name = "b"
+            def setup(self, ctx):
+                # Can access interpreter which has valA
+                val = ctx.get_interpreter().genv.get('valA')
+                ctx.add_global('valB', py_to_js(val.value * 2))
+
+        result = Interpreter(plugins=[PluginA(), PluginB()]).run(
+            'console.log(valA, valB)'
+        )
+        self.assertEqual(result.strip(), "10 20")
+
+    def test_plugin_use_chaining(self):
+        """Interpreter.use() returns self for chaining."""
+        from pyjs.plugin import PyJSPlugin
+        from pyjs.core import py_to_js
+
+        class P1(PyJSPlugin):
+            name = "p1"
+            def setup(self, ctx):
+                ctx.add_global('x1', py_to_js(1))
+
+        class P2(PyJSPlugin):
+            name = "p2"
+            def setup(self, ctx):
+                ctx.add_global('x2', py_to_js(2))
+
+        interp = Interpreter().use(P1()).use(P2())
+        result = interp.run('console.log(x1 + x2)')
+        self.assertEqual(result.strip(), "3")
+
+    def test_plugin_repr(self):
+        """Plugin repr is readable."""
+        from pyjs.plugin import PyJSPlugin
+        p = PyJSPlugin()
+        p.name = "test"
+        p.version = "2.0.0"
+        self.assertEqual(repr(p), "<PyJSPlugin test@2.0.0>")
+
+    def test_plugin_make_error(self):
+        """PluginContext.make_error creates a JS error."""
+        from pyjs.plugin import PyJSPlugin, PluginContext
+        from pyjs.exceptions import _JSError
+
+        class ErrorPlugin(PyJSPlugin):
+            name = "error-test"
+            def setup(self, ctx):
+                def throw_custom(this, args, interp):
+                    raise _JSError(ctx.make_error('CustomError', 'something broke'))
+                ctx.add_global('throwCustom', throw_custom)
+
+        result = Interpreter(plugins=[ErrorPlugin()]).run(
+            'try { throwCustom(); } catch(e) { console.log(e.name, e.message); }'
+        )
+        self.assertEqual(result.strip(), "CustomError something broke")
+
+    # ── Phase 20B: First-party plugin tests ──────────────────────────────
+
+    def test_storage_plugin_getitem_setitem(self):
+        """StoragePlugin: getItem/setItem basic CRUD."""
+        from pyjs.plugins.storage import StoragePlugin
+        result = Interpreter(plugins=[StoragePlugin()]).run('''
+            localStorage.setItem('name', 'PyJS');
+            console.log(localStorage.getItem('name'));
+            console.log(localStorage.getItem('nonexistent'));
+        ''')
+        self.assertEqual(result.strip(), "PyJS\nnull")
+
+    def test_storage_plugin_remove_and_clear(self):
+        """StoragePlugin: removeItem and clear."""
+        from pyjs.plugins.storage import StoragePlugin
+        result = Interpreter(plugins=[StoragePlugin()]).run('''
+            localStorage.setItem('a', '1');
+            localStorage.setItem('b', '2');
+            localStorage.removeItem('a');
+            console.log(localStorage.getItem('a'));
+            console.log(localStorage.length());
+            localStorage.clear();
+            console.log(localStorage.length());
+        ''')
+        self.assertEqual(result.strip(), "null\n1\n0")
+
+    def test_storage_plugin_persistence(self):
+        """StoragePlugin: data persists to file."""
+        from pyjs.plugins.storage import StoragePlugin
+        import json
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w') as f:
+            path = f.name
+        try:
+            Interpreter(plugins=[StoragePlugin(persist_path=path)]).run(
+                'localStorage.setItem("saved", "data")'
+            )
+            with open(path) as f:
+                data = json.load(f)
+            self.assertEqual(data.get('saved'), 'data')
+        finally:
+            os.unlink(path)
+
+    def test_storage_plugin_session_is_separate(self):
+        """StoragePlugin: sessionStorage is separate from localStorage."""
+        from pyjs.plugins.storage import StoragePlugin
+        result = Interpreter(plugins=[StoragePlugin()]).run('''
+            localStorage.setItem('x', 'local');
+            sessionStorage.setItem('x', 'session');
+            console.log(localStorage.getItem('x'));
+            console.log(sessionStorage.getItem('x'));
+        ''')
+        self.assertEqual(result.strip(), "local\nsession")
+
+    def test_events_plugin_on_emit(self):
+        """EventEmitterPlugin: on and emit."""
+        from pyjs.plugins.events import EventEmitterPlugin
+        result = Interpreter(plugins=[EventEmitterPlugin()]).run('''
+            const ee = new EventEmitter();
+            ee.on('msg', (val) => console.log('received', val));
+            ee.emit('msg', 'hello');
+        ''')
+        self.assertEqual(result.strip(), "received hello")
+
+    def test_events_plugin_once(self):
+        """EventEmitterPlugin: once fires only once."""
+        from pyjs.plugins.events import EventEmitterPlugin
+        result = Interpreter(plugins=[EventEmitterPlugin()]).run('''
+            const ee = new EventEmitter();
+            ee.once('ping', () => console.log('pong'));
+            ee.emit('ping');
+            ee.emit('ping');
+        ''')
+        self.assertEqual(result.strip(), "pong")
+
+    def test_events_plugin_off(self):
+        """EventEmitterPlugin: off removes listener."""
+        from pyjs.plugins.events import EventEmitterPlugin
+        result = Interpreter(plugins=[EventEmitterPlugin()]).run('''
+            const ee = new EventEmitter();
+            const handler = (v) => console.log(v);
+            ee.on('data', handler);
+            ee.emit('data', 'first');
+            ee.off('data', handler);
+            ee.emit('data', 'second');
+        ''')
+        self.assertEqual(result.strip(), "first")
+
+    def test_events_plugin_listener_count(self):
+        """EventEmitterPlugin: listenerCount."""
+        from pyjs.plugins.events import EventEmitterPlugin
+        result = Interpreter(plugins=[EventEmitterPlugin()]).run('''
+            const ee = new EventEmitter();
+            ee.on('x', () => {});
+            ee.on('x', () => {});
+            console.log(ee.listenerCount('x'));
+        ''')
+        self.assertEqual(result.strip(), "2")
+
+    def test_fs_plugin_read_write(self):
+        """FileSystemPlugin: write and read file."""
+        from pyjs.plugins.fs import FileSystemPlugin
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Interpreter(plugins=[FileSystemPlugin(root=tmp)]).run('''
+                fs.writeFileSync('hello.txt', 'world');
+                console.log(fs.readFileSync('hello.txt'));
+            ''')
+            self.assertEqual(result.strip(), "world")
+
+    def test_fs_plugin_exists_and_unlink(self):
+        """FileSystemPlugin: existsSync and unlinkSync."""
+        from pyjs.plugins.fs import FileSystemPlugin
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Interpreter(plugins=[FileSystemPlugin(root=tmp)]).run('''
+                fs.writeFileSync('tmp.txt', 'data');
+                console.log(fs.existsSync('tmp.txt'));
+                fs.unlinkSync('tmp.txt');
+                console.log(fs.existsSync('tmp.txt'));
+            ''')
+            self.assertEqual(result.strip(), "true\nfalse")
+
+    def test_fs_plugin_sandbox(self):
+        """FileSystemPlugin: path traversal is blocked."""
+        from pyjs.plugins.fs import FileSystemPlugin
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Interpreter(plugins=[FileSystemPlugin(root=tmp)]).run('''
+                try { fs.readFileSync('../../../etc/passwd'); } catch(e) { console.log('blocked'); }
+            ''')
+            self.assertIn("blocked", result.strip())
+
+    def test_fs_plugin_readdir_mkdir(self):
+        """FileSystemPlugin: readdirSync and mkdirSync."""
+        from pyjs.plugins.fs import FileSystemPlugin
+        with tempfile.TemporaryDirectory() as tmp:
+            result = Interpreter(plugins=[FileSystemPlugin(root=tmp)]).run('''
+                fs.mkdirSync('subdir');
+                fs.writeFileSync('subdir/a.txt', 'hello');
+                const files = fs.readdirSync('subdir');
+                console.log(files[0]);
+            ''')
+            self.assertEqual(result.strip(), "a.txt")
+
+    def test_console_ext_assert(self):
+        """ConsoleExtPlugin: console.assert."""
+        from pyjs.plugins.console_ext import ConsoleExtPlugin
+        result = Interpreter(plugins=[ConsoleExtPlugin()]).run('''
+            console.assert(1 === 1, 'this is fine');
+            console.assert(1 === 2, 'math is broken');
+        ''')
+        self.assertIn("math is broken", result)
+        self.assertNotIn("this is fine", result)
+
+    def test_console_ext_trace(self):
+        """ConsoleExtPlugin: console.trace."""
+        from pyjs.plugins.console_ext import ConsoleExtPlugin
+        result = Interpreter(plugins=[ConsoleExtPlugin()]).run('''
+            console.trace('debug info');
+        ''')
+        self.assertIn("Trace", result)
+        self.assertIn("debug info", result)
+
+    def test_fetch_plugin_basic(self):
+        """FetchPlugin: fetch exists and returns a promise-like."""
+        from pyjs.plugins.fetch import FetchPlugin
+        # We can't test actual HTTP, but verify fetch is callable
+        result = Interpreter(plugins=[FetchPlugin()]).run('''
+            console.log(typeof fetch);
+        ''')
+        self.assertIn("function", result.strip())
+
 
 if __name__ == '__main__':
     unittest.main()

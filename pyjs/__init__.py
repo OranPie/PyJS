@@ -10,10 +10,21 @@ from .environment import Environment
 from .runtime import Interpreter
 from .modules import ModuleLoader
 from .plugin import PyJSPlugin, PluginContext
+from .plugins import (
+    StoragePlugin,
+    FetchPlugin,
+    EventEmitterPlugin,
+    FileSystemPlugin,
+    ConsoleExtPlugin,
+)
 
 
 __all__ = [
+    'ConsoleExtPlugin',
     'Environment',
+    'EventEmitterPlugin',
+    'FetchPlugin',
+    'FileSystemPlugin',
     'Interpreter',
     'JS_FALSE',
     'JS_NULL',
@@ -24,6 +35,7 @@ __all__ = [
     'Parser',
     'PluginContext',
     'PyJSPlugin',
+    'StoragePlugin',
     'Token',
     'UNDEFINED',
     'JsValue',
