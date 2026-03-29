@@ -16,7 +16,7 @@ import urllib.parse as _urlparse
 from datetime import datetime, timezone
 
 from .core import JSTypeError, py_to_js, js_to_py
-from .exceptions import _JSReturn, _JSError
+from .exceptions import _JSReturn, _JSError, _JSBreak, _JSContinue
 from .values import (
     JsValue, JsProxy, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE,
     SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
@@ -254,7 +254,7 @@ def register_advanced_builtins(interp, g, intr):
             return JS_TRUE if key in target.value else JS_FALSE
         if target.type == 'array':
             try: return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
-            except: return JS_FALSE
+            except (ValueError, TypeError): return JS_FALSE
         return JS_FALSE
 
     def _reflect_delete(args, interp):
@@ -357,7 +357,7 @@ def register_advanced_builtins(interp, g, intr):
         if v.type == 'boolean': return JsValue('bigint', 1 if v.value else 0)
         if v.type == 'string':
             try: return JsValue('bigint', int(v.value.strip()))
-            except: raise _JSError(py_to_js(f'Cannot convert "{v.value}" to a BigInt'))
+            except (ValueError, TypeError): raise _JSError(py_to_js(f'Cannot convert "{v.value}" to a BigInt'))
         raise _JSError(py_to_js('Cannot convert to BigInt'))
 
     bigint_ctor = intr(_bigint_ctor, 'BigInt')
@@ -718,7 +718,9 @@ def register_advanced_builtins(interp, g, intr):
             return interp._to_promise(result)
         except _JSError as e:
             return interp._rejected_promise(e.value)
-        except Exception as e:
+        except (_JSReturn, _JSBreak, _JSContinue):
+            raise
+        except Exception as e:  # Catches non-control-flow errors
             js_err = interp._make_js_error('Error', str(e))
             return interp._rejected_promise(js_err)
 
@@ -995,8 +997,8 @@ def register_advanced_builtins(interp, g, intr):
                     interp._reject_promise(promise, exc.value)
                 except subprocess.TimeoutExpired as exc:
                     interp._reject_promise(promise, py_to_js(f'{label} timed out: {exc}'))
-                except Exception as exc:
-                    interp._reject_promise(promise, py_to_js(str(exc)))
+                except Exception as exc:  # Catches non-control-flow errors
+                    interp._reject_promise(promise, interp._make_js_error('Error', str(exc)))
 
             interp._enqueue_microtask(task)
             return promise

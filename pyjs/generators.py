@@ -60,8 +60,8 @@ class JsGenerator:
             self._from_gen.put({'type': 'return', 'value': e.value})
         except _JSError as e:
             self._from_gen.put({'type': 'throw', 'value': e.value})
-        except Exception as e:
-            self._from_gen.put({'type': 'throw', 'value': py_to_js(str(e))})
+        except Exception as e:  # Catches non-control-flow errors
+            self._from_gen.put({'type': 'throw', 'value': interp._make_js_error('Error', str(e))})
         finally:
             interp.env = old_env
 

@@ -36,14 +36,14 @@ def _parseInt(args, interp):
             elif s2.startswith(('0b','0B')): base=2
             else: base=10
         return JsValue("number", int(s, base))
-    except: return JsValue("number", float('nan'))
+    except (ValueError, TypeError, OverflowError): return JsValue("number", float('nan'))
 
 def _parseFloat(args, interp):
     s = interp._to_str(args[0]) if args else 'undefined'
     try:
         m = re.match(r'^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?', s)
         return JsValue("number", float(m.group()) if m else float('nan'))
-    except: return JsValue("number", float('nan'))
+    except (ValueError, TypeError, AttributeError): return JsValue("number", float('nan'))
 
 
 def register_core_builtins(interp, g, intr):
@@ -85,7 +85,7 @@ def register_core_builtins(interp, g, intr):
         s = interp._to_str(args[0]) if args else ''
         try:
             return JsValue('string', _b64.b64decode(s).decode('latin-1'))
-        except Exception:
+        except (ValueError, UnicodeDecodeError):  # binascii.Error is a ValueError subclass
             raise _JSError(py_to_js("InvalidCharacterError: Invalid base64 string"))
     g.declare('btoa', intr(_btoa, 'btoa'), 'var')
     g.declare('atob', intr(_atob, 'atob'), 'var')

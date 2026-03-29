@@ -464,7 +464,9 @@ class Interpreter:
             agg_ctor = self.genv.get('AggregateError')
             if self._is_callable(agg_ctor):
                 return self._call_js(agg_ctor, [JsValue('array', list(errors_list)), py_to_js(msg)], UNDEFINED)
-        except Exception:
+        except (_JSReturn, _JSBreak, _JSContinue):
+            raise
+        except Exception:  # Catches non-control-flow errors; falls back to manual AggregateError
             pass
         return JsValue('object', {
             'message': py_to_js(msg),
@@ -871,13 +873,13 @@ class Interpreter:
                     try:
                         idx = int(key)
                         prop_value = source.value[idx] if 0 <= idx < len(source.value) else UNDEFINED
-                    except Exception:
+                    except (ValueError, TypeError):
                         prop_value = UNDEFINED
                 elif source.type == 'string':
                     try:
                         idx = int(key)
                         prop_value = JsValue('string', source.value[idx]) if 0 <= idx < len(source.value) else UNDEFINED
-                    except Exception:
+                    except (ValueError, TypeError):
                         prop_value = UNDEFINED
                 else:
                     prop_value = UNDEFINED
@@ -1202,11 +1204,17 @@ class Interpreter:
                 current = self._get_proto(current)
             # Check non-extensible
             if obj.value.get('__extensible__') is False and key not in obj.value:
+                if self.env._strict:
+                    raise _JSError(self._make_js_error('TypeError',
+                        f"Cannot add property {key}, object is not extensible"))
                 return  # silently ignore new property on non-extensible object
             # Check writable descriptor
             desc = self._get_desc(obj, key)
             if desc is not None and not desc.get('writable', True):
-                return  # silently ignore write to non-writable property
+                if self.env._strict:
+                    raise _JSError(self._make_js_error('TypeError',
+                        f"Cannot assign to read only property '{key}'"))
+                return  # silently ignore write to non-writable property in non-strict
             obj.value[key] = val
         else:
             pass  # setting property on primitive is silent no-op in non-strict
@@ -1604,12 +1612,12 @@ class Interpreter:
                             r = repl_str
                             def _named(nm):
                                 try: return m.group(nm.group(1)) or ''
-                                except: return nm.group(0)
+                                except (IndexError, re.error): return nm.group(0)
                             r = re.sub(r'\$<([^>]+)>', _named, r)
                             def _numbered(ng):
                                 n = int(ng.group(1))
                                 try: return m.group(n) or ''
-                                except: return ng.group(0)
+                                except (IndexError, re.error): return ng.group(0)
                             r = re.sub(r'\$(\d+)', _numbered, r)
                             r = r.replace('$$', '\x00')
                             r = r.replace('$&', m.group(0))
@@ -1643,12 +1651,12 @@ class Interpreter:
                         r = repl_str
                         def _named(nm):
                             try: return m.group(nm.group(1)) or ''
-                            except: return nm.group(0)
+                            except (IndexError, re.error): return nm.group(0)
                         r = re.sub(r'\$<([^>]+)>', _named, r)
                         def _numbered(ng):
                             n = int(ng.group(1))
                             try: return m.group(n) or ''
-                            except: return ng.group(0)
+                            except (IndexError, re.error): return ng.group(0)
                         r = re.sub(r'\$(\d+)', _numbered, r)
                         r = r.replace('$$', '\x00')
                         r = r.replace('$&', m.group(0))
@@ -1787,18 +1795,18 @@ class Interpreter:
                     # Convert Python e+05 notation to JS e+5 notation
                     py_result = re.sub(r'e([+-])0*(\d+)', r'e\1\2', py_result)
                     return JsValue('string', py_result)
-                except: return JsValue('string', 'NaN')
+                except (ValueError, TypeError, OverflowError): return JsValue('string', 'NaN')
             if name == 'toFixed':
                 d = int(args[0].value) if args else 0
                 try:
                     return JsValue("string", f"{n:.{d}f}")
-                except: return JsValue("string", "NaN")
+                except (ValueError, TypeError, OverflowError): return JsValue("string", "NaN")
             if name == 'toPrecision':
                 d = int(args[0].value) if args else None
                 try:
                     if d is None: return JsValue("string", str(n))
                     return JsValue("string", f"{n:.{d}g}")
-                except: return JsValue("string", "NaN")
+                except (ValueError, TypeError, OverflowError): return JsValue("string", "NaN")
             if name == 'toString':
                 base = int(args[0].value) if args else 10
                 if base == 10: return JsValue("string", str(int(n)) if n==int(n) else str(n))
@@ -2538,7 +2546,7 @@ class Interpreter:
                     for v in lex_vars:
                         try:
                             iter_env.declare(v, loop_env.get(v), 'let')
-                        except Exception:
+                        except (ReferenceError, JSTypeError):
                             pass
                 else:
                     iter_env = loop_env
@@ -2551,7 +2559,7 @@ class Interpreter:
                             if uses_lex:
                                 for v in lex_vars:
                                     try: loop_env.set(v, iter_env.get(v))
-                                    except Exception: pass
+                                    except (ReferenceError, JSTypeError): pass
                             if node.get("update"): self._eval(node["update"], loop_env)
                             continue
                         return r
@@ -2565,7 +2573,7 @@ class Interpreter:
                         if uses_lex:
                             for v in lex_vars:
                                 try: loop_env.set(v, iter_env.get(v))
-                                except Exception: pass
+                                except (ReferenceError, JSTypeError): pass
                         if node.get("update"): self._eval(node["update"], loop_env)
                         continue
                     raise
@@ -2573,7 +2581,7 @@ class Interpreter:
                 if uses_lex:
                     for v in lex_vars:
                         try: loop_env.set(v, iter_env.get(v))
-                        except Exception: pass
+                        except (ReferenceError, JSTypeError): pass
                 if node.get("update"): self._eval(node["update"], loop_env)
             return None
 
@@ -2878,7 +2886,7 @@ class Interpreter:
                 if decl.get("id"):
                     try:
                         env.declare(decl["id"], val, 'var')
-                    except Exception:
+                    except (JSTypeError, ReferenceError):
                         pass
             elif decl.get("type") == "FunctionExpression":
                 val = self._make_fn(decl, env)
@@ -3015,7 +3023,7 @@ class Interpreter:
                     if node["argument"]["type"] == "Identifier":
                         if not env.has(node["argument"]["name"]):
                             return JsValue("string", "undefined")
-                except: pass
+                except (KeyError, AttributeError, TypeError): pass
                 return JsValue("string", self._typeof(arg))
             if op == "!":  return JS_FALSE if self._truthy(arg) else JS_TRUE
             if op == "-":  return JsValue("number", -self._to_num(arg))
@@ -3032,6 +3040,9 @@ class Interpreter:
                     key = self._to_key(prop)
                     desc = self._get_desc(obj, key)
                     if desc is not None and not desc.get('configurable', True):
+                        if env._strict:
+                            raise _JSError(self._make_js_error('TypeError',
+                                f"Cannot delete property '{key}'"))
                         return JS_FALSE
                     self._del_prop(obj, prop)
                     return JS_TRUE
@@ -3120,7 +3131,7 @@ class Interpreter:
                     return JS_FALSE
                 if target.type == "array":
                     try: return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
-                    except: return JS_FALSE
+                    except (ValueError, TypeError): return JS_FALSE
                 if target.type == "string": return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
                 return JS_FALSE
             # bitwise
@@ -3356,6 +3367,10 @@ class Interpreter:
                     mod_path = self._to_str(src)
                     ns = self._module_loader.load(mod_path, self._module_file)
                     return self._resolved_promise(ns)
+                except (_JSReturn, _JSBreak, _JSContinue):
+                    raise
+                except _JSError as e:
+                    return self._rejected_promise(e.value)
                 except Exception as e:
                     return self._rejected_promise(self._make_js_error('Error', str(e)))
             return self._resolved_promise(JsValue('object', {}))
@@ -3616,7 +3631,7 @@ class Interpreter:
                 raise
             except Exception as exc:
                 if promise is not None:
-                    return self._reject_promise(promise, py_to_js(str(exc)))
+                    return self._reject_promise(promise, self._make_js_error('Error', str(exc)))
                 raise
             finally:
                 self.env = env
@@ -3641,7 +3656,7 @@ class Interpreter:
             pass
         except _JSError as e:
             self.output.append(f"Error: {self._to_str(e.value)}")
-        except Exception as e:
+        except Exception as e:  # Catches non-control-flow errors at top level
             self.output.append(f"Python Error: {e}")
         return '\n'.join(self.output[start:])
 
