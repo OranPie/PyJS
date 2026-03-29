@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-03-28 | **113 tests passing** | ~9 500 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–18 added 51 tests)*
+*Updated: 2026-03-28 | **155 tests passing** | ~11 500 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–20 added 93 tests)*
 
 ---
 
@@ -8,12 +8,23 @@
 
 | File | Lines | Role |
 |---|---|---|
-| `pyjs/runtime.py` | 4 708 | Tree-walking interpreter, all built-ins, event loop |
-| `pyjs/parser.py` | 1 106 | Recursive-descent parser → AST dicts |
-| `tests/test_pyjs.py` | 1 111 | 62 tests covering all phases |
-| `pyjs/lexer.py` | 334 | Tokenizer (BigInt, numeric separators, regex, private names) |
-| `pyjs/modules.py` | 48 | ModuleLoader: path resolution, caching, cycle detection |
+| `pyjs/runtime.py` | 3 686 | Tree-walking interpreter, all built-ins, event loop |
+| `pyjs/parser.py` | 1 143 | Recursive-descent parser → AST dicts |
+| `pyjs/builtins_advanced.py` | 1 058 | Array, String, Math, JSON, Date, RegExp built-ins |
+| `pyjs/builtins_object.py` | 669 | Object.*, console.*, global utility functions |
+| `pyjs/builtins_typed.py` | 563 | TypedArray constructors, ArrayBuffer, DataView |
+| `pyjs/lexer.py` | 339 | Tokenizer (BigInt, numeric separators, regex, private names) |
+| `pyjs/builtins_core.py` | 328 | parseInt, parseFloat, isNaN, URI encoding, etc. |
+| `pyjs/builtins_promise.py` | 152 | Promise constructor, all/race/allSettled/any/withResolvers |
+| `pyjs/plugin.py` | 161 | Plugin system: PluginContext + PyJSPlugin base class |
+| `pyjs/generators.py` | 144 | JsGenerator / JsAsyncGenerator (thread-based) |
+| `pyjs/environment.py` | 81 | Lexical scope chain with TDZ support |
+| `pyjs/trace.py` | 63 | Logging/tracing configuration |
 | `pyjs/core.py` | 59 | `JsValue`, `py_to_js`, `js_to_py`, global singletons |
+| `pyjs/values.py` | 52 | JsValue class, JsProxy, well-known symbols |
+| `pyjs/modules.py` | 48 | ModuleLoader: path resolution, caching, cycle detection |
+| `pyjs/exceptions.py` | 27 | Internal control-flow exceptions |
+| `tests/test_pyjs.py` | 2 092 | 155 tests covering all phases |
 
 Architecture: **Lexer → Parser → AST → `Interpreter._exec/_eval` (tree-walk)**
 All values are `JsValue(type, value)`; environments are linked via parent chain.
@@ -179,11 +190,46 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **16** | `Symbol.match/split/replace/isConcatSpreadable` delegation; `Object.assign` invokes getters; `structuredClone` TypedArrays | 5 | 100 |
 | **17** | `matchAll` `.index`/`.groups`; `Promise.resolve(thenable)`; `replaceAll` TypeError for non-global regexp | 3 | 103 |
 | **18** | `encodeURIComponent`/`decodeURIComponent`; `atob`/`btoa`; `Object.groupBy`; `Map.groupBy`; `Map`/`Set` `.forEach()`; `Date.parse()`/`Date.UTC()`/`Date.toJSON()`; `performance.now()`; `console.clear()`; `obj.hasOwnProperty()`; `structuredClone` Map/Set/Date | 10 | **113** |
+| **19** | Logging/tracing infrastructure (`trace.py`); file splitting (builtins_core, builtins_object, builtins_advanced, builtins_promise, builtins_typed, values, environment, exceptions, generators); production gap fixes: JSON circular reference detection, recursion limits (`MAX_CALL_DEPTH=200`, `MAX_EXEC_STEPS=10M`), TDZ enforcement for `let`/`const`, strict mode propagation, `catch` clause destructuring, event-loop timeout (`EVENT_LOOP_LIMIT=10000`), `var` hoisting to function scope | 22 | **135** |
+| **20** | Plugin system (`PluginContext`, `PyJSPlugin`); five first-party plugins (StoragePlugin, FetchPlugin, EventEmitterPlugin, FileSystemPlugin, ConsoleExtPlugin); interpreter hardening: bare `except` cleanup, Python-to-JS exception mapping, strict mode completion | 20 | **155** |
+
+---
+
+## Plugin-Provided APIs
+
+The following APIs are **not** built into the core interpreter — they are
+provided by first-party plugins in `pyjs/plugins/`.  Register them with
+`Interpreter.register_plugin()` to make them available.
+
+| Plugin | Class | Global(s) | Key Methods |
+|--------|-------|-----------|-------------|
+| **Storage** | `StoragePlugin(persist_path=None)` | `localStorage`, `sessionStorage` | `getItem`, `setItem`, `removeItem`, `clear`, `key`, `length` |
+| **Fetch** | `FetchPlugin(timeout=30)` | `fetch(url[, options])` | Returns Promise → Response with `text()`, `json()`, `status`, `ok`, `headers` |
+| **Events** | `EventEmitterPlugin()` | `EventEmitter` constructor | `on`, `once`, `off`, `emit`, `removeAllListeners`, `listenerCount` |
+| **FileSystem** | `FileSystemPlugin(root=".", allow_write=True)` | `fs` | `readFileSync`, `writeFileSync`, `existsSync`, `mkdirSync`, `readdirSync`, `statSync`, `unlinkSync` |
+| **Console Ext** | `ConsoleExtPlugin()` | *(extends `console`)* | `table`, `assert`, `trace`, `dir` |
+
+### Usage
+
+```python
+from pyjs import Interpreter
+from pyjs.plugins import StoragePlugin, FetchPlugin, EventEmitterPlugin
+
+interp = Interpreter()
+interp.register_plugin(StoragePlugin(persist_path="./data.json"))
+interp.register_plugin(FetchPlugin(timeout=10))
+interp.register_plugin(EventEmitterPlugin())
+interp.run('localStorage.setItem("key", "value");')
+```
+
+See **[docs/plugins.md](plugins.md)** for the full plugin authoring guide.
 
 ## Verdict
 
 > **PyJS is a ~91% ES2015–ES2025 interpreter.**
-> All major language features are implemented and tested across 113 tests.
+> All major language features are implemented and tested across 155 tests.
 > Remaining gaps are specialist (SharedArrayBuffer/Atomics, full ICU Intl locale data, tail-call opt)
 > or intentionally omitted (eval, with statement).
+> The plugin system enables extending the runtime with domain-specific APIs
+> (storage, networking, filesystem) without modifying the core.
 > For scripting, teaching, and computational tasks it is production-ready.
