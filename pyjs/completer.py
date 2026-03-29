@@ -98,8 +98,7 @@ _NUMBER_METHODS = sorted([
 ])
 
 _OBJECT_PROTO_METHODS = sorted([
-    'hasOwnProperty', 'toString', 'valueOf', 'constructor',
-    'isPrototypeOf', 'propertyIsEnumerable',
+    'hasOwnProperty', 'toString', 'valueOf',
 ])
 
 _PROMISE_METHODS = sorted([
@@ -160,16 +159,33 @@ class JsCompleter:
                 buf = _rl.get_line_buffer()
             except ImportError:
                 buf = text
-            self._matches, self._last_base_expr = self._build_matches(text, buf)
+            try:
+                self._matches, self._last_base_expr = self._build_matches(text, buf)
+            except Exception:
+                self._matches, self._last_base_expr = [], ''
         return self._matches[state] if state < len(self._matches) else None
 
     def display_matches_hook(self, substitution: str, matches: list[str],
                              max_len: int) -> None:
         """Custom completion display — shows type annotations beside each match."""
         try:
-            import readline as _rl
-        except ImportError:
-            return
+            self._display_matches_impl(substitution, matches, max_len)
+        except Exception:
+            # Fallback: just print names plainly so the REPL doesn't crash
+            try:
+                import readline as _rl
+                sys.stdout.write('\n')
+                for m in matches:
+                    sys.stdout.write(f'  {m}\n')
+                sys.stdout.flush()
+                _rl.redisplay()
+            except Exception:
+                pass
+
+    def _display_matches_impl(self, substitution: str, matches: list[str],
+                              max_len: int) -> None:
+        """Inner implementation of display_matches_hook."""
+        import readline as _rl
 
         use_color = self._use_color
         _R = '\033[0m'
@@ -268,13 +284,13 @@ class JsCompleter:
 
         if base:
             val = self._resolve_deep(base, name)
-            if val is not None:
+            if val is not None and val.type != 'undefined':
                 return _type_tag(val)
             return ''
 
         # Bare global: look up the name directly
         val = self._eval_expr_safe(name)
-        if val is not None:
+        if val is not None and val.type != 'undefined':
             return _type_tag(val)
         return ''
 
