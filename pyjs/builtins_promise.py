@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from .core import JSTypeError, py_to_js, js_to_py
 from .exceptions import _JSReturn, _JSError
+from .trace import get_logger
 from .values import (
     JsValue, JsProxy, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE,
     SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
@@ -23,6 +24,8 @@ from .values import (
     _symbol_id_counter, _symbol_registry,
     _js_regex_to_python,
 )
+
+_log = get_logger("scope")
 
 
 def register_promise_builtins(interp, g, intr):
@@ -148,5 +151,6 @@ def register_promise_builtins(interp, g, intr):
             '__error_type__': py_to_js('AggregateError'),
         })
     g.declare('AggregateError', intr(_agg_error_ctor, 'AggregateError'), 'var')
+    _log.info("registered promise builtins")
 
 

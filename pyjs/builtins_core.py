@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from .core import JSTypeError, py_to_js, js_to_py
 from .exceptions import _JSReturn, _JSError
+from .trace import get_logger
 from .values import (
     JsValue, JsProxy, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE,
     SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
@@ -23,6 +24,8 @@ from .values import (
     _symbol_id_counter, _symbol_registry,
     _js_regex_to_python,
 )
+
+_scope_log = get_logger("scope")
 
 
 def _parseInt(args, interp):
@@ -324,5 +327,6 @@ def register_core_builtins(interp, g, intr):
     json_obj.value['stringify'] = intr(_stringify, 'stringify')
     json_obj.value['parse']     = intr(_parse, 'parse')
     g.declare('JSON', json_obj, 'var')
+    _scope_log.info("registered core builtins")
 
 

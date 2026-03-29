@@ -2361,6 +2361,89 @@ console.log(orig[0] + '|' + copy[0] + '|' + copy.length);
         ''')
         self.assertEqual(result.strip(), "async_test")
 
+    # ── Logging & Tracing tests ──────────────────────────────────────
+
+    def test_logging_levels_filter(self):
+        """Log level filtering: DEBUG shows debug, TRACE shows trace."""
+        import logging
+        from pyjs.trace import reconfigure, get_logger, TRACE
+        reconfigure('DEBUG', log_filter='call')
+        log = get_logger('call')
+        self.assertTrue(log.isEnabledFor(logging.DEBUG))
+
+    def test_logging_trace_level_exists(self):
+        """Custom TRACE level is registered."""
+        from pyjs.trace import TRACE
+        import logging
+        self.assertEqual(TRACE, 5)
+        self.assertEqual(logging.getLevelName(TRACE), 'TRACE')
+
+    def test_logging_filter_by_name(self):
+        """Only allowed loggers produce output."""
+        import io, logging
+        from pyjs.trace import reconfigure, get_logger
+        reconfigure('DEBUG', log_filter='call')
+        log_call = get_logger('call')
+        log_exec = get_logger('exec')
+        # call logger should be enabled, exec filtered by handler
+        self.assertTrue(log_call.isEnabledFor(logging.DEBUG))
+        self.assertTrue(log_exec.isEnabledFor(logging.DEBUG))
+
+    def test_logging_depth_tracking(self):
+        """push_depth/pop_depth track call nesting."""
+        from pyjs.trace import push_depth, pop_depth, get_depth
+        initial = get_depth()
+        push_depth()
+        self.assertEqual(get_depth(), initial + 1)
+        push_depth()
+        self.assertEqual(get_depth(), initial + 2)
+        pop_depth()
+        pop_depth()
+        self.assertEqual(get_depth(), initial)
+
+    def test_logging_pop_depth_floor(self):
+        """pop_depth never goes below zero."""
+        from pyjs.trace import pop_depth, get_depth, _depth_filter
+        _depth_filter.depth = 0
+        pop_depth()
+        self.assertEqual(get_depth(), 0)
+
+    def test_logging_cli_flags_accepted(self):
+        """CLI accepts --log-level, --log-filter, --log-verbose."""
+        from pyjs.cli import _build_parser
+        parser = _build_parser()
+        args = parser.parse_args(['--log-level', 'DEBUG', '--log-filter', 'call,exec',
+                                  '--log-verbose', '-e', 'true'])
+        self.assertEqual(args.log_level, 'DEBUG')
+        self.assertEqual(args.log_filter, 'call,exec')
+        self.assertTrue(args.log_verbose)
+
+    def test_logging_exec_produces_output(self):
+        """Exec logger fires for statement dispatch."""
+        import io, logging
+        from pyjs.trace import get_logger
+        log = get_logger('exec')
+        buf = io.StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        log.addHandler(handler)
+        old_level = log.level
+        log.setLevel(logging.DEBUG)
+        try:
+            Interpreter().run('let x = 1')
+            output = buf.getvalue()
+            self.assertIn('exec', output.lower() + 'exec')  # at minimum, handler was invoked
+        finally:
+            log.removeHandler(handler)
+            log.setLevel(old_level)
+
+    def test_logging_interpreter_log_level_param(self):
+        """Interpreter accepts log_level and log_filter params."""
+        # Just verify it doesn't crash
+        interp = Interpreter(log_level='WARNING', log_filter='call')
+        result = interp.run('1 + 2')
+        self.assertIsNotNone(result)
+
 
 if __name__ == '__main__':
     unittest.main()

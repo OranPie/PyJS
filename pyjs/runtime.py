@@ -22,7 +22,7 @@ from .core import JSTypeError, js_to_py, py_to_js
 from .plugin import PyJSPlugin, PluginContext
 from .lexer import Lexer
 from .parser import N, Parser
-from .trace import configure as _configure_trace, get_logger
+from .trace import configure as _configure_trace, get_logger, push_depth, pop_depth, TRACE
 from .values import (
     JsValue, JsProxy, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE,
     SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
@@ -47,6 +47,13 @@ _log_call = get_logger("call")
 _log_prop = get_logger("prop")
 _log_event = get_logger("event")
 _log_promise = get_logger("promise")
+_log_scope = get_logger("scope")
+_log_error = get_logger("error")
+_log_module = get_logger("module")
+_log_async = get_logger("async")
+_log_coerce = get_logger("coerce")
+_log_timer = get_logger("timer")
+_log_proxy = get_logger("proxy")
 
 
 # ============================================================================
@@ -64,8 +71,9 @@ class Interpreter:
     MAX_CALL_DEPTH = 200
     MAX_EXEC_STEPS = 10_000_000
 
-    def __init__(self, log_level: str | None = None, plugins: list | None = None):
-        _configure_trace(log_level)
+    def __init__(self, log_level: str | None = None, log_filter: str | None = None,
+                 log_verbose: bool = False, plugins: list | None = None):
+        _configure_trace(log_level, log_filter=log_filter, verbose=log_verbose)
         # Ensure Python's recursion limit can accommodate our JS call depth
         _min_py_limit = self.MAX_CALL_DEPTH * 10
         if sys.getrecursionlimit() < _min_py_limit:
@@ -106,6 +114,7 @@ class Interpreter:
         Returns self for chaining: interp.use(A()).use(B())
         """
         ctx = PluginContext(self)
+        ctx._plugin_name = plugin.name
         self._plugins.append(plugin)
         self._plugin_contexts.append(ctx)
         plugin.setup(ctx)
@@ -225,14 +234,21 @@ class Interpreter:
             'repeat': repeat,
             'args': list(args or []),
         }
+        _fn_name = fn.value.get("name", "<anonymous>") if isinstance(fn, JsValue) and isinstance(fn.value, dict) else "<fn>"
+        if repeat:
+            _log_timer.debug("setInterval(%s, %dms) → id=%s", _fn_name, task['delay'], timer_id)
+        else:
+            _log_timer.debug("setTimeout(%s, %dms) → id=%s", _fn_name, task['delay'], timer_id)
         self._active_timers[timer_id] = task
         self._push_timer(task, self._clock + task['delay'])
         return timer_id
 
     def _clear_timer(self, timer_id):
+        _log_timer.debug("clearTimer(id=%s)", timer_id)
         self._active_timers.pop(timer_id, None)
 
     def _new_promise(self):
+        _log_promise.debug("create promise")
         return JsValue('promise', {'state': 'pending', 'value': UNDEFINED, 'handlers': []})
 
     def _resolved_promise(self, value):
@@ -305,6 +321,10 @@ class Interpreter:
         return next_promise
 
     def _promise_then(self, source, on_fulfilled=UNDEFINED, on_rejected=UNDEFINED):
+        if _log_promise.isEnabledFor(TRACE):
+            _log_promise.log(TRACE, "attach .then handler (fulfilled=%s, rejected=%s)",
+                             on_fulfilled.type if isinstance(on_fulfilled, JsValue) else "?",
+                             on_rejected.type if isinstance(on_rejected, JsValue) else "?")
         return self._chain_promise(source, self._new_promise(), on_fulfilled, on_rejected)
 
     def _run_promise_handler(self, source, handler):
@@ -317,6 +337,8 @@ class Interpreter:
             else:
                 self._reject_promise(next_promise, source.value['value'])
             return
+        if _log_promise.isEnabledFor(TRACE):
+            _log_promise.log(TRACE, "invoke %s-handler (value=%s)", state, self._to_str(source.value['value'])[:60])
         try:
             result = self._call_js(callback, [source.value['value']], UNDEFINED)
             self._resolve_promise(next_promise, result)
@@ -513,11 +535,13 @@ class Interpreter:
 
     def _run_event_loop(self, until_promise=None):
         steps = 0
-        _log_event.debug("event loop start")
+        _pending = len(self._microtasks) + len(self._timers)
+        _log_event.info("event loop start (%d pending)", _pending)
         while True:
             if until_promise and until_promise.value['state'] != 'pending':
                 break
             if self._microtasks:
+                _log_event.log(TRACE, "process microtask")
                 callback = self._microtasks.popleft()
                 callback()
                 steps += 1
@@ -533,19 +557,24 @@ class Interpreter:
                     break
                 due, candidate = task
                 self._clock = max(self._clock, due)
+                _log_timer.log(TRACE, "timer fire (id=%s)", candidate['id'])
                 self._call_js(candidate['fn'], list(candidate['args']), UNDEFINED)
                 steps += 1
                 if candidate['repeat'] and candidate['id'] in self._active_timers:
                     self._push_timer(candidate, self._clock + candidate['delay'])
                 else:
                     self._active_timers.pop(candidate['id'], None)
+            if _log_event.isEnabledFor(TRACE):
+                _log_event.log(TRACE, "event loop tick %d", steps)
             if steps > self.EVENT_LOOP_LIMIT:
                 raise _JSError(py_to_js('Event loop exceeded limit; possible unbounded interval or promise recursion'))
+        _log_event.info("event loop end (%d ticks)", steps)
         return not until_promise or until_promise.value['state'] != 'pending'
 
     # --------------------------------------------------------- global env
     def _global_env(self) -> Environment:
         g = Environment()
+        _log_scope.info("scope create (program)")
 
         # primitives
         g.declare('undefined',  UNDEFINED, 'var')
@@ -598,7 +627,12 @@ class Interpreter:
     def _truthy(self, v: JsValue) -> bool:
         handler = self._TRUTHY_MAP.get(v.type)
         if handler:
-            return handler(v)
+            result = handler(v)
+            if _log_coerce.isEnabledFor(TRACE):
+                _log_coerce.log(TRACE, "truthy(%s) → %s", v.type, result)
+            return result
+        if _log_coerce.isEnabledFor(TRACE):
+            _log_coerce.log(TRACE, "truthy(%s) → True", v.type)
         return True  # objects, arrays, functions are truthy
 
     _TO_NUM_MAP = {
@@ -612,10 +646,20 @@ class Interpreter:
     def _to_num(self, v: JsValue) -> float:
         handler = self._TO_NUM_MAP.get(v.type)
         if handler:
-            return handler(v)
+            result = handler(v)
+            if _log_coerce.isEnabledFor(TRACE):
+                _log_coerce.log(TRACE, "toNumber(%s) → %s", v.type, result)
+            return result
         if v.type == 'string':
-            try: return float(v.value.strip() or 0)
-            except (ValueError, TypeError, OverflowError): return float('nan')
+            try:
+                result = float(v.value.strip() or 0)
+            except (ValueError, TypeError, OverflowError):
+                result = float('nan')
+            if _log_coerce.isEnabledFor(TRACE):
+                _log_coerce.log(TRACE, "toNumber(string) → %s", result)
+            return result
+        if _log_coerce.isEnabledFor(TRACE):
+            _log_coerce.log(TRACE, "toNumber(%s) → NaN", v.type)
         return float('nan')
 
     _TO_STR_SIMPLE = {
@@ -632,10 +676,19 @@ class Interpreter:
     def _to_str(self, v: JsValue) -> str:
         simple = self._TO_STR_SIMPLE.get(v.type)
         if simple is not None:
+            if _log_coerce.isEnabledFor(TRACE) and not getattr(self, '_in_coerce_log', False):
+                self._in_coerce_log = True
+                _log_coerce.log(TRACE, "toString(%s) → %s", v.type, simple[:40])
+                self._in_coerce_log = False
             return simple
         lam = self._TO_STR_LAMBDA.get(v.type)
         if lam:
-            return lam(v)
+            result = lam(v)
+            if _log_coerce.isEnabledFor(TRACE) and not getattr(self, '_in_coerce_log', False):
+                self._in_coerce_log = True
+                _log_coerce.log(TRACE, "toString(%s) → %s", v.type, result[:40])
+                self._in_coerce_log = False
+            return result
         if v.type == 'number':
             n = v.value
             if math.isnan(n): return 'NaN'
@@ -1176,6 +1229,7 @@ class Interpreter:
             proxy = obj.value
             trap = self._get_trap(proxy.handler, 'get')
             if trap:
+                _log_proxy.debug("proxy trap get(target=%s, prop=%s)", proxy.target.type, key)
                 return self._call_js(trap, [proxy.target, py_to_js(key), obj], UNDEFINED)
             return self._get_prop(proxy.target, key)
         if obj.type == 'object' and '__super_target__' in obj.value:
@@ -1199,6 +1253,7 @@ class Interpreter:
             proxy = obj.value
             trap = self._get_trap(proxy.handler, 'set')
             if trap:
+                _log_proxy.debug("proxy trap set(target=%s, prop=%s)", proxy.target.type, key)
                 self._call_js(trap, [proxy.target, py_to_js(key), val, obj], UNDEFINED)
                 return
             self._set_prop(proxy.target, key, val)
@@ -2431,6 +2486,11 @@ class Interpreter:
             val = UNDEFINED
             if d["init"]:
                 val = self._eval(d["init"], env)
+            _id = d["id"]
+            _vname = _id.get("name", "?") if isinstance(_id, dict) and _id.get("type") == "Identifier" else "<pattern>"
+            _log_scope.debug("declare %s %s", node["kind"], _vname)
+            if _log_scope.isEnabledFor(TRACE):
+                _log_scope.log(TRACE, "  %s = %s", _vname, self._to_str(val)[:60])
             try:
                 self._bind_pattern(d["id"], val, env, node["kind"], True)
             except JSTypeError as e:
@@ -2531,6 +2591,7 @@ class Interpreter:
 
     def _exec_block_statement(self, node, env):
         block_env = Environment(env)
+        _log_scope.log(TRACE, "scope create (block)")
         self._hoist_tdz(node["body"], block_env)
         for s in node["body"]:
             r = self._exec(s, block_env)
@@ -2592,6 +2653,7 @@ class Interpreter:
 
     def _exec_for_statement(self, node, env):
         loop_env = Environment(env)
+        _log_scope.log(TRACE, "scope create (for)")
         init = node.get("init")
         uses_lex = (init is not None and
                     init.get("type") == "VariableDeclaration" and
@@ -2817,7 +2879,9 @@ class Interpreter:
         except _JSError as e:
             handler = node.get("handler")
             if handler:
+                _log_error.debug("catch %s", self._to_str(e.value)[:80])
                 catch_env = Environment(env)
+                _log_scope.log(TRACE, "scope create (catch)")
                 param = handler.get("param")
                 if param:
                     if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
@@ -2830,6 +2894,7 @@ class Interpreter:
         except Exception as e:
             handler = node.get("handler")
             if handler:
+                _log_error.debug("catch (python) %s: %s", type(e).__name__, str(e)[:80])
                 catch_env = Environment(env)
                 param = handler.get("param")
                 err_val = self._make_js_error('Error', str(e))
@@ -2878,6 +2943,7 @@ class Interpreter:
 
     def _exec_throw_statement(self, node, env):
         val = self._eval(node["argument"], env)
+        _log_error.debug("throw %s", self._to_str(val)[:80])
         raise _JSError(val)
 
     def _exec_empty_statement(self, node, env):
@@ -2886,8 +2952,11 @@ class Interpreter:
     def _exec_import_declaration(self, node, env):
         if getattr(self, '_module_loader', None) is not None:
             source_spec = node["source"]
+            _specifiers = ", ".join(s.get("local", "?") for s in node.get("specifiers", []))
+            _log_module.info("import {%s} from %s", _specifiers, source_spec)
             resolved = self._module_loader.resolve(source_spec, getattr(self, '_module_file', None))
             exports = self._module_loader.load(resolved)
+            _log_module.info("module loaded: %s", resolved)
             for spec in node["specifiers"]:
                 stype = spec["type"]
                 if stype == "ImportDefaultSpecifier":
@@ -2914,6 +2983,7 @@ class Interpreter:
                     id_node = d["id"]
                     if isinstance(id_node, dict) and id_node.get("type") == "Identifier":
                         name = id_node["name"]
+                        _log_module.debug("export %s", name)
                         try:
                             self._module_exports[name] = env.get(name)
                         except ReferenceError:
@@ -2921,6 +2991,7 @@ class Interpreter:
             elif decl["type"] in ("FunctionDeclaration", "ClassDeclaration"):
                 name = decl.get("id")
                 if name:
+                    _log_module.debug("export %s", name)
                     try:
                         self._module_exports[name] = env.get(name)
                     except ReferenceError:
@@ -2963,6 +3034,7 @@ class Interpreter:
         else:
             val = self._eval(decl, env)
         self._module_exports["default"] = val
+        _log_module.debug("export default")
         return None
 
     _EXEC_DISPATCH = None  # initialized in _init_dispatch_tables
@@ -3048,7 +3120,10 @@ class Interpreter:
                 e = e.parent
             return py_to_js([])
         try:
-            return env.get(node["name"])
+            _val = env.get(node["name"])
+            if _log_scope.isEnabledFor(TRACE):
+                _log_scope.log(TRACE, "read %s → %s", node["name"], self._to_str(_val)[:60])
+            return _val
         except ReferenceError as re:
             msg = str(re)
             if "before initialization" in msg:
@@ -3277,6 +3352,8 @@ class Interpreter:
         if op == "=" and left.get("type") in ("ObjectPattern", "ArrayPattern"):
             right = self._eval(node["right"], env)
             self._bind_pattern(left, right, env, 'let', False)
+            if _log_scope.isEnabledFor(TRACE):
+                _log_scope.log(TRACE, "assign <pattern> = %s", self._to_str(right)[:60])
             return right
         getter, setter = self._resolve_target(left, env)
         old = getter()
@@ -3285,25 +3362,40 @@ class Interpreter:
                 return old
             right = self._eval(node["right"], env)
             setter(right)
+            if _log_scope.isEnabledFor(TRACE):
+                _tname = left.get("name", "?") if isinstance(left, dict) else "?"
+                _log_scope.log(TRACE, "assign %s &&= %s", _tname, self._to_str(right)[:60])
             return right
         if op == "||=":
             if self._truthy(old):
                 return old
             right = self._eval(node["right"], env)
             setter(right)
+            if _log_scope.isEnabledFor(TRACE):
+                _tname = left.get("name", "?") if isinstance(left, dict) else "?"
+                _log_scope.log(TRACE, "assign %s ||= %s", _tname, self._to_str(right)[:60])
             return right
         if op == "??=":
             if not self._is_nullish(old):
                 return old
             right = self._eval(node["right"], env)
             setter(right)
+            if _log_scope.isEnabledFor(TRACE):
+                _tname = left.get("name", "?") if isinstance(left, dict) else "?"
+                _log_scope.log(TRACE, "assign %s ??= %s", _tname, self._to_str(right)[:60])
             return right
         right = self._eval(node["right"], env)
         if op == "=":
             setter(right)
+            if _log_scope.isEnabledFor(TRACE):
+                _tname = left.get("name", "?") if isinstance(left, dict) else "?"
+                _log_scope.log(TRACE, "assign %s = %s", _tname, self._to_str(right)[:60])
             return right
         new_value = self._do_assign_op(op, old, right)
         setter(new_value)
+        if _log_scope.isEnabledFor(TRACE):
+            _tname = left.get("name", "?") if isinstance(left, dict) else "?"
+            _log_scope.log(TRACE, "assign %s %s %s", _tname, op, self._to_str(new_value)[:60])
         return new_value
 
     def _eval_conditional_expression(self, node, env):
@@ -3406,12 +3498,17 @@ class Interpreter:
     def _eval_await_expression(self, node, env):
         awaited = self._eval(node["argument"], env)
         if awaited.type != 'promise':
+            _log_async.debug("await (non-promise, immediate)")
             return awaited
+        _log_async.debug("await (promise state=%s)", awaited.value.get('state', '?'))
         if not self._run_event_loop(awaited):
             raise _JSError(py_to_js('Awaited promise did not settle'))
         if awaited.value['state'] == 'rejected':
             raise _JSError(awaited.value['value'])
-        return awaited.value['value']
+        _result = awaited.value['value']
+        if _log_async.isEnabledFor(TRACE):
+            _log_async.log(TRACE, "await resolved → %s", self._to_str(_result)[:60])
+        return _result
 
     def _eval_spread_element(self, node, env):
         return self._eval(node["argument"], env)
@@ -3442,6 +3539,7 @@ class Interpreter:
         if gen is None:
             raise _JSError(py_to_js('yield used outside generator'))
         if node.get('delegate'):
+            _log_async.debug("yield* (delegate)")
             it = self._get_js_iterator(arg)
             last = UNDEFINED
             if it is not None:
@@ -3455,6 +3553,8 @@ class Interpreter:
                     gen.yield_value(val)
             return last
         else:
+            if _log_async.isEnabledFor(TRACE):
+                _log_async.log(TRACE, "yield %s", self._to_str(arg)[:60])
             return gen.yield_value(arg)
 
     def _eval_dynamic_import(self, node, env):
@@ -3664,12 +3764,27 @@ class Interpreter:
     def _make_generator_obj(self, fn_val, args):
         gen = JsGenerator(fn_val, args, self)
         sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+        def _gen_next(tv, a, i):
+            _val = a[0] if a else UNDEFINED
+            if _log_async.isEnabledFor(TRACE):
+                _log_async.log(TRACE, "generator.next(%s)", i._to_str(_val)[:60])
+            return gen.next(_val)
+        def _gen_return(tv, a, i):
+            _val = a[0] if a else UNDEFINED
+            if _log_async.isEnabledFor(TRACE):
+                _log_async.log(TRACE, "generator.return(%s)", i._to_str(_val)[:60])
+            return gen.js_return(_val)
+        def _gen_throw(tv, a, i):
+            _val = a[0] if a else UNDEFINED
+            if _log_async.isEnabledFor(TRACE):
+                _log_async.log(TRACE, "generator.throw(%s)", i._to_str(_val)[:60])
+            return gen.js_throw(_val)
         gen_obj = JsValue('object', {
             '__kind__': JsValue('string', 'Generator'),
             '__gen__': gen,
-            'next':   self._make_intrinsic(lambda tv, a, i: gen.next(a[0] if a else UNDEFINED), 'Generator.next'),
-            'return': self._make_intrinsic(lambda tv, a, i: gen.js_return(a[0] if a else UNDEFINED), 'Generator.return'),
-            'throw':  self._make_intrinsic(lambda tv, a, i: gen.js_throw(a[0] if a else UNDEFINED), 'Generator.throw'),
+            'next':   self._make_intrinsic(_gen_next, 'Generator.next'),
+            'return': self._make_intrinsic(_gen_return, 'Generator.return'),
+            'throw':  self._make_intrinsic(_gen_throw, 'Generator.throw'),
         })
         gen_obj.value[sym_iter_key] = self._make_intrinsic(lambda tv, a, i: gen_obj, '[Symbol.iterator]')
         self._add_iterator_helpers(gen_obj)
@@ -3690,14 +3805,29 @@ class Interpreter:
 
     def _call_js(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):
         _log_call.debug("call %s (new=%s, nargs=%d)", fn_val.type, is_new_call, len(args))
+        fn_name = "<anonymous>"
+        if fn_val.type in ("function", "intrinsic") and isinstance(fn_val.value, dict):
+            fn_name = fn_val.value.get("name") or "<anonymous>"
+        elif fn_val.type == "class" and isinstance(fn_val.value, dict):
+            fn_name = fn_val.value.get("name") or "<class>"
+        if _log_call.isEnabledFor(TRACE):
+            arg_strs = [self._to_str(a)[:40] for a in args[:4]]
+            _log_call.log(TRACE, "→ %s(%s)", fn_name, ", ".join(arg_strs))
+        push_depth()
         self._call_depth += 1
         if self._call_depth > self.MAX_CALL_DEPTH:
             self._call_depth -= 1
+            pop_depth()
             raise _JSError(self._make_js_error('RangeError', 'Maximum call stack size exceeded'))
+        _call_result = None
         try:
-            return self._call_js_impl(fn_val, args, this_val, extra_args, is_new_call)
+            _call_result = self._call_js_impl(fn_val, args, this_val, extra_args, is_new_call)
+            return _call_result
         finally:
             self._call_depth -= 1
+            if _log_call.isEnabledFor(TRACE):
+                _log_call.log(TRACE, "← %s = %s", fn_name, self._to_str(_call_result)[:80] if _call_result is not None else "undefined")
+            pop_depth()
 
     def _call_js_impl(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):
         if fn_val.type == 'proxy':
@@ -3705,10 +3835,12 @@ class Interpreter:
             if is_new_call:
                 trap = self._get_trap(proxy.handler, 'construct')
                 if trap:
+                    _log_proxy.debug("proxy trap construct(target=%s)", proxy.target.type)
                     return self._call_js(trap, [proxy.target, JsValue('array', args), fn_val], UNDEFINED)
             else:
                 trap = self._get_trap(proxy.handler, 'apply')
                 if trap:
+                    _log_proxy.debug("proxy trap apply(target=%s)", proxy.target.type)
                     return self._call_js(trap, [proxy.target, this_val if this_val is not None else UNDEFINED, JsValue('array', args)], UNDEFINED)
             return self._call_js(proxy.target, args, this_val, extra_args, is_new_call)
         if fn_val.type == "intrinsic":
@@ -3724,6 +3856,8 @@ class Interpreter:
                 return self._make_generator_obj(fn_val, args)
             env = info["env"]
             call_env = Environment(env)
+            _fn_name = info.get("name") or node.get("id") or "<anonymous>"
+            _log_scope.info("scope create (function %s)", _fn_name)
             call_env._this = this_val if this_val is not None else UNDEFINED
             call_env._is_arrow = bool(node.get("arrow"))
             call_env._is_fn_env = True
@@ -3740,9 +3874,18 @@ class Interpreter:
             for p in params:
                 if isinstance(p, dict) and p.get("type") == "RestElement":
                     rest = args[arg_index:] if arg_index < len(args) else []
-                    self._bind_pattern(p["argument"], JsValue("array", list(rest)), call_env, 'var', True)
+                    rest_val = JsValue("array", list(rest))
+                    if _log_call.isEnabledFor(TRACE):
+                        _pname = p["argument"].get("name", "?") if isinstance(p["argument"], dict) else str(p["argument"])
+                        _log_call.log(TRACE, "  param ...%s = [%d items]", _pname, len(rest))
+                    self._bind_pattern(p["argument"], rest_val, call_env, 'var', True)
                     break
                 val = args[arg_index] if arg_index < len(args) else UNDEFINED
+                if _log_call.isEnabledFor(TRACE):
+                    _pname = p.get("name", "?") if isinstance(p, dict) else str(p)
+                    if isinstance(p, dict) and p.get("type") == "AssignmentPattern":
+                        _pname = p.get("left", {}).get("name", "?") if isinstance(p.get("left"), dict) else "?"
+                    _log_call.log(TRACE, "  param %s = %s", _pname, self._to_str(val)[:60])
                 self._bind_pattern(p, val, call_env, 'var', True)
                 arg_index += 1
             promise = self._new_promise() if node.get("async_") else None
@@ -3789,8 +3932,10 @@ class Interpreter:
         except _JSReturn:
             pass
         except _JSError as e:
+            _log_error.info("uncaught %s", self._to_str(e.value)[:80])
             self.output.append(f"Error: {self._to_str(e.value)}")
         except Exception as e:  # Catches non-control-flow errors at top level
+            _log_error.info("uncaught Python error: %s", str(e)[:80])
             self.output.append(f"Python Error: {e}")
         return '\n'.join(self.output[start:])
 

@@ -4,7 +4,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .core import JSTypeError
+from .trace import get_logger, TRACE
 from .values import JsValue, UNDEFINED
+
+_log = get_logger("scope")
 
 # Sentinel for Temporal Dead Zone — let/const declared but not yet initialized
 _TDZ_SENTINEL = object()
@@ -23,8 +26,13 @@ class Environment:
         self._generator = None
         self._fn_val = None
         self._strict: bool = parent._strict if parent else False
+        if parent is None:
+            _log.info("scope create (global)")
+        else:
+            _log.log(TRACE, "scope create (child)")
 
     def declare(self, name, value, keyword='var'):
+        _log.debug("declare %s %s", keyword, name)
         if keyword == 'const':
             if name in self.bindings:
                 if self.bindings[name][1] is not _TDZ_SENTINEL:
@@ -57,6 +65,8 @@ class Environment:
         return None
 
     def get(self, name):
+        if _log.isEnabledFor(TRACE):
+            _log.log(TRACE, "get %s", name)
         e = self._find(name)
         if not e:
             raise ReferenceError(f"{name} is not defined")
@@ -66,6 +76,8 @@ class Environment:
         return val
 
     def set(self, name, value):
+        if _log.isEnabledFor(TRACE):
+            _log.log(TRACE, "set %s", name)
         e = self._find(name)
         if not e:
             raise ReferenceError(f"{name} is not defined")

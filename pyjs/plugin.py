@@ -5,8 +5,11 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from .runtime import Interpreter
 
+from .trace import get_logger
 from .values import JsValue, UNDEFINED
 from .core import py_to_js
+
+_log = get_logger("plugin")
 
 
 class PluginContext:
@@ -21,6 +24,7 @@ class PluginContext:
         self._env = interpreter.genv
         self._registered_globals: List[str] = []
         self._registered_methods: List[tuple] = []
+        self._plugin_name: str = "?"
 
     def add_global(self, name: str, value, *, writable: bool = True) -> None:
         """Add a global variable or function to the JS environment.
@@ -39,6 +43,7 @@ class PluginContext:
 
         keyword = 'var' if writable else 'const'
         self._env.declare(name, js_val, keyword)
+        _log.debug("plugin %s: add_global(%s)", self._plugin_name, name)
         # Sync with globalThis
         self._interp._sync_global_binding(name, js_val, self._env)
         self._registered_globals.append(name)
@@ -57,6 +62,7 @@ class PluginContext:
         self._env.declare(name, obj, 'var')
         self._interp._sync_global_binding(name, obj, self._env)
         self._registered_globals.append(name)
+        _log.debug("plugin %s: add_global_object(%s)", self._plugin_name, name)
         return obj
 
     def add_method(self, type_name: str, method_name: str, fn: Callable) -> None:
@@ -84,6 +90,7 @@ class PluginContext:
             self._interp._plugin_methods = {}
         self._interp._plugin_methods[(type_name, method_name)] = fn
         self._registered_methods.append((type_name, method_name))
+        _log.debug("plugin %s: add_method(%s, %s)", self._plugin_name, type_name, method_name)
 
     def add_constructor(self, name: str, fn: Callable) -> None:
         """Add a constructor function (callable with `new`).
@@ -99,6 +106,7 @@ class PluginContext:
         self._env.declare(name, js_fn, 'var')
         self._interp._sync_global_binding(name, js_fn, self._env)
         self._registered_globals.append(name)
+        _log.debug("plugin %s: add_constructor(%s)", self._plugin_name, name)
 
     def get_interpreter(self) -> 'Interpreter':
         """Get the interpreter instance (for advanced use)."""
@@ -141,21 +149,22 @@ class PyJSPlugin:
 
         Override this to add globals, methods, constructors, etc.
         """
-        pass
+        ctx._plugin_name = self.name
+        _log.info("plugin setup: %s v%s", self.name, self.version)
 
     def teardown(self, ctx: PluginContext) -> None:
         """Called when the interpreter is being cleaned up.
 
         Override this for resource cleanup.
         """
-        pass
+        _log.info("plugin teardown: %s", self.name)
 
     def on_error(self, error: Exception, ctx: PluginContext) -> None:
         """Called when an error occurs in plugin-registered code.
 
         Override this for custom error handling/logging.
         """
-        pass
+        _log.debug("plugin on_error: %s", self.name)
 
     def __repr__(self) -> str:
         return f"<PyJSPlugin {self.name}@{self.version}>"

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List
 
-from .trace import get_logger
+from .trace import get_logger, TRACE
 
 _log = get_logger("lexer")
 
@@ -66,7 +66,10 @@ class Lexer:
         return False
 
     def _mk(self, tt, val, sc, sl):
-        return Token(tt, val, sl, sc, self.col)
+        tok = Token(tt, val, sl, sc, self.col)
+        if _log.isEnabledFor(TRACE):
+            _log.log(TRACE, "token %s %r (line %d)", tt, str(val)[:40] if val is not None else '', sl)
+        return tok
 
     # -- skip whitespace / comments ----------------------------------------
     def _skip(self):

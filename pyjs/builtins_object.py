@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from .core import JSTypeError, py_to_js, js_to_py
 from .exceptions import _JSReturn, _JSError
 from .builtins_core import _parseInt, _parseFloat
+from .trace import get_logger
 from .values import (
     JsValue, JsProxy, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE,
     SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
@@ -24,6 +25,8 @@ from .values import (
     _symbol_id_counter, _symbol_registry,
     _js_regex_to_python,
 )
+
+_log = get_logger("scope")
 
 
 def register_object_builtins(interp, g, intr):
@@ -700,5 +703,6 @@ def register_object_builtins(interp, g, intr):
     g.declare('String',  string_ctor, 'var')
     g.declare('Number',  number_ctor, 'var')
     g.declare('Boolean', intr(lambda a,i: JS_TRUE if a and i._truthy(a[0]) else JS_FALSE, 'Boolean'), 'var')
+    _log.info("registered object builtins")
 
 
