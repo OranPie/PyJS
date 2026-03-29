@@ -2088,5 +2088,279 @@ console.log(orig[0] + '|' + copy[0] + '|' + copy.length);
         self.assertIn("function", result.strip())
 
 
+    # ── Phase 21A: ES Spec additions ─────────────────────────────────
+
+    def test_string_is_well_formed(self):
+        """String.isWellFormed detects well-formed strings."""
+        result = Interpreter().run('''
+            console.log("hello".isWellFormed());
+            console.log("abc".isWellFormed());
+        ''')
+        self.assertEqual(result.strip(), "true\ntrue")
+
+    def test_string_to_well_formed(self):
+        """String.toWellFormed replaces lone surrogates."""
+        result = Interpreter().run('''
+            console.log("hello".toWellFormed());
+            console.log("abc".toWellFormed() === "abc");
+        ''')
+        lines = result.strip().splitlines()
+        self.assertEqual(lines[0], "hello")
+        self.assertEqual(lines[1], "true")
+
+    def test_array_from_async_basic(self):
+        """Array.fromAsync converts array-like to promise of array."""
+        result = Interpreter().run('''
+            Array.fromAsync([1, 2, 3]).then(arr => {
+                console.log(arr.length);
+                console.log(arr.join(","));
+            });
+        ''')
+        lines = result.strip().splitlines()
+        self.assertEqual(lines[0], "3")
+        self.assertEqual(lines[1], "1,2,3")
+
+    def test_array_from_async_with_promises(self):
+        """Array.fromAsync resolves promise elements."""
+        result = Interpreter().run('''
+            Array.fromAsync([Promise.resolve(10), Promise.resolve(20)]).then(arr => {
+                console.log(arr.join(","));
+            });
+        ''')
+        self.assertEqual(result.strip(), "10,20")
+
+    # ── Phase 21C: New plugin tests ──────────────────────────────────
+
+    def test_process_plugin_platform(self):
+        """ProcessPlugin: process.platform returns string."""
+        from pyjs.plugins.process import ProcessPlugin
+        result = Interpreter(plugins=[ProcessPlugin()]).run(
+            'console.log(typeof process.platform)'
+        )
+        self.assertEqual(result.strip(), "string")
+
+    def test_process_plugin_cwd(self):
+        """ProcessPlugin: process.cwd() returns current directory."""
+        import os
+        from pyjs.plugins.process import ProcessPlugin
+        result = Interpreter(plugins=[ProcessPlugin()]).run(
+            'console.log(process.cwd())'
+        )
+        self.assertEqual(result.strip(), os.getcwd())
+
+    def test_process_plugin_argv(self):
+        """ProcessPlugin: process.argv is an array."""
+        from pyjs.plugins.process import ProcessPlugin
+        result = Interpreter(plugins=[ProcessPlugin(argv=['node', 'test.js'])]).run(
+            'console.log(process.argv[1])'
+        )
+        self.assertEqual(result.strip(), "test.js")
+
+    def test_process_plugin_env(self):
+        """ProcessPlugin: process.env contains environment vars."""
+        import os
+        from pyjs.plugins.process import ProcessPlugin
+        os.environ['PYJS_TEST_VAR'] = 'hello123'
+        try:
+            result = Interpreter(plugins=[ProcessPlugin()]).run(
+                'console.log(process.env.PYJS_TEST_VAR)'
+            )
+            self.assertEqual(result.strip(), "hello123")
+        finally:
+            del os.environ['PYJS_TEST_VAR']
+
+    def test_process_plugin_pid(self):
+        """ProcessPlugin: process.pid is a number."""
+        from pyjs.plugins.process import ProcessPlugin
+        result = Interpreter(plugins=[ProcessPlugin()]).run(
+            'console.log(typeof process.pid)'
+        )
+        self.assertEqual(result.strip(), "number")
+
+    def test_path_plugin_join(self):
+        """PathPlugin: path.join combines paths."""
+        from pyjs.plugins.path_plugin import PathPlugin
+        result = Interpreter(plugins=[PathPlugin()]).run(
+            'console.log(path.join("a", "b", "c.txt"))'
+        )
+        self.assertEqual(result.strip(), "a/b/c.txt")
+
+    def test_path_plugin_dirname_basename_extname(self):
+        """PathPlugin: dirname, basename, extname."""
+        from pyjs.plugins.path_plugin import PathPlugin
+        result = Interpreter(plugins=[PathPlugin()]).run('''
+            console.log(path.dirname("/foo/bar/baz.js"));
+            console.log(path.basename("/foo/bar/baz.js"));
+            console.log(path.extname("baz.js"));
+        ''')
+        lines = result.strip().splitlines()
+        self.assertEqual(lines[0], "/foo/bar")
+        self.assertEqual(lines[1], "baz.js")
+        self.assertEqual(lines[2], ".js")
+
+    def test_path_plugin_parse(self):
+        """PathPlugin: path.parse returns components."""
+        from pyjs.plugins.path_plugin import PathPlugin
+        result = Interpreter(plugins=[PathPlugin()]).run('''
+            let p = path.parse("/home/user/file.txt");
+            console.log(p.dir);
+            console.log(p.base);
+            console.log(p.ext);
+            console.log(p.name);
+        ''')
+        lines = result.strip().splitlines()
+        self.assertEqual(lines[0], "/home/user")
+        self.assertEqual(lines[1], "file.txt")
+        self.assertEqual(lines[2], ".txt")
+        self.assertEqual(lines[3], "file")
+
+    def test_path_plugin_is_absolute(self):
+        """PathPlugin: path.isAbsolute."""
+        from pyjs.plugins.path_plugin import PathPlugin
+        result = Interpreter(plugins=[PathPlugin()]).run('''
+            console.log(path.isAbsolute("/foo"));
+            console.log(path.isAbsolute("foo"));
+        ''')
+        self.assertEqual(result.strip(), "true\nfalse")
+
+    def test_path_plugin_normalize(self):
+        """PathPlugin: path.normalize cleans paths."""
+        from pyjs.plugins.path_plugin import PathPlugin
+        result = Interpreter(plugins=[PathPlugin()]).run(
+            'console.log(path.normalize("/foo/bar/../baz"))'
+        )
+        self.assertEqual(result.strip(), "/foo/baz")
+
+    def test_assert_plugin_ok(self):
+        """AssertPlugin: assert(truthy) passes, assert(falsy) throws."""
+        from pyjs.plugins.assert_plugin import AssertPlugin
+        result = Interpreter(plugins=[AssertPlugin()]).run('''
+            assert(true);
+            try { assert(false, "nope"); } catch(e) { console.log(e.message); }
+        ''')
+        self.assertIn("nope", result.strip())
+
+    def test_assert_plugin_strict_equal(self):
+        """AssertPlugin: strictEqual passes/fails correctly."""
+        from pyjs.plugins.assert_plugin import AssertPlugin
+        result = Interpreter(plugins=[AssertPlugin()]).run('''
+            assert.strictEqual(1, 1);
+            try { assert.strictEqual(1, "1"); } catch(e) { console.log("caught"); }
+        ''')
+        self.assertIn("caught", result.strip())
+
+    def test_assert_plugin_deep_equal(self):
+        """AssertPlugin: deepEqual compares recursively."""
+        from pyjs.plugins.assert_plugin import AssertPlugin
+        result = Interpreter(plugins=[AssertPlugin()]).run('''
+            assert.deepEqual([1, 2, 3], [1, 2, 3]);
+            assert.deepEqual({a: 1}, {a: 1});
+            console.log("pass");
+        ''')
+        self.assertEqual(result.strip(), "pass")
+
+    def test_assert_plugin_throws(self):
+        """AssertPlugin: assert.throws checks function throws."""
+        from pyjs.plugins.assert_plugin import AssertPlugin
+        result = Interpreter(plugins=[AssertPlugin()]).run('''
+            assert.throws(() => { throw new Error("boom"); });
+            try { assert.throws(() => {}); } catch(e) { console.log("caught"); }
+        ''')
+        self.assertIn("caught", result.strip())
+
+    def test_util_plugin_format(self):
+        """UtilPlugin: util.format with printf-style args."""
+        from pyjs.plugins.util_plugin import UtilPlugin
+        result = Interpreter(plugins=[UtilPlugin()]).run(
+            'console.log(util.format("%s has %d items", "list", 3))'
+        )
+        self.assertEqual(result.strip(), "list has 3 items")
+
+    def test_util_plugin_inspect(self):
+        """UtilPlugin: util.inspect formats objects."""
+        from pyjs.plugins.util_plugin import UtilPlugin
+        result = Interpreter(plugins=[UtilPlugin()]).run(
+            'console.log(util.inspect({a: 1, b: "hello"}))'
+        )
+        self.assertIn("a", result)
+        self.assertIn("hello", result)
+
+    def test_util_plugin_is_deep_strict_equal(self):
+        """UtilPlugin: util.isDeepStrictEqual."""
+        from pyjs.plugins.util_plugin import UtilPlugin
+        result = Interpreter(plugins=[UtilPlugin()]).run('''
+            console.log(util.isDeepStrictEqual([1,2], [1,2]));
+            console.log(util.isDeepStrictEqual({a:1}, {a:2}));
+        ''')
+        self.assertEqual(result.strip(), "true\nfalse")
+
+    def test_util_plugin_types(self):
+        """UtilPlugin: util.types type checks."""
+        from pyjs.plugins.util_plugin import UtilPlugin
+        result = Interpreter(plugins=[UtilPlugin()]).run('''
+            console.log(util.types.isRegExp(/abc/));
+            console.log(util.types.isPromise(Promise.resolve(1)));
+            console.log(util.types.isMap(new Map()));
+        ''')
+        self.assertEqual(result.strip(), "true\ntrue\ntrue")
+
+    def test_crypto_plugin_create_hash(self):
+        """CryptoSubtlePlugin: createHash with sha256."""
+        from pyjs.plugins.crypto_plugin import CryptoSubtlePlugin
+        result = Interpreter(plugins=[CryptoSubtlePlugin()]).run('''
+            let h = crypto.createHash("sha256");
+            h.update("hello");
+            console.log(h.digest("hex").slice(0, 16));
+        ''')
+        self.assertEqual(result.strip(), "2cf24dba5fb0a30e")
+
+    def test_crypto_plugin_create_hmac(self):
+        """CryptoSubtlePlugin: createHmac."""
+        from pyjs.plugins.crypto_plugin import CryptoSubtlePlugin
+        result = Interpreter(plugins=[CryptoSubtlePlugin()]).run('''
+            let h = crypto.createHmac("sha256", "secret");
+            h.update("message");
+            let d = h.digest("hex");
+            console.log(d.length > 0);
+        ''')
+        self.assertEqual(result.strip(), "true")
+
+    def test_crypto_plugin_timing_safe_equal(self):
+        """CryptoSubtlePlugin: timingSafeEqual."""
+        from pyjs.plugins.crypto_plugin import CryptoSubtlePlugin
+        result = Interpreter(plugins=[CryptoSubtlePlugin()]).run('''
+            console.log(crypto.timingSafeEqual("abc", "abc"));
+            console.log(crypto.timingSafeEqual("abc", "xyz"));
+        ''')
+        self.assertEqual(result.strip(), "true\nfalse")
+
+    def test_child_process_exec_sync(self):
+        """ChildProcessPlugin: execSync runs command."""
+        from pyjs.plugins.child_process import ChildProcessPlugin
+        result = Interpreter(plugins=[ChildProcessPlugin()]).run(
+            'console.log(childProcess.execSync("echo hello").trim())'
+        )
+        self.assertEqual(result.strip(), "hello")
+
+    def test_child_process_spawn_sync(self):
+        """ChildProcessPlugin: spawnSync with args."""
+        from pyjs.plugins.child_process import ChildProcessPlugin
+        result = Interpreter(plugins=[ChildProcessPlugin()]).run('''
+            let r = childProcess.spawnSync("echo", ["hi", "there"]);
+            console.log(r.stdout.trim());
+        ''')
+        self.assertEqual(result.strip(), "hi there")
+
+    def test_child_process_exec_async(self):
+        """ChildProcessPlugin: exec returns Promise."""
+        from pyjs.plugins.child_process import ChildProcessPlugin
+        result = Interpreter(plugins=[ChildProcessPlugin()]).run('''
+            childProcess.exec("echo async_test").then(r => {
+                console.log(r.stdout.trim());
+            });
+        ''')
+        self.assertEqual(result.strip(), "async_test")
+
+
 if __name__ == '__main__':
     unittest.main()

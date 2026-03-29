@@ -366,6 +366,41 @@ def register_object_builtins(interp, g, intr):
         return JsValue('array', items)
     arr_ctor.value['from']    = intr(_array_from, 'from')
     arr_ctor.value['of']      = intr(lambda a, i: JsValue('array', list(a)), 'of')
+
+    def _array_from_async(args, interp):
+        if not args:
+            return interp._resolved_promise(JsValue('array', []))
+        src = args[0]
+        map_fn = args[1] if len(args) > 1 and interp._is_callable(args[1]) else None
+        # Collect items from the source
+        if src.type == 'array':
+            items = list(src.value)
+        elif src.type == 'object':
+            raw_length = src.value.get('length', UNDEFINED)
+            if isinstance(raw_length, JsValue) and raw_length.type != 'undefined':
+                length = max(0, int(interp._to_num(raw_length)))
+                items = [src.value.get(str(index), UNDEFINED) for index in range(length)]
+            else:
+                items = []
+        else:
+            items = []
+        # Resolve each element (handles promise elements via _promise_all)
+        promises = [interp._to_promise(item) for item in items]
+        all_promise = interp._promise_all(promises)
+        if map_fn:
+            def _apply_map(this_val, map_args, interp_inner):
+                arr = map_args[0] if map_args else JsValue('array', [])
+                mapped = [interp_inner._call_js(map_fn, [item, JsValue('number', float(i))], UNDEFINED)
+                          for i, item in enumerate(arr.value)]
+                return JsValue('array', mapped)
+            return interp._promise_then(
+                all_promise,
+                interp._make_intrinsic(_apply_map, 'Array.fromAsync.map'),
+                None,
+            )
+        return all_promise
+    arr_ctor.value['fromAsync'] = intr(_array_from_async, 'fromAsync')
+
     g.declare('Array', arr_ctor, 'var')
 
     number_ctor = intr(lambda a,i: py_to_js(i._to_num(a[0]) if a else 0), 'Number')
