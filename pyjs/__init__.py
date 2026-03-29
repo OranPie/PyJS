@@ -400,7 +400,7 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
 
             # Invalidate completer property cache after each execution
             if _completer_obj is not None:
-                _completer_obj._cache.clear()
+                _completer_obj.invalidate()
 
             printed = stdout_buf.getvalue()
             if printed:
@@ -416,12 +416,20 @@ def repl(plugins: list | None = None, log_level: str | None = None) -> None:
                 last = getattr(interp, '_last_value', None)
                 if last is not None:
                     result_str = js_inspect(last, interp, depth=3, colors=_use_color)
-                    print(result_str)
-                    # Pre-render: dim type annotation below the value
-                    if _use_color and last.type not in ('undefined',):
+                    # Show type tag for compound types (not trivial primitives)
+                    _show_tag = last.type in ('object', 'array', 'function', 'intrinsic',
+                                              'class', 'promise', 'regexp')
+                    if _use_color and _show_tag:
                         from .completer import _type_tag
                         tag = _type_tag(last)
-                        print(_ansi('dim', f'// {tag}', True))
+                        tag_str = _ansi('dim', '// ' + tag, True)
+                        if '\n' in result_str:
+                            # Multi-line: tag on its own line below
+                            print(f'{result_str}\n{tag_str}')
+                        else:
+                            print(f'{result_str}  {tag_str}')
+                    else:
+                        print(result_str)
 
         except SystemExit:
             raise
