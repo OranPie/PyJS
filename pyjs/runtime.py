@@ -56,7 +56,7 @@ _log_promise = get_logger("promise")
 
 class Interpreter:
     ARRAY_METHODS = frozenset({'push', 'pop', 'shift', 'unshift', 'indexOf', 'includes', 'join', 'slice', 'splice', 'concat', 'reverse', 'sort', 'forEach', 'map', 'filter', 'reduce', 'find', 'flat', 'flatMap', 'every', 'some', 'fill', 'copyWithin', 'toString', 'at', 'findIndex', 'findLast', 'findLastIndex', 'reduceRight', 'lastIndexOf', 'toSorted', 'toReversed', 'toSpliced', 'with'})
-    STRING_METHODS = frozenset({'charAt', 'charCodeAt', 'indexOf', 'includes', 'slice', 'substring', 'toLowerCase', 'toUpperCase', 'trim', 'split', 'replace', 'replaceAll', 'startsWith', 'endsWith', 'padStart', 'padEnd', 'repeat', 'match', 'search', 'concat', 'lastIndexOf', 'normalize', 'at', 'matchAll', 'trimStart', 'trimLeft', 'trimEnd', 'trimRight', 'codePointAt'})
+    STRING_METHODS = frozenset({'charAt', 'charCodeAt', 'indexOf', 'includes', 'slice', 'substring', 'toLowerCase', 'toUpperCase', 'trim', 'split', 'replace', 'replaceAll', 'startsWith', 'endsWith', 'padStart', 'padEnd', 'repeat', 'match', 'search', 'concat', 'lastIndexOf', 'normalize', 'at', 'matchAll', 'trimStart', 'trimLeft', 'trimEnd', 'trimRight', 'codePointAt', 'isWellFormed', 'toWellFormed'})
     NUMBER_METHODS = frozenset({'toFixed', 'toPrecision', 'toString', 'toLocaleString', 'valueOf', 'toExponential'})
     PROMISE_METHODS = frozenset({'then', 'catch', 'finally'})
     EVENT_LOOP_LIMIT = 10000
@@ -67,7 +67,7 @@ class Interpreter:
     def __init__(self, log_level: str | None = None, plugins: list | None = None):
         _configure_trace(log_level)
         # Ensure Python's recursion limit can accommodate our JS call depth
-        _min_py_limit = self.MAX_CALL_DEPTH * 6
+        _min_py_limit = self.MAX_CALL_DEPTH * 10
         if sys.getrecursionlimit() < _min_py_limit:
             sys.setrecursionlimit(_min_py_limit)
         self.output: List[str] = []
@@ -94,6 +94,9 @@ class Interpreter:
         if plugins:
             for plugin in plugins:
                 self.use(plugin)
+        self._init_exec_dispatch()
+        self._init_eval_dispatch()
+        self._init_prop_dispatch()
 
 
     def use(self, plugin: PyJSPlugin) -> 'Interpreter':
@@ -583,38 +586,62 @@ class Interpreter:
         })
 
     # --------------------------------------------------------- coercion helpers
+    _TRUTHY_MAP = {
+        'undefined': lambda v: False,
+        'null': lambda v: False,
+        'boolean': lambda v: v.value,
+        'number': lambda v: v.value != 0 and not (isinstance(v.value, float) and v.value != v.value),
+        'bigint': lambda v: v.value != 0,
+        'string': lambda v: len(v.value) > 0,
+    }
+
     def _truthy(self, v: JsValue) -> bool:
-        if v.type in ('null','undefined'): return False
-        if v.type == 'boolean':   return v.value
-        if v.type == 'number':    return v.value != 0 and not math.isnan(v.value)
-        if v.type == 'bigint':    return v.value != 0
-        if v.type == 'string':    return len(v.value) > 0
-        return True
+        handler = self._TRUTHY_MAP.get(v.type)
+        if handler:
+            return handler(v)
+        return True  # objects, arrays, functions are truthy
+
+    _TO_NUM_MAP = {
+        'number': lambda v: v.value,
+        'bigint': lambda v: float(v.value),
+        'boolean': lambda v: 1.0 if v.value else 0.0,
+        'null': lambda v: 0.0,
+        'undefined': lambda v: float('nan'),
+    }
 
     def _to_num(self, v: JsValue) -> float:
-        if v.type == 'number':    return v.value
-        if v.type == 'bigint':    return float(v.value)
-        if v.type == 'boolean':   return 1.0 if v.value else 0.0
-        if v.type in ('null',):   return 0.0
-        if v.type == 'undefined': return float('nan')
+        handler = self._TO_NUM_MAP.get(v.type)
+        if handler:
+            return handler(v)
         if v.type == 'string':
             try: return float(v.value.strip() or 0)
             except (ValueError, TypeError, OverflowError): return float('nan')
         return float('nan')
 
+    _TO_STR_SIMPLE = {
+        'null': 'null',
+        'undefined': 'undefined',
+    }
+    _TO_STR_LAMBDA = {
+        'boolean': lambda v: 'true' if v.value else 'false',
+        'bigint': lambda v: str(v.value),
+        'symbol': lambda v: f"Symbol({v.value.get('desc', '')})",
+        'string': lambda v: v.value,
+    }
+
     def _to_str(self, v: JsValue) -> str:
-        if v.type == 'null':      return 'null'
-        if v.type == 'undefined': return 'undefined'
-        if v.type == 'boolean':   return 'true' if v.value else 'false'
-        if v.type == 'bigint':    return str(v.value)
-        if v.type == 'symbol':    return f"Symbol({v.value.get('desc', '')})"
+        simple = self._TO_STR_SIMPLE.get(v.type)
+        if simple is not None:
+            return simple
+        lam = self._TO_STR_LAMBDA.get(v.type)
+        if lam:
+            return lam(v)
         if v.type == 'number':
             n = v.value
             if math.isnan(n): return 'NaN'
             if math.isinf(n): return 'Infinity' if n>0 else '-Infinity'
             if n == int(n) and abs(n) < 1e15: return str(int(n))
             return str(n)
-        if v.type == 'string':    return v.value
         if v.type == 'array':     return ','.join(self._to_str(e) for e in v.value)
         if v.type == 'promise':   return '[object Promise]'
         if v.type == 'proxy':     return self._to_str(v.value.target)
@@ -664,20 +691,22 @@ class Interpreter:
     def _from_py(self, val):
         return py_to_js(val)
 
+    _TYPEOF_MAP = {
+        'undefined': 'undefined', 'null': 'object', 'boolean': 'boolean',
+        'number': 'number', 'string': 'string', 'bigint': 'bigint',
+        'symbol': 'symbol', 'function': 'function', 'intrinsic': 'function',
+        'class': 'function', 'object': 'object', 'array': 'object',
+        'promise': 'object',
+    }
+
     def _typeof(self, v: JsValue) -> str:
-        if v.type == 'undefined': return 'undefined'
-        if v.type == 'null':      return 'object'
-        if v.type == 'number':    return 'number'
-        if v.type == 'bigint':    return 'bigint'
-        if v.type == 'string':    return 'string'
-        if v.type == 'boolean':   return 'boolean'
-        if v.type == 'symbol':    return 'symbol'
-        if v.type in ('function','intrinsic','class'): return 'function'
+        result = self._TYPEOF_MAP.get(v.type)
+        if result is not None:
+            return result
         if v.type == 'proxy':
             t = v.value.target
             if t.type in ('function','intrinsic','class'): return 'function'
             return 'object'
-        if v.type in ('object','array','promise'): return 'object'
         return 'undefined'
 
     def _is_nullish(self, v: JsValue) -> bool:
@@ -933,6 +962,211 @@ class Interpreter:
             return True
         return desc.get('enumerable', True)
 
+    def _get_prop_array(self, obj, key):
+        if key == 'length':
+            return JsValue("number", len(obj.value))
+        sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+        if key == sym_iter_key:
+            arr_ref = obj
+            def _arr_iter_factory(this_val, call_args, interp):
+                items = list(arr_ref.value)
+                idx = [0]
+                iterator = JsValue('object', {})
+                def _next(tv, a, intp):
+                    if idx[0] >= len(items):
+                        return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
+                    v = items[idx[0]]; idx[0] += 1
+                    return JsValue('object', {'value': v, 'done': JS_FALSE})
+                iterator.value['next'] = interp._make_intrinsic(_next, 'ArrayIterator.next')
+                iterator.value[sym_iter_key] = interp._make_intrinsic(lambda tv, a, i: iterator, '[Symbol.iterator]')
+                interp._add_iterator_helpers(iterator)
+                return iterator
+            return self._make_intrinsic(_arr_iter_factory, '[Symbol.iterator]')
+        if key in self.ARRAY_METHODS:
+            return self._arr_method(obj, key)
+        try:
+            idx = int(key)
+            if 0 <= idx < len(obj.value):
+                return obj.value[idx]
+        except ValueError:
+            pass
+        if obj.extras and key in obj.extras:
+            return obj.extras[key]
+        plugin_key = ('array', key)
+        if self._plugin_methods and plugin_key in self._plugin_methods:
+            handler = self._plugin_methods[plugin_key]
+            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+        return UNDEFINED
+
+    def _get_prop_string(self, obj, key):
+        if key == 'length':
+            return JsValue("number", len(obj.value))
+        sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+        if key == sym_iter_key:
+            chars = list(obj.value)
+            def _str_iter_factory(this_val, call_args, interp):
+                idx = [0]
+                iterator = JsValue('object', {})
+                def _next(tv, a, intp):
+                    if idx[0] >= len(chars):
+                        return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
+                    v = JsValue('string', chars[idx[0]]); idx[0] += 1
+                    return JsValue('object', {'value': v, 'done': JS_FALSE})
+                iterator.value['next'] = interp._make_intrinsic(_next, 'StringIterator.next')
+                iterator.value[sym_iter_key] = interp._make_intrinsic(lambda tv, a, i: iterator, '[Symbol.iterator]')
+                interp._add_iterator_helpers(iterator)
+                return iterator
+            return self._make_intrinsic(_str_iter_factory, '[Symbol.iterator]')
+        if key in self.STRING_METHODS:
+            return self._str_method(obj, key)
+        try:
+            idx = int(key)
+            if 0 <= idx < len(obj.value):
+                return JsValue("string", obj.value[idx])
+        except ValueError:
+            pass
+        plugin_key = ('string', key)
+        if self._plugin_methods and plugin_key in self._plugin_methods:
+            handler = self._plugin_methods[plugin_key]
+            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+        return UNDEFINED
+
+    def _get_prop_promise(self, obj, key):
+        if key in self.PROMISE_METHODS:
+            return self._promise_method(obj, key)
+        plugin_key = ('promise', key)
+        if self._plugin_methods and plugin_key in self._plugin_methods:
+            handler = self._plugin_methods[plugin_key]
+            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+        return UNDEFINED
+
+    def _get_prop_object_like(self, obj, key):
+        obj_type = obj.value.get('__type__') if isinstance(obj.value, dict) else None
+        if isinstance(obj_type, JsValue) and obj_type.value == 'WeakRef':
+            if key == 'deref':
+                target = obj.value.get('__target__', UNDEFINED)
+                return self._make_intrinsic(lambda tv, a, i, t=target: t, 'WeakRef.deref')
+        _obj_type_str = obj_type.value if isinstance(obj_type, JsValue) else obj_type
+        if _obj_type_str == 'TypedArray':
+            return self._typed_array_get_prop(obj, key)
+        if _obj_type_str == 'DataView':
+            return self._dataview_get_prop(obj, key)
+        if _obj_type_str == 'ArrayBuffer':
+            return self._arraybuffer_get_prop(obj, key)
+        kind = obj.value.get('__kind__')
+        if isinstance(kind, JsValue) and kind.type == 'string':
+            if kind.value == 'Map' and key == 'size':
+                size_fn = obj.value.get('__size_fn__')
+                return self._call_js(size_fn, [], obj) if size_fn else JsValue('number', 0)
+            if kind.value == 'Set' and key == 'size':
+                size_fn = obj.value.get('__size_fn__')
+                return self._call_js(size_fn, [], obj) if size_fn else JsValue('number', 0)
+        if obj.type in ('function', 'intrinsic') and key == 'name':
+            raw_name = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
+            return JsValue('string', raw_name if isinstance(raw_name, str) else '')
+        if obj.type == 'function' and key == 'length':
+            node = obj.value.get('node', {}) if isinstance(obj.value, dict) else {}
+            params = node.get('params', []) if isinstance(node, dict) else []
+            count = 0
+            for p in params:
+                if isinstance(p, dict) and p.get('type') in ('RestElement', 'AssignmentPattern'):
+                    break
+                count += 1
+            return JsValue('number', float(count))
+        if obj.type == 'intrinsic' and key == 'length':
+            return JsValue('number', 0.0)
+        current = obj
+        while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
+            getter_key = f"__get__{key}"
+            if getter_key in current.value:
+                return self._call_js(current.value[getter_key], [], obj)
+            if key in current.value:
+                return current.value[key]
+            current = self._get_proto(current)
+        if key == 'hasOwnProperty':
+            obj_ref = obj
+            def _has_own_property(tv, call_args, interp, _obj=obj_ref):
+                prop_name = interp._to_key(call_args[0]) if call_args else ''
+                if isinstance(_obj.value, dict) and prop_name in _obj.value:
+                    return JS_TRUE
+                return JS_FALSE
+            return self._make_intrinsic(_has_own_property, 'Object.hasOwnProperty')
+        if key == 'valueOf':
+            obj_ref = obj
+            return self._make_intrinsic(lambda tv, a, i, o=obj_ref: o, 'Object.valueOf')
+        if key == 'toString' and obj.type == 'object':
+            tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
+            tag = obj.value.get(tag_key, None) if isinstance(obj.value, dict) else None
+            if isinstance(tag, JsValue) and tag.type == 'string':
+                label = tag.value
+            else:
+                label = 'Object'
+            return self._make_intrinsic(lambda tv, a, i, l=label: JsValue('string', f'[object {l}]'), 'Object.toString')
+        if obj.type in ('function', 'intrinsic') and key == 'call':
+            fn_ref = obj
+            def _fn_call(this_val, call_args, interp, _fn=fn_ref):
+                new_this = call_args[0] if call_args else UNDEFINED
+                rest_args = list(call_args[1:]) if len(call_args) > 1 else []
+                return interp._call_js(_fn, rest_args, new_this)
+            return self._make_intrinsic(_fn_call, 'Function.call')
+        if obj.type in ('function', 'intrinsic') and key == 'apply':
+            fn_ref = obj
+            def _fn_apply(this_val, call_args, interp, _fn=fn_ref):
+                new_this = call_args[0] if call_args else UNDEFINED
+                rest = call_args[1] if len(call_args) > 1 else JsValue('array', [])
+                args_list = list(rest.value) if rest.type == 'array' else []
+                return interp._call_js(_fn, args_list, new_this)
+            return self._make_intrinsic(_fn_apply, 'Function.apply')
+        if obj.type in ('function', 'intrinsic') and key == 'bind':
+            fn_ref = obj
+            def _fn_bind(this_val, call_args, interp, _fn=fn_ref):
+                bound_this = call_args[0] if call_args else UNDEFINED
+                bound_args = list(call_args[1:]) if len(call_args) > 1 else []
+                def _bound(tv, a, i, _bfn=_fn, _bthis=bound_this, _bargs=bound_args):
+                    return i._call_js(_bfn, _bargs + list(a), _bthis)
+                return i._make_intrinsic(_bound, 'bound function') if False else interp._make_intrinsic(_bound, 'bound function')
+            return self._make_intrinsic(_fn_bind, 'Function.bind')
+        if obj.type in ('function', 'intrinsic') and key == 'toString':
+            name = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
+            return self._make_intrinsic(lambda tv, a, i, n=name: JsValue('string', f'function {n}() {{ [native code] }}'), 'Function.toString')
+        plugin_key = ('object', key)
+        if self._plugin_methods and plugin_key in self._plugin_methods:
+            handler = self._plugin_methods[plugin_key]
+            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+        return UNDEFINED
+
+    def _get_prop_number(self, obj, key):
+        if key in self.NUMBER_METHODS:
+            return self._num_method(obj, key)
+        plugin_key = ('number', key)
+        if self._plugin_methods and plugin_key in self._plugin_methods:
+            handler = self._plugin_methods[plugin_key]
+            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+        return UNDEFINED
+
+    def _get_prop_symbol(self, obj, key):
+        sym_str = self._to_str(obj)
+        if key == 'toString':
+            return self._make_intrinsic(lambda tv, a, i: JsValue('string', sym_str), 'Symbol.toString')
+        if key == 'description':
+            return JsValue('string', obj.value.get('desc', ''))
+        return UNDEFINED
+
+    _GET_PROP_DISPATCH = None  # initialized in _init_dispatch_tables
+
+    def _init_prop_dispatch(self):
+        self._GET_PROP_DISPATCH = {
+            'array': self._get_prop_array,
+            'string': self._get_prop_string,
+            'promise': self._get_prop_promise,
+            'object': self._get_prop_object_like,
+            'function': self._get_prop_object_like,
+            'intrinsic': self._get_prop_object_like,
+            'class': self._get_prop_object_like,
+            'number': self._get_prop_number,
+            'symbol': self._get_prop_symbol,
+        }
+
     def _get_prop(self, obj: JsValue, prop):
         key = self._to_key(prop)
         _log_prop.debug("get %s.%s", obj.type, key)
@@ -949,198 +1183,9 @@ class Interpreter:
             if isinstance(target, JsValue):
                 return self._get_prop(target, key)
             return UNDEFINED
-        if obj.type == 'array':
-            if key == 'length':
-                return JsValue("number", len(obj.value))
-            sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
-            if key == sym_iter_key:
-                arr_ref = obj
-                def _arr_iter_factory(this_val, call_args, interp):
-                    items = list(arr_ref.value)
-                    idx = [0]
-                    iterator = JsValue('object', {})
-                    def _next(tv, a, intp):
-                        if idx[0] >= len(items):
-                            return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
-                        v = items[idx[0]]; idx[0] += 1
-                        return JsValue('object', {'value': v, 'done': JS_FALSE})
-                    iterator.value['next'] = interp._make_intrinsic(_next, 'ArrayIterator.next')
-                    iterator.value[sym_iter_key] = interp._make_intrinsic(lambda tv, a, i: iterator, '[Symbol.iterator]')
-                    interp._add_iterator_helpers(iterator)
-                    return iterator
-                return self._make_intrinsic(_arr_iter_factory, '[Symbol.iterator]')
-            if key in self.ARRAY_METHODS:
-                return self._arr_method(obj, key)
-            try:
-                idx = int(key)
-                if 0 <= idx < len(obj.value):
-                    return obj.value[idx]
-            except ValueError:
-                pass
-            if obj.extras and key in obj.extras:
-                return obj.extras[key]
-            # Check plugin-registered methods
-            plugin_key = ('array', key)
-            if self._plugin_methods and plugin_key in self._plugin_methods:
-                handler = self._plugin_methods[plugin_key]
-                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
-            return UNDEFINED
-        if obj.type == 'string':
-            if key == 'length':
-                return JsValue("number", len(obj.value))
-            sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
-            if key == sym_iter_key:
-                chars = list(obj.value)
-                def _str_iter_factory(this_val, call_args, interp):
-                    idx = [0]
-                    iterator = JsValue('object', {})
-                    def _next(tv, a, intp):
-                        if idx[0] >= len(chars):
-                            return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
-                        v = JsValue('string', chars[idx[0]]); idx[0] += 1
-                        return JsValue('object', {'value': v, 'done': JS_FALSE})
-                    iterator.value['next'] = interp._make_intrinsic(_next, 'StringIterator.next')
-                    iterator.value[sym_iter_key] = interp._make_intrinsic(lambda tv, a, i: iterator, '[Symbol.iterator]')
-                    interp._add_iterator_helpers(iterator)
-                    return iterator
-                return self._make_intrinsic(_str_iter_factory, '[Symbol.iterator]')
-            if key in self.STRING_METHODS:
-                return self._str_method(obj, key)
-            try:
-                idx = int(key)
-                if 0 <= idx < len(obj.value):
-                    return JsValue("string", obj.value[idx])
-            except ValueError:
-                pass
-            # Check plugin-registered methods
-            plugin_key = ('string', key)
-            if self._plugin_methods and plugin_key in self._plugin_methods:
-                handler = self._plugin_methods[plugin_key]
-                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
-            return UNDEFINED
-        if obj.type == 'promise':
-            if key in self.PROMISE_METHODS:
-                return self._promise_method(obj, key)
-            # Check plugin-registered methods
-            plugin_key = ('promise', key)
-            if self._plugin_methods and plugin_key in self._plugin_methods:
-                handler = self._plugin_methods[plugin_key]
-                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
-            return UNDEFINED
-        if obj.type in ('object', 'function', 'intrinsic', 'class'):
-            # WeakRef: deref() returns stored target
-            obj_type = obj.value.get('__type__') if isinstance(obj.value, dict) else None
-            if isinstance(obj_type, JsValue) and obj_type.value == 'WeakRef':
-                if key == 'deref':
-                    target = obj.value.get('__target__', UNDEFINED)
-                    return self._make_intrinsic(lambda tv, a, i, t=target: t, 'WeakRef.deref')
-            # TypedArray / DataView / ArrayBuffer special handling
-            _obj_type_str = obj_type.value if isinstance(obj_type, JsValue) else obj_type
-            if _obj_type_str == 'TypedArray':
-                return self._typed_array_get_prop(obj, key)
-            if _obj_type_str == 'DataView':
-                return self._dataview_get_prop(obj, key)
-            if _obj_type_str == 'ArrayBuffer':
-                return self._arraybuffer_get_prop(obj, key)
-            kind = obj.value.get('__kind__')
-            if isinstance(kind, JsValue) and kind.type == 'string':
-                if kind.value == 'Map' and key == 'size':
-                    size_fn = obj.value.get('__size_fn__')
-                    return self._call_js(size_fn, [], obj) if size_fn else JsValue('number', 0)
-                if kind.value == 'Set' and key == 'size':
-                    size_fn = obj.value.get('__size_fn__')
-                    return self._call_js(size_fn, [], obj) if size_fn else JsValue('number', 0)
-            # Function.name and Function.length (must intercept before value-dict lookup)
-            if obj.type in ('function', 'intrinsic') and key == 'name':
-                raw_name = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
-                return JsValue('string', raw_name if isinstance(raw_name, str) else '')
-            if obj.type == 'function' and key == 'length':
-                node = obj.value.get('node', {}) if isinstance(obj.value, dict) else {}
-                params = node.get('params', []) if isinstance(node, dict) else []
-                count = 0
-                for p in params:
-                    if isinstance(p, dict) and p.get('type') in ('RestElement', 'AssignmentPattern'):
-                        break
-                    count += 1
-                return JsValue('number', float(count))
-            if obj.type == 'intrinsic' and key == 'length':
-                return JsValue('number', 0.0)
-            current = obj
-            while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
-                getter_key = f"__get__{key}"
-                if getter_key in current.value:
-                    return self._call_js(current.value[getter_key], [], obj)
-                if key in current.value:
-                    return current.value[key]
-                current = self._get_proto(current)
-            # Object.prototype methods: hasOwnProperty, toString, valueOf
-            if key == 'hasOwnProperty':
-                obj_ref = obj
-                def _has_own_property(tv, call_args, interp, _obj=obj_ref):
-                    prop_name = interp._to_key(call_args[0]) if call_args else ''
-                    if isinstance(_obj.value, dict) and prop_name in _obj.value:
-                        return JS_TRUE
-                    return JS_FALSE
-                return self._make_intrinsic(_has_own_property, 'Object.hasOwnProperty')
-            if key == 'valueOf':
-                obj_ref = obj
-                return self._make_intrinsic(lambda tv, a, i, o=obj_ref: o, 'Object.valueOf')
-            if key == 'toString' and obj.type == 'object':
-                tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
-                tag = obj.value.get(tag_key, None) if isinstance(obj.value, dict) else None
-                if isinstance(tag, JsValue) and tag.type == 'string':
-                    label = tag.value
-                else:
-                    label = 'Object'
-                return self._make_intrinsic(lambda tv, a, i, l=label: JsValue('string', f'[object {l}]'), 'Object.toString')
-            # Function.prototype methods: call, apply, bind
-            if obj.type in ('function', 'intrinsic') and key == 'call':
-                fn_ref = obj
-                def _fn_call(this_val, call_args, interp, _fn=fn_ref):
-                    new_this = call_args[0] if call_args else UNDEFINED
-                    rest_args = list(call_args[1:]) if len(call_args) > 1 else []
-                    return interp._call_js(_fn, rest_args, new_this)
-                return self._make_intrinsic(_fn_call, 'Function.call')
-            if obj.type in ('function', 'intrinsic') and key == 'apply':
-                fn_ref = obj
-                def _fn_apply(this_val, call_args, interp, _fn=fn_ref):
-                    new_this = call_args[0] if call_args else UNDEFINED
-                    rest = call_args[1] if len(call_args) > 1 else JsValue('array', [])
-                    args_list = list(rest.value) if rest.type == 'array' else []
-                    return interp._call_js(_fn, args_list, new_this)
-                return self._make_intrinsic(_fn_apply, 'Function.apply')
-            if obj.type in ('function', 'intrinsic') and key == 'bind':
-                fn_ref = obj
-                def _fn_bind(this_val, call_args, interp, _fn=fn_ref):
-                    bound_this = call_args[0] if call_args else UNDEFINED
-                    bound_args = list(call_args[1:]) if len(call_args) > 1 else []
-                    def _bound(tv, a, i, _bfn=_fn, _bthis=bound_this, _bargs=bound_args):
-                        return i._call_js(_bfn, _bargs + list(a), _bthis)
-                    return i._make_intrinsic(_bound, 'bound function') if False else interp._make_intrinsic(_bound, 'bound function')
-                return self._make_intrinsic(_fn_bind, 'Function.bind')
-            if obj.type in ('function', 'intrinsic') and key == 'toString':
-                name = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
-                return self._make_intrinsic(lambda tv, a, i, n=name: JsValue('string', f'function {n}() {{ [native code] }}'), 'Function.toString')
-            # Check plugin-registered methods for object type
-            plugin_key = ('object', key)
-            if self._plugin_methods and plugin_key in self._plugin_methods:
-                handler = self._plugin_methods[plugin_key]
-                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
-            return UNDEFINED
-        if obj.type == 'number':
-            if key in self.NUMBER_METHODS:
-                return self._num_method(obj, key)
-            # Check plugin-registered methods
-            plugin_key = ('number', key)
-            if self._plugin_methods and plugin_key in self._plugin_methods:
-                handler = self._plugin_methods[plugin_key]
-                return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
-        if obj.type == 'symbol':
-            sym_str = self._to_str(obj)
-            if key == 'toString':
-                return self._make_intrinsic(lambda tv, a, i: JsValue('string', sym_str), 'Symbol.toString')
-            if key == 'description':
-                return JsValue('string', obj.value.get('desc', ''))
+        handler = self._GET_PROP_DISPATCH.get(obj.type)
+        if handler:
+            return handler(obj, key)
         return UNDEFINED
 
     def _set_prop(self, obj: JsValue, prop, val: JsValue):
@@ -1774,6 +1819,36 @@ class Interpreter:
             if name == 'codePointAt':
                 i = int(interp._to_num(args[0])) if args else 0
                 return JsValue("number", ord(s[i]) if 0 <= i < len(s) else float('nan'))
+            if name == 'isWellFormed':
+                i = 0
+                while i < len(s):
+                    cp = ord(s[i])
+                    if 0xD800 <= cp <= 0xDBFF:
+                        if i + 1 < len(s) and 0xDC00 <= ord(s[i + 1]) <= 0xDFFF:
+                            i += 2
+                            continue
+                        return JS_FALSE
+                    elif 0xDC00 <= cp <= 0xDFFF:
+                        return JS_FALSE
+                    i += 1
+                return JS_TRUE
+            if name == 'toWellFormed':
+                result = []
+                i = 0
+                while i < len(s):
+                    cp = ord(s[i])
+                    if 0xD800 <= cp <= 0xDBFF:
+                        if i + 1 < len(s) and 0xDC00 <= ord(s[i + 1]) <= 0xDFFF:
+                            result.append(s[i:i+2])
+                            i += 2
+                            continue
+                        result.append('\uFFFD')
+                    elif 0xDC00 <= cp <= 0xDFFF:
+                        result.append('\uFFFD')
+                    else:
+                        result.append(s[i])
+                    i += 1
+                return JsValue("string", ''.join(result))
             # Check plugin-registered methods
             plugin_key = ('string', name)
             if interp._plugin_methods and plugin_key in interp._plugin_methods:
@@ -2340,336 +2415,299 @@ class Interpreter:
                 return True
         return False
 
-    def _exec(self, node, env=None):
-        if env is None: env = self.env
-        tp = node["type"]
-        _log_exec.debug("exec %s", tp)
+    # ---- _exec dispatch methods ----
 
-        if tp == "Program":
-            self._hoist_vars(node["body"], env)
-            if self._has_use_strict(node["body"]):
-                env._strict = True
-            for s in node["body"]:
-                r = self._exec(s, env)
-                if r is not None: return r
-            return None
+    def _exec_program(self, node, env):
+        self._hoist_vars(node["body"], env)
+        if self._has_use_strict(node["body"]):
+            env._strict = True
+        for s in node["body"]:
+            r = self._exec(s, env)
+            if r is not None: return r
+        return None
 
-        if tp == "VariableDeclaration":
-            for d in node["declarations"]:
-                val = UNDEFINED
-                if d["init"]:
-                    val = self._eval(d["init"], env)
-                try:
-                    self._bind_pattern(d["id"], val, env, node["kind"], True)
-                except JSTypeError as e:
-                    raise _JSError(py_to_js(str(e)))
-            return None
+    def _exec_variable_declaration(self, node, env):
+        for d in node["declarations"]:
+            val = UNDEFINED
+            if d["init"]:
+                val = self._eval(d["init"], env)
+            try:
+                self._bind_pattern(d["id"], val, env, node["kind"], True)
+            except JSTypeError as e:
+                raise _JSError(py_to_js(str(e)))
+        return None
 
-        if tp == "FunctionDeclaration":
-            fn = self._make_fn(node, env)
-            env.declare(node["id"], fn, 'var')
-            self._sync_global_binding(node["id"], fn, env)
-            return None
+    def _exec_function_declaration(self, node, env):
+        fn = self._make_fn(node, env)
+        env.declare(node["id"], fn, 'var')
+        self._sync_global_binding(node["id"], fn, env)
+        return None
 
-        if tp == "ClassDeclaration":
-            cname = node["id"]
-            super_name = node.get("superClass")
-            parent_class = env.get(super_name) if super_name else None
-            methods = node["body"]
-            proto = JsValue("object", {})
-            if isinstance(parent_class, JsValue):
-                parent_proto = parent_class.value.get("prototype")
-                if isinstance(parent_proto, JsValue) and parent_proto.type == "object":
-                    proto.value["__proto__"] = parent_proto
+    def _exec_class_declaration(self, node, env):
+        cname = node["id"]
+        super_name = node.get("superClass")
+        parent_class = env.get(super_name) if super_name else None
+        methods = node["body"]
+        proto = JsValue("object", {})
+        if isinstance(parent_class, JsValue):
+            parent_proto = parent_class.value.get("prototype")
+            if isinstance(parent_proto, JsValue) and parent_proto.type == "object":
+                proto.value["__proto__"] = parent_proto
+        else:
+            parent_proto = None
+        ctor = None
+        static_methods = {}
+        instance_fields = []
+        static_fields = []
+        static_blocks = []
+        for m in methods:
+            mtype = m.get("type") if isinstance(m, dict) else None
+            if mtype == "ClassField":
+                if m.get("static_"):
+                    static_fields.append(m)
+                else:
+                    instance_fields.append(m)
+                continue
+            if mtype == "StaticBlock":
+                static_blocks.append(m)
+                continue
+            actual_key = m["key"]
+            if m.get("computed") and m.get("computed_key"):
+                computed_val = self._eval(m["computed_key"], env)
+                if computed_val.type == 'symbol':
+                    actual_key = f"@@{computed_val.value['id']}@@"
+                else:
+                    actual_key = self._to_str(computed_val)
+            fn_node = N.FnExpr(actual_key, m["params"], m["body"], False, m.get("async", False), m.get("generator", False))
+            fn_val = self._make_fn(fn_node, env)
+            if parent_proto is not None:
+                fn_val.value['super_proto'] = parent_proto
+            if isinstance(parent_class, JsValue) and m.get('static'):
+                fn_val.value['super_proto'] = parent_class
+            if actual_key == "constructor":
+                ctor = fn_val
+            elif m.get("static"):
+                kind = m.get("kind", "method")
+                if kind == "get":
+                    static_methods[f"__get__{actual_key}"] = fn_val
+                elif kind == "set":
+                    static_methods[f"__set__{actual_key}"] = fn_val
+                else:
+                    static_methods[actual_key] = fn_val
             else:
-                parent_proto = None
-            ctor = None
-            static_methods = {}
-            instance_fields = []
-            static_fields = []
-            static_blocks = []
-            for m in methods:
-                mtype = m.get("type") if isinstance(m, dict) else None
-                if mtype == "ClassField":
-                    if m.get("static_"):
-                        static_fields.append(m)
-                    else:
-                        instance_fields.append(m)
-                    continue
-                if mtype == "StaticBlock":
-                    static_blocks.append(m)
-                    continue
-                actual_key = m["key"]
-                if m.get("computed") and m.get("computed_key"):
-                    computed_val = self._eval(m["computed_key"], env)
-                    if computed_val.type == 'symbol':
-                        actual_key = f"@@{computed_val.value['id']}@@"
-                    else:
-                        actual_key = self._to_str(computed_val)
-                fn_node = N.FnExpr(actual_key, m["params"], m["body"], False, m.get("async", False), m.get("generator", False))
-                fn_val = self._make_fn(fn_node, env)
-                if parent_proto is not None:
-                    fn_val.value['super_proto'] = parent_proto
-                if isinstance(parent_class, JsValue) and m.get('static'):
-                    fn_val.value['super_proto'] = parent_class
-                if actual_key == "constructor":
-                    ctor = fn_val
-                elif m.get("static"):
-                    kind = m.get("kind", "method")
-                    if kind == "get":
-                        static_methods[f"__get__{actual_key}"] = fn_val
-                    elif kind == "set":
-                        static_methods[f"__set__{actual_key}"] = fn_val
-                    else:
-                        static_methods[actual_key] = fn_val
+                kind = m.get("kind", "method")
+                if kind == "get":
+                    proto.value[f"__get__{actual_key}"] = fn_val
+                elif kind == "set":
+                    proto.value[f"__set__{actual_key}"] = fn_val
                 else:
-                    kind = m.get("kind", "method")
-                    if kind == "get":
-                        proto.value[f"__get__{actual_key}"] = fn_val
-                    elif kind == "set":
-                        proto.value[f"__set__{actual_key}"] = fn_val
-                    else:
-                        proto.value[actual_key] = fn_val
-            if not ctor:
-                def _default_ctor(this_val, args, interp):
-                    if parent_class:
-                        interp._call_js(parent_class, args, this_val)
-                    return this_val
-                ctor = JsValue("intrinsic", {"fn": _default_ctor, "name": cname})
-            ctor.value["prototype"] = proto
-            proto.value["constructor"] = ctor
-            ctor.value["superClass"] = parent_class
-            ctor.value.update(static_methods)
-            if isinstance(parent_class, JsValue):
-                ctor.value["__proto__"] = parent_class
-            # apply static fields
-            for sf in static_fields:
-                sf_val = self._eval(sf["value"], env) if sf.get("value") else UNDEFINED
-                ctor.value[sf["key"]] = sf_val
-            # store instance fields for use in NewExpression
-            if instance_fields:
-                ctor.value["__instance_fields__"] = instance_fields
-            # run static blocks
-            for sb in static_blocks:
-                sb_env = Environment(env)
-                sb_env._is_fn_env = True
-                sb_env._is_arrow = False
-                sb_env._this = ctor
-                self._exec(sb["body"], sb_env)
-            env.declare(cname, ctor, 'let')
-            self._sync_global_binding(cname, ctor, env)
-            return None
+                    proto.value[actual_key] = fn_val
+        if not ctor:
+            def _default_ctor(this_val, args, interp):
+                if parent_class:
+                    interp._call_js(parent_class, args, this_val)
+                return this_val
+            ctor = JsValue("intrinsic", {"fn": _default_ctor, "name": cname})
+        ctor.value["prototype"] = proto
+        proto.value["constructor"] = ctor
+        ctor.value["superClass"] = parent_class
+        ctor.value.update(static_methods)
+        if isinstance(parent_class, JsValue):
+            ctor.value["__proto__"] = parent_class
+        for sf in static_fields:
+            sf_val = self._eval(sf["value"], env) if sf.get("value") else UNDEFINED
+            ctor.value[sf["key"]] = sf_val
+        if instance_fields:
+            ctor.value["__instance_fields__"] = instance_fields
+        for sb in static_blocks:
+            sb_env = Environment(env)
+            sb_env._is_fn_env = True
+            sb_env._is_arrow = False
+            sb_env._this = ctor
+            self._exec(sb["body"], sb_env)
+        env.declare(cname, ctor, 'let')
+        self._sync_global_binding(cname, ctor, env)
+        return None
 
-        if tp == "BlockStatement":
-            block_env = Environment(env)
-            self._hoist_tdz(node["body"], block_env)
-            for s in node["body"]:
-                r = self._exec(s, block_env)
-                if r is not None: return r
-            return None
+    def _exec_block_statement(self, node, env):
+        block_env = Environment(env)
+        self._hoist_tdz(node["body"], block_env)
+        for s in node["body"]:
+            r = self._exec(s, block_env)
+            if r is not None: return r
+        return None
 
-        if tp == "ExpressionStatement":
-            self._eval(node["expression"], env)
-            return None
+    def _exec_expression_statement(self, node, env):
+        self._eval(node["expression"], env)
+        return None
 
-        if tp == "IfStatement":
-            test = self._eval(node["test"], env)
-            if self._truthy(test):
-                return self._exec(node["consequent"], env)
-            elif node.get("alternate"):
-                return self._exec(node["alternate"], env)
-            return None
+    def _exec_if_statement(self, node, env):
+        test = self._eval(node["test"], env)
+        if self._truthy(test):
+            return self._exec(node["consequent"], env)
+        elif node.get("alternate"):
+            return self._exec(node["alternate"], env)
+        return None
 
-        if tp == "WhileStatement":
-            while self._truthy(self._eval(node["test"], env)):
-                self._check_step_limit()
-                try:
-                    r = self._exec(node["body"], env)
-                    if r is not None:
-                        if r == _BREAK: break
-                        if r == _CONTINUE: continue
-                        return r
-                except _JSBreak as e:
-                    _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl): break
-                    raise
-                except _JSContinue as e:
-                    _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl): continue
-                    raise
-            return None
+    def _exec_while_statement(self, node, env):
+        while self._truthy(self._eval(node["test"], env)):
+            self._check_step_limit()
+            try:
+                r = self._exec(node["body"], env)
+                if r is not None:
+                    if r == _BREAK: break
+                    if r == _CONTINUE: continue
+                    return r
+            except _JSBreak as e:
+                _lbl = node.get('__label__')
+                if e.label is None or (_lbl and e.label == _lbl): break
+                raise
+            except _JSContinue as e:
+                _lbl = node.get('__label__')
+                if e.label is None or (_lbl and e.label == _lbl): continue
+                raise
+        return None
 
-        if tp == "DoWhileStatement":
-            while True:
-                self._check_step_limit()
-                try:
-                    r = self._exec(node["body"], env)
-                    if r is not None:
-                        if r == _BREAK: break
-                        if r == _CONTINUE:
-                            if not self._truthy(self._eval(node["test"], env)): break
-                            continue
-                        return r
-                except _JSBreak as e:
-                    _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl): break
-                    raise
-                except _JSContinue as e:
-                    _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl): pass
-                    else: raise
-                if not self._truthy(self._eval(node["test"], env)): break
-            return None
+    def _exec_do_while_statement(self, node, env):
+        while True:
+            self._check_step_limit()
+            try:
+                r = self._exec(node["body"], env)
+                if r is not None:
+                    if r == _BREAK: break
+                    if r == _CONTINUE:
+                        if not self._truthy(self._eval(node["test"], env)): break
+                        continue
+                    return r
+            except _JSBreak as e:
+                _lbl = node.get('__label__')
+                if e.label is None or (_lbl and e.label == _lbl): break
+                raise
+            except _JSContinue as e:
+                _lbl = node.get('__label__')
+                if e.label is None or (_lbl and e.label == _lbl): pass
+                else: raise
+            if not self._truthy(self._eval(node["test"], env)): break
+        return None
 
-        if tp == "ForStatement":
-            loop_env = Environment(env)
-            init = node.get("init")
-            uses_lex = (init is not None and
-                        init.get("type") == "VariableDeclaration" and
-                        init.get("kind") in ("let","const"))
-            if init:
-                self._exec(init, loop_env)
-            # Get loop variable names for per-iteration copying
-            lex_vars = []
-            if uses_lex and init:
-                for decl in init.get("declarations", []):
-                    id_node = decl.get("id")
-                    if id_node and id_node.get("type") == "Identifier":
-                        lex_vars.append(id_node["name"])
-            while True:
-                if node.get("test") and not self._truthy(self._eval(node["test"], loop_env)):
-                    break
-                self._check_step_limit()
-                # Create per-iteration env for let/const (closures capture this)
-                if uses_lex:
-                    iter_env = Environment(loop_env)
-                    for v in lex_vars:
-                        try:
-                            iter_env.declare(v, loop_env.get(v), 'let')
-                        except (ReferenceError, JSTypeError):
-                            pass
-                else:
-                    iter_env = loop_env
-                try:
-                    r = self._exec(node["body"], iter_env)
-                    if r is not None:
-                        if r == _BREAK: break
-                        if r == _CONTINUE:
-                            # Update runs in loop_env so closures from this iter keep their values
-                            if uses_lex:
-                                for v in lex_vars:
-                                    try: loop_env.set(v, iter_env.get(v))
-                                    except (ReferenceError, JSTypeError): pass
-                            if node.get("update"): self._eval(node["update"], loop_env)
-                            continue
-                        return r
-                except _JSBreak as e:
-                    _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl): break
-                    raise
-                except _JSContinue as e:
-                    _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl):
+    def _exec_for_statement(self, node, env):
+        loop_env = Environment(env)
+        init = node.get("init")
+        uses_lex = (init is not None and
+                    init.get("type") == "VariableDeclaration" and
+                    init.get("kind") in ("let","const"))
+        if init:
+            self._exec(init, loop_env)
+        lex_vars = []
+        if uses_lex and init:
+            for decl in init.get("declarations", []):
+                id_node = decl.get("id")
+                if id_node and id_node.get("type") == "Identifier":
+                    lex_vars.append(id_node["name"])
+        while True:
+            if node.get("test") and not self._truthy(self._eval(node["test"], loop_env)):
+                break
+            self._check_step_limit()
+            if uses_lex:
+                iter_env = Environment(loop_env)
+                for v in lex_vars:
+                    try:
+                        iter_env.declare(v, loop_env.get(v), 'let')
+                    except (ReferenceError, JSTypeError):
+                        pass
+            else:
+                iter_env = loop_env
+            try:
+                r = self._exec(node["body"], iter_env)
+                if r is not None:
+                    if r == _BREAK: break
+                    if r == _CONTINUE:
                         if uses_lex:
                             for v in lex_vars:
                                 try: loop_env.set(v, iter_env.get(v))
                                 except (ReferenceError, JSTypeError): pass
                         if node.get("update"): self._eval(node["update"], loop_env)
                         continue
-                    raise
-                # Update runs in loop_env so closures from this iter keep their values
-                if uses_lex:
-                    for v in lex_vars:
-                        try: loop_env.set(v, iter_env.get(v))
-                        except (ReferenceError, JSTypeError): pass
-                if node.get("update"): self._eval(node["update"], loop_env)
-            return None
+                    return r
+            except _JSBreak as e:
+                _lbl = node.get('__label__')
+                if e.label is None or (_lbl and e.label == _lbl): break
+                raise
+            except _JSContinue as e:
+                _lbl = node.get('__label__')
+                if e.label is None or (_lbl and e.label == _lbl):
+                    if uses_lex:
+                        for v in lex_vars:
+                            try: loop_env.set(v, iter_env.get(v))
+                            except (ReferenceError, JSTypeError): pass
+                    if node.get("update"): self._eval(node["update"], loop_env)
+                    continue
+                raise
+            if uses_lex:
+                for v in lex_vars:
+                    try: loop_env.set(v, iter_env.get(v))
+                    except (ReferenceError, JSTypeError): pass
+            if node.get("update"): self._eval(node["update"], loop_env)
+        return None
 
-        if tp == "ForInStatement":
-            right = self._eval(node["right"], env)
-            keys = []
-            seen = set()
-            if right.type == "object":
-                cur = right
-                while isinstance(cur, JsValue) and cur.type == 'object':
-                    for k in cur.value.keys():
-                        if k not in seen and not k.startswith('__') and not k.startswith('@@'):
-                            if self._is_enumerable(cur, k):
-                                seen.add(k)
-                                keys.append(k)
-                            else:
-                                seen.add(k)  # still skip in derived objects
-                    cur = self._get_proto(cur)
-            elif right.type == "array": keys = [str(i) for i in range(len(right.value))]
-            elif right.type == "string": keys = [str(i) for i in range(len(right.value))]
-            for key in keys:
-                self._check_step_limit()
-                loop_env = Environment(env)
-                loop_value = JsValue("string", str(key))
-                if node["left"]["type"] == "VariableDeclaration":
-                    self._bind_pattern(node["left"]["declarations"][0]["id"], loop_value, loop_env, node["left"]["kind"], True)
-                else:
-                    self._bind_pattern(node["left"], loop_value, loop_env, 'let', False)
-                try:
-                    r = self._exec(node["body"], loop_env)
-                    if r is not None:
-                        if r in (_BREAK,): break
-                        if r in (_CONTINUE,): continue
-                        return r
-                except _JSBreak as e:
-                    _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl): break
-                    raise
-                except _JSContinue as e:
-                    _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl): continue
-                    raise
-            return None
+    def _exec_for_in_statement(self, node, env):
+        right = self._eval(node["right"], env)
+        keys = []
+        seen = set()
+        if right.type == "object":
+            cur = right
+            while isinstance(cur, JsValue) and cur.type == 'object':
+                for k in cur.value.keys():
+                    if k not in seen and not k.startswith('__') and not k.startswith('@@'):
+                        if self._is_enumerable(cur, k):
+                            seen.add(k)
+                            keys.append(k)
+                        else:
+                            seen.add(k)
+                cur = self._get_proto(cur)
+        elif right.type == "array": keys = [str(i) for i in range(len(right.value))]
+        elif right.type == "string": keys = [str(i) for i in range(len(right.value))]
+        for key in keys:
+            self._check_step_limit()
+            loop_env = Environment(env)
+            loop_value = JsValue("string", str(key))
+            if node["left"]["type"] == "VariableDeclaration":
+                self._bind_pattern(node["left"]["declarations"][0]["id"], loop_value, loop_env, node["left"]["kind"], True)
+            else:
+                self._bind_pattern(node["left"], loop_value, loop_env, 'let', False)
+            try:
+                r = self._exec(node["body"], loop_env)
+                if r is not None:
+                    if r in (_BREAK,): break
+                    if r in (_CONTINUE,): continue
+                    return r
+            except _JSBreak as e:
+                _lbl = node.get('__label__')
+                if e.label is None or (_lbl and e.label == _lbl): break
+                raise
+            except _JSContinue as e:
+                _lbl = node.get('__label__')
+                if e.label is None or (_lbl and e.label == _lbl): continue
+                raise
+        return None
 
-        if tp == "ForOfStatement":
-            is_await = node.get('await_', False)
-            right = self._eval(node["right"], env)
-            if is_await:
-                async_it = self._get_async_iterator(right)
-                if async_it is not None:
-                    while True:
-                        promise = async_it()
-                        self._check_step_limit()
-                        if isinstance(promise, JsValue) and promise.type == 'promise':
-                            if not self._run_event_loop(promise):
-                                raise _JSError(py_to_js('for await: iterator did not settle'))
-                            if promise.value['state'] == 'rejected':
-                                raise _JSError(promise.value['value'])
-                            result = promise.value['value']
-                        else:
-                            result = promise
-                        done = self._get_prop(result, 'done')
-                        if self._truthy(done):
-                            break
-                        item = self._get_prop(result, 'value')
-                        loop_env = Environment(env)
-                        if node["left"]["type"] == "VariableDeclaration":
-                            self._bind_pattern(node["left"]["declarations"][0]["id"], item, loop_env, node["left"]["kind"], True)
-                        else:
-                            self._bind_pattern(node["left"], item, loop_env, 'let', False)
-                        try:
-                            r = self._exec(node["body"], loop_env)
-                            if r is not None:
-                                return r
-                        except _JSBreak as e:
-                            _lbl = node.get('__label__')
-                            if e.label is None or (_lbl and e.label == _lbl): break
-                            raise
-                        except _JSContinue as e:
-                            _lbl = node.get('__label__')
-                            if e.label is None or (_lbl and e.label == _lbl): continue
-                            raise
-                return None
-            iterator = self._get_js_iterator(right)
-            if iterator is not None:
+    def _exec_for_of_statement(self, node, env):
+        is_await = node.get('await_', False)
+        right = self._eval(node["right"], env)
+        if is_await:
+            async_it = self._get_async_iterator(right)
+            if async_it is not None:
                 while True:
+                    promise = async_it()
                     self._check_step_limit()
-                    result = iterator()
+                    if isinstance(promise, JsValue) and promise.type == 'promise':
+                        if not self._run_event_loop(promise):
+                            raise _JSError(py_to_js('for await: iterator did not settle'))
+                        if promise.value['state'] == 'rejected':
+                            raise _JSError(promise.value['value'])
+                        result = promise.value['value']
+                    else:
+                        result = promise
                     done = self._get_prop(result, 'done')
                     if self._truthy(done):
                         break
@@ -2691,213 +2729,277 @@ class Interpreter:
                         _lbl = node.get('__label__')
                         if e.label is None or (_lbl and e.label == _lbl): continue
                         raise
-            else:
-                items = self._array_like_items(right)
-                for item in items:
-                    loop_env = Environment(env)
-                    if node["left"]["type"] == "VariableDeclaration":
-                        self._bind_pattern(node["left"]["declarations"][0]["id"], item, loop_env, node["left"]["kind"], True)
-                    else:
-                        self._bind_pattern(node["left"], item, loop_env, 'let', False)
-                    try:
-                        r = self._exec(node["body"], loop_env)
-                        if r is not None:
-                            return r
-                    except _JSBreak as e:
-                        _lbl = node.get('__label__')
-                        if e.label is None or (_lbl and e.label == _lbl): break
-                        raise
-                    except _JSContinue as e:
-                        _lbl = node.get('__label__')
-                        if e.label is None or (_lbl and e.label == _lbl): continue
-                        raise
             return None
-
-        if tp == "SwitchStatement":
-            disc = self._eval(node["discriminant"], env)
-            matched = False
-            default_body = None
-            try:
-                for case in node["cases"]:
-                    if case.get("default"):
-                        default_body = case["consequent"]
-                        if matched:
-                            for s in case["consequent"]:
-                                r = self._exec(s, env)
-                                if r is not None: return r
-                        continue
-                    if not matched:
-                        test_val = self._eval(case["test"], env)
-                        if self._strict_eq(disc, test_val):
-                            matched = True
-                            for s in case["consequent"]:
-                                r = self._exec(s, env)
-                                if r is not None:
-                                    if r == _BREAK: return None
-                                    return r
-                if not matched and default_body:
-                    for s in default_body:
-                        r = self._exec(s, env)
-                        if r is not None:
-                            if r == _BREAK: return None
-                            return r
-            except _JSBreak as e:
-                if e.label is None: return None
-                raise
-            return None
-
-        if tp == "TryStatement":
-            try:
-                self._exec(node["block"], env)
-            except _JSError as e:
-                handler = node.get("handler")
-                if handler:
-                    catch_env = Environment(env)
-                    param = handler.get("param")
-                    if param:
-                        if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
-                            self._bind_pattern(param, e.value, catch_env, 'let', True)
-                        else:
-                            catch_env.declare(param, e.value, 'let')
-                    self._exec(handler["body"], catch_env)
-            except (_JSReturn, _JSBreak, _JSContinue):
-                raise
-            except Exception as e:
-                handler = node.get("handler")
-                if handler:
-                    catch_env = Environment(env)
-                    param = handler.get("param")
-                    err_val = self._make_js_error('Error', str(e))
-                    if param:
-                        if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
-                            self._bind_pattern(param, err_val, catch_env, 'let', True)
-                        else:
-                            catch_env.declare(param, err_val, 'let')
-                    self._exec(handler["body"], catch_env)
+        iterator = self._get_js_iterator(right)
+        if iterator is not None:
+            while True:
+                self._check_step_limit()
+                result = iterator()
+                done = self._get_prop(result, 'done')
+                if self._truthy(done):
+                    break
+                item = self._get_prop(result, 'value')
+                loop_env = Environment(env)
+                if node["left"]["type"] == "VariableDeclaration":
+                    self._bind_pattern(node["left"]["declarations"][0]["id"], item, loop_env, node["left"]["kind"], True)
                 else:
+                    self._bind_pattern(node["left"], item, loop_env, 'let', False)
+                try:
+                    r = self._exec(node["body"], loop_env)
+                    if r is not None:
+                        return r
+                except _JSBreak as e:
+                    _lbl = node.get('__label__')
+                    if e.label is None or (_lbl and e.label == _lbl): break
                     raise
-            finally:
-                if node.get("finalizer"):
-                    self._exec(node["finalizer"], env)
-            return None
+                except _JSContinue as e:
+                    _lbl = node.get('__label__')
+                    if e.label is None or (_lbl and e.label == _lbl): continue
+                    raise
+        else:
+            items = self._array_like_items(right)
+            for item in items:
+                loop_env = Environment(env)
+                if node["left"]["type"] == "VariableDeclaration":
+                    self._bind_pattern(node["left"]["declarations"][0]["id"], item, loop_env, node["left"]["kind"], True)
+                else:
+                    self._bind_pattern(node["left"], item, loop_env, 'let', False)
+                try:
+                    r = self._exec(node["body"], loop_env)
+                    if r is not None:
+                        return r
+                except _JSBreak as e:
+                    _lbl = node.get('__label__')
+                    if e.label is None or (_lbl and e.label == _lbl): break
+                    raise
+                except _JSContinue as e:
+                    _lbl = node.get('__label__')
+                    if e.label is None or (_lbl and e.label == _lbl): continue
+                    raise
+        return None
 
-        if tp == "BreakStatement":    raise _JSBreak(node.get('label'))
-        if tp == "ContinueStatement": raise _JSContinue(node.get('label'))
+    def _exec_switch_statement(self, node, env):
+        disc = self._eval(node["discriminant"], env)
+        matched = False
+        default_body = None
+        try:
+            for case in node["cases"]:
+                if case.get("default"):
+                    default_body = case["consequent"]
+                    if matched:
+                        for s in case["consequent"]:
+                            r = self._exec(s, env)
+                            if r is not None: return r
+                    continue
+                if not matched:
+                    test_val = self._eval(case["test"], env)
+                    if self._strict_eq(disc, test_val):
+                        matched = True
+                        for s in case["consequent"]:
+                            r = self._exec(s, env)
+                            if r is not None:
+                                if r == _BREAK: return None
+                                return r
+            if not matched and default_body:
+                for s in default_body:
+                    r = self._exec(s, env)
+                    if r is not None:
+                        if r == _BREAK: return None
+                        return r
+        except _JSBreak as e:
+            if e.label is None: return None
+            raise
+        return None
 
-        if tp == "LabeledStatement":
-            label = node["label"]
-            body = node["body"]
-            # Inject the label into loop bodies so they can handle labeled continue/break
-            if body.get("type") in ("WhileStatement", "DoWhileStatement", "ForStatement", "ForInStatement", "ForOfStatement"):
-                body['__label__'] = label
-            try:
-                return self._exec(body, env)
-            except _JSBreak as e:
-                if e.label is None or e.label == label:
-                    return None
+    def _exec_try_statement(self, node, env):
+        try:
+            self._exec(node["block"], env)
+        except _JSError as e:
+            handler = node.get("handler")
+            if handler:
+                catch_env = Environment(env)
+                param = handler.get("param")
+                if param:
+                    if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
+                        self._bind_pattern(param, e.value, catch_env, 'let', True)
+                    else:
+                        catch_env.declare(param, e.value, 'let')
+                self._exec(handler["body"], catch_env)
+        except (_JSReturn, _JSBreak, _JSContinue):
+            raise
+        except Exception as e:
+            handler = node.get("handler")
+            if handler:
+                catch_env = Environment(env)
+                param = handler.get("param")
+                err_val = self._make_js_error('Error', str(e))
+                if param:
+                    if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
+                        self._bind_pattern(param, err_val, catch_env, 'let', True)
+                    else:
+                        catch_env.declare(param, err_val, 'let')
+                self._exec(handler["body"], catch_env)
+            else:
                 raise
-            except _JSContinue as e:
-                if e.label == label:
-                    return None
-                raise
-            finally:
-                body.pop('__label__', None)
+        finally:
+            if node.get("finalizer"):
+                self._exec(node["finalizer"], env)
+        return None
 
-        if tp == "ReturnStatement":
-            val = UNDEFINED
-            if node.get("argument"):
-                val = self._eval(node["argument"], env)
-            raise _JSReturn(val)
+    def _exec_break_statement(self, node, env):
+        raise _JSBreak(node.get('label'))
 
-        if tp == "ThrowStatement":
+    def _exec_continue_statement(self, node, env):
+        raise _JSContinue(node.get('label'))
+
+    def _exec_labeled_statement(self, node, env):
+        label = node["label"]
+        body = node["body"]
+        if body.get("type") in ("WhileStatement", "DoWhileStatement", "ForStatement", "ForInStatement", "ForOfStatement"):
+            body['__label__'] = label
+        try:
+            return self._exec(body, env)
+        except _JSBreak as e:
+            if e.label is None or e.label == label:
+                return None
+            raise
+        except _JSContinue as e:
+            if e.label == label:
+                return None
+            raise
+        finally:
+            body.pop('__label__', None)
+
+    def _exec_return_statement(self, node, env):
+        val = UNDEFINED
+        if node.get("argument"):
             val = self._eval(node["argument"], env)
-            raise _JSError(val)
+        raise _JSReturn(val)
 
-        if tp == "EmptyStatement":
-            return None
+    def _exec_throw_statement(self, node, env):
+        val = self._eval(node["argument"], env)
+        raise _JSError(val)
 
-        if tp == "ImportDeclaration":
-            if getattr(self, '_module_loader', None) is not None:
-                source_spec = node["source"]
-                resolved = self._module_loader.resolve(source_spec, getattr(self, '_module_file', None))
-                exports = self._module_loader.load(resolved)
-                for spec in node["specifiers"]:
-                    stype = spec["type"]
-                    if stype == "ImportDefaultSpecifier":
-                        val = exports.get("default", UNDEFINED)
-                        env.declare(spec["local"], val, 'let')
-                    elif stype == "ImportNamespaceSpecifier":
-                        ns = JsValue('object', dict(exports))
-                        env.declare(spec["local"], ns, 'let')
-                    elif stype == "ImportSpecifier":
-                        val = exports.get(spec["imported"], UNDEFINED)
-                        env.declare(spec["local"], val, 'let')
-            return None
+    def _exec_empty_statement(self, node, env):
+        return None
 
-        if tp == "ExportNamedDeclaration":
-            if not hasattr(self, '_module_exports'):
-                self._module_exports = {}
-            decl = node.get("declaration")
-            specifiers = node.get("specifiers", [])
-            source = node.get("source")
-            if decl:
-                self._exec(decl, env)
-                if decl["type"] == "VariableDeclaration":
-                    for d in decl["declarations"]:
-                        id_node = d["id"]
-                        if isinstance(id_node, dict) and id_node.get("type") == "Identifier":
-                            name = id_node["name"]
-                            try:
-                                self._module_exports[name] = env.get(name)
-                            except ReferenceError:
-                                pass
-                elif decl["type"] in ("FunctionDeclaration", "ClassDeclaration"):
-                    name = decl.get("id")
-                    if name:
+    def _exec_import_declaration(self, node, env):
+        if getattr(self, '_module_loader', None) is not None:
+            source_spec = node["source"]
+            resolved = self._module_loader.resolve(source_spec, getattr(self, '_module_file', None))
+            exports = self._module_loader.load(resolved)
+            for spec in node["specifiers"]:
+                stype = spec["type"]
+                if stype == "ImportDefaultSpecifier":
+                    val = exports.get("default", UNDEFINED)
+                    env.declare(spec["local"], val, 'let')
+                elif stype == "ImportNamespaceSpecifier":
+                    ns = JsValue('object', dict(exports))
+                    env.declare(spec["local"], ns, 'let')
+                elif stype == "ImportSpecifier":
+                    val = exports.get(spec["imported"], UNDEFINED)
+                    env.declare(spec["local"], val, 'let')
+        return None
+
+    def _exec_export_named_declaration(self, node, env):
+        if not hasattr(self, '_module_exports'):
+            self._module_exports = {}
+        decl = node.get("declaration")
+        specifiers = node.get("specifiers", [])
+        source = node.get("source")
+        if decl:
+            self._exec(decl, env)
+            if decl["type"] == "VariableDeclaration":
+                for d in decl["declarations"]:
+                    id_node = d["id"]
+                    if isinstance(id_node, dict) and id_node.get("type") == "Identifier":
+                        name = id_node["name"]
                         try:
                             self._module_exports[name] = env.get(name)
                         except ReferenceError:
                             pass
-            elif source:
-                if getattr(self, '_module_loader', None) is not None:
-                    resolved = self._module_loader.resolve(source, getattr(self, '_module_file', None))
-                    src_exports = self._module_loader.load(resolved)
-                    if not specifiers:
-                        self._module_exports.update(src_exports)
-                    else:
-                        for spec in specifiers:
-                            val = src_exports.get(spec["local"], UNDEFINED)
-                            self._module_exports[spec["exported"]] = val
-            else:
-                for spec in specifiers:
+            elif decl["type"] in ("FunctionDeclaration", "ClassDeclaration"):
+                name = decl.get("id")
+                if name:
                     try:
-                        val = env.get(spec["local"])
+                        self._module_exports[name] = env.get(name)
                     except ReferenceError:
-                        val = UNDEFINED
-                    self._module_exports[spec["exported"]] = val
-            return None
-
-        if tp == "ExportDefaultDeclaration":
-            if not hasattr(self, '_module_exports'):
-                self._module_exports = {}
-            decl = node["declaration"]
-            if decl.get("type") in ("FunctionDeclaration",):
-                val = self._make_fn(decl, env)
-                if decl.get("id"):
-                    try:
-                        env.declare(decl["id"], val, 'var')
-                    except (JSTypeError, ReferenceError):
                         pass
-            elif decl.get("type") == "FunctionExpression":
-                val = self._make_fn(decl, env)
-            elif decl.get("type") == "ClassDeclaration":
-                self._exec(decl, env)
-                val = env.get(decl["id"]) if decl.get("id") else UNDEFINED
-            else:
-                val = self._eval(decl, env)
-            self._module_exports["default"] = val
-            return None
+        elif source:
+            if getattr(self, '_module_loader', None) is not None:
+                resolved = self._module_loader.resolve(source, getattr(self, '_module_file', None))
+                src_exports = self._module_loader.load(resolved)
+                if not specifiers:
+                    self._module_exports.update(src_exports)
+                else:
+                    for spec in specifiers:
+                        val = src_exports.get(spec["local"], UNDEFINED)
+                        self._module_exports[spec["exported"]] = val
+        else:
+            for spec in specifiers:
+                try:
+                    val = env.get(spec["local"])
+                except ReferenceError:
+                    val = UNDEFINED
+                self._module_exports[spec["exported"]] = val
+        return None
 
+    def _exec_export_default_declaration(self, node, env):
+        if not hasattr(self, '_module_exports'):
+            self._module_exports = {}
+        decl = node["declaration"]
+        if decl.get("type") in ("FunctionDeclaration",):
+            val = self._make_fn(decl, env)
+            if decl.get("id"):
+                try:
+                    env.declare(decl["id"], val, 'var')
+                except (JSTypeError, ReferenceError):
+                    pass
+        elif decl.get("type") == "FunctionExpression":
+            val = self._make_fn(decl, env)
+        elif decl.get("type") == "ClassDeclaration":
+            self._exec(decl, env)
+            val = env.get(decl["id"]) if decl.get("id") else UNDEFINED
+        else:
+            val = self._eval(decl, env)
+        self._module_exports["default"] = val
+        return None
+
+    _EXEC_DISPATCH = None  # initialized in _init_dispatch_tables
+
+    def _init_exec_dispatch(self):
+        self._EXEC_DISPATCH = {
+            'Program': self._exec_program,
+            'VariableDeclaration': self._exec_variable_declaration,
+            'FunctionDeclaration': self._exec_function_declaration,
+            'ClassDeclaration': self._exec_class_declaration,
+            'BlockStatement': self._exec_block_statement,
+            'ExpressionStatement': self._exec_expression_statement,
+            'IfStatement': self._exec_if_statement,
+            'WhileStatement': self._exec_while_statement,
+            'DoWhileStatement': self._exec_do_while_statement,
+            'ForStatement': self._exec_for_statement,
+            'ForInStatement': self._exec_for_in_statement,
+            'ForOfStatement': self._exec_for_of_statement,
+            'SwitchStatement': self._exec_switch_statement,
+            'TryStatement': self._exec_try_statement,
+            'BreakStatement': self._exec_break_statement,
+            'ContinueStatement': self._exec_continue_statement,
+            'LabeledStatement': self._exec_labeled_statement,
+            'ReturnStatement': self._exec_return_statement,
+            'ThrowStatement': self._exec_throw_statement,
+            'EmptyStatement': self._exec_empty_statement,
+            'ImportDeclaration': self._exec_import_declaration,
+            'ExportNamedDeclaration': self._exec_export_named_declaration,
+            'ExportDefaultDeclaration': self._exec_export_default_declaration,
+        }
+
+    def _exec(self, node, env=None):
+        if env is None: env = self.env
+        _log_exec.debug("exec %s", node["type"])
+        handler = self._EXEC_DISPATCH.get(node["type"])
+        if handler:
+            return handler(node, env)
         return None
 
     def _eval_arguments(self, arg_nodes, env):
@@ -2921,460 +3023,492 @@ class Interpreter:
         return args
 
     # --------------------------------------------------------- evaluation
-    def _eval(self, node, env=None):
-        if env is None: env = self.env
-        tp = node["type"]
-        _log_eval.debug("eval %s", tp)
+    # ---- _eval dispatch methods ----
 
-        if tp == "Literal":
-            kind = node.get("raw", "undefined")
-            if kind == "bigint":
-                return JsValue('bigint', node["value"])
-            return JsValue(kind, node["value"]) if node["value"] is not None else (JS_NULL if kind=="null" else UNDEFINED)
+    def _eval_literal(self, node, env):
+        kind = node.get("raw", "undefined")
+        if kind == "bigint":
+            return JsValue('bigint', node["value"])
+        return JsValue(kind, node["value"]) if node["value"] is not None else (JS_NULL if kind=="null" else UNDEFINED)
 
-        if tp == "RegexLiteral":
-            return self._make_regexp_val(node["source"], node.get("flags", ""))
+    def _eval_regex_literal(self, node, env):
+        return self._make_regexp_val(node["source"], node.get("flags", ""))
 
-        if tp == "Identifier":
-            if node["name"] == "arguments":
-                e = env
-                while e is not None:
-                    if not e._is_arrow and e._fn_args:
-                        args_obj = py_to_js(e._fn_args)
-                        if e._fn_val is not None:
-                            if args_obj.extras is None:
-                                args_obj.extras = {}
-                            args_obj.extras['callee'] = e._fn_val
-                        return args_obj
-                    e = e.parent
-                return py_to_js([])
-            try:
-                return env.get(node["name"])
-            except ReferenceError as re:
-                msg = str(re)
-                if "before initialization" in msg:
-                    raise _JSError(self._make_js_error('ReferenceError', msg))
-                return UNDEFINED
-
-        if tp == "ThisExpression":
+    def _eval_identifier(self, node, env):
+        if node["name"] == "arguments":
             e = env
             while e is not None:
-                if e._is_fn_env and not e._is_arrow:
-                    return e._this
+                if not e._is_arrow and e._fn_args:
+                    args_obj = py_to_js(e._fn_args)
+                    if e._fn_val is not None:
+                        if args_obj.extras is None:
+                            args_obj.extras = {}
+                        args_obj.extras['callee'] = e._fn_val
+                    return args_obj
                 e = e.parent
+            return py_to_js([])
+        try:
+            return env.get(node["name"])
+        except ReferenceError as re:
+            msg = str(re)
+            if "before initialization" in msg:
+                raise _JSError(self._make_js_error('ReferenceError', msg))
             return UNDEFINED
 
-        if tp == "ArrayExpression":
-            elems = []
-            for e in node["elements"]:
-                if e is None:
-                    elems.append(UNDEFINED)
-                elif e.get("type") == "SpreadElement":
-                    v = self._eval(e["argument"], env)
-                    it = self._get_js_iterator(v)
-                    if it is not None:
-                        while True:
-                            r = it()
-                            done = self._get_prop(r, 'done')
-                            if self._truthy(done): break
-                            elems.append(self._get_prop(r, 'value'))
-                    elif v.type == "array":
-                        elems.extend(v.value)
-                    else:
-                        elems.append(v)
-                else:
-                    elems.append(self._eval(e, env))
-            return JsValue("array", elems)
+    def _eval_this_expression(self, node, env):
+        e = env
+        while e is not None:
+            if e._is_fn_env and not e._is_arrow:
+                return e._this
+            e = e.parent
+        return UNDEFINED
 
-        if tp == "ObjectExpression":
-            obj = {}
-            for p in node["properties"]:
-                if p.get("type") == "SpreadElement":
-                    v = self._eval(p["argument"], env)
-                    if v.type == "object": obj.update(v.value)
-                    elif v.type == "array":
-                        for i,x in enumerate(v.value): obj[str(i)] = x
-                    elif v.type == "string":
-                        for i, ch in enumerate(v.value): obj[str(i)] = JsValue("string", ch)
-                    continue
-                if p.get("shorthand"):
-                    k = p["key"]
-                    obj[k] = env.get(k) if isinstance(k, str) else self._eval(k, env)
-                else:
-                    k = p["key"] if isinstance(p["key"], str) else self._eval(p["key"], env)
-                    k = self._to_key(k)
-                    kind = p.get("kind", "init")
-                    if kind == "get":
-                        obj[f"__get__{k}"] = self._eval(p["value"], env)
-                    elif kind == "set":
-                        obj[f"__set__{k}"] = self._eval(p["value"], env)
-                    else:
-                        obj[k] = self._eval(p["value"], env)
-            return JsValue("object", obj)
-
-        if tp == "FunctionExpression":
-            return self._make_fn(node, env)
-
-        if tp == "UnaryExpression":
-            arg = self._eval(node["argument"], env)
-            op = node["operator"]
-            if op == "typeof":
-                try:
-                    if node["argument"]["type"] == "Identifier":
-                        if not env.has(node["argument"]["name"]):
-                            return JsValue("string", "undefined")
-                except (KeyError, AttributeError, TypeError): pass
-                return JsValue("string", self._typeof(arg))
-            if op == "!":  return JS_FALSE if self._truthy(arg) else JS_TRUE
-            if op == "-":  return JsValue("number", -self._to_num(arg))
-            if op == "+":
-                prim = self._to_primitive(arg, 'number')
-                return JsValue("number", self._to_num(prim))
-            if op == "~":  return JsValue("number", ~int(self._to_num(arg)))
-            if op == "void": return UNDEFINED
-            if op == "delete":
-                na = node["argument"]
-                if na["type"] == "MemberExpression":
-                    obj = self._eval(na["object"], env)
-                    prop = self._eval(na["property"], env) if na["computed"] else na["property"]["name"]
-                    key = self._to_key(prop)
-                    desc = self._get_desc(obj, key)
-                    if desc is not None and not desc.get('configurable', True):
-                        if env._strict:
-                            raise _JSError(self._make_js_error('TypeError',
-                                f"Cannot delete property '{key}'"))
-                        return JS_FALSE
-                    self._del_prop(obj, prop)
-                    return JS_TRUE
-                return JS_TRUE
-            return arg
-
-        if tp == "BinaryExpression":
-            op = node["operator"]
-            l = self._eval(node["left"], env)
-            if op in ("||","&&"):
-                if op == "||":
-                    if self._truthy(l): return l
-                    return self._eval(node["right"], env)
-                else:
-                    if not self._truthy(l): return l
-                    return self._eval(node["right"], env)
-            r = self._eval(node["right"], env)
-            if op == "+":
-                if l.type == "bigint" and r.type == "bigint":
-                    return JsValue("bigint", l.value + r.value)
-                lp = self._to_primitive(l)
-                rp = self._to_primitive(r)
-                if lp.type == "string" or rp.type == "string":
-                    return JsValue("string", self._to_str(lp) + self._to_str(rp))
-                return JsValue("number", self._to_num(lp) + self._to_num(rp))
-            if op == "-":
-                if l.type == "bigint" and r.type == "bigint":
-                    return JsValue("bigint", l.value - r.value)
-                return JsValue("number", self._to_num(l) - self._to_num(r))
-            if op == "*":
-                if l.type == "bigint" and r.type == "bigint":
-                    return JsValue("bigint", l.value * r.value)
-                return JsValue("number", self._to_num(l) * self._to_num(r))
-            if op == "/":
-                if l.type == "bigint" and r.type == "bigint":
-                    return JsValue("bigint", l.value // r.value) if r.value != 0 else JsValue("bigint", 0)
-                return JsValue("number", self._to_num(l) / self._to_num(r))
-            if op == "%":
-                if l.type == "bigint" and r.type == "bigint":
-                    return JsValue("bigint", l.value % r.value)
-                return JsValue("number", self._to_num(l) % self._to_num(r))
-            if op == "**":
-                if l.type == "bigint" and r.type == "bigint":
-                    return JsValue("bigint", l.value ** r.value)
-                return JsValue("number", self._to_num(l) ** self._to_num(r))
-            if op == "==":  return JS_TRUE if self._eq(l, r) else JS_FALSE
-            if op == "!=":  return JS_FALSE if self._eq(l, r) else JS_TRUE
-            if op == "===": return JS_TRUE if self._strict_eq(l, r) else JS_FALSE
-            if op == "!==": return JS_FALSE if self._strict_eq(l, r) else JS_TRUE
-            if op in ("<",">","<=",">="):
-                return JS_TRUE if self._cmp(op, l, r) else JS_FALSE
-            if op == "instanceof":
-                _error_ctor_names = {'Error','TypeError','RangeError','SyntaxError','ReferenceError','URIError','EvalError','AggregateError'}
-                if r.type in ("function","intrinsic","class"):
-                    ctor_name = r.value.get("name") if isinstance(r.value, dict) else None
-                    if isinstance(ctor_name, str) and ctor_name in _error_ctor_names:
-                        if l.type == 'object':
-                            err_type = l.value.get('__error_type__')
-                            if isinstance(err_type, JsValue) and err_type.type == 'string':
-                                if ctor_name == 'Error' or err_type.value == ctor_name:
-                                    return JS_TRUE
-                        return JS_FALSE
-                    proto = r.value.get("prototype")
-                    if proto and l.type == "object":
-                        lp = self._get_proto(l)
-                        while lp:
-                            if lp is proto: return JS_TRUE
-                            lp = self._get_proto(lp) if isinstance(lp, JsValue) else None
-                return JS_FALSE
-            if op == "in":
-                key = self._to_str(l)
-                target = r
-                if r.type == 'proxy':
-                    proxy = r.value
-                    trap = self._get_trap(proxy.handler, 'has')
-                    if trap:
-                        return self._call_js(trap, [proxy.target, py_to_js(key)], UNDEFINED)
-                    target = proxy.target
-                if target.type == "object":
-                    # Walk prototype chain
-                    cur = target
-                    while cur and cur.type == 'object':
-                        if key in cur.value:
-                            return JS_TRUE
-                        cur = self._get_proto(cur)
-                    return JS_FALSE
-                if target.type == "array":
-                    try: return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
-                    except (ValueError, TypeError): return JS_FALSE
-                if target.type == "string": return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
-                return JS_FALSE
-            # bitwise
-            li, ri = int(self._to_num(l)), int(self._to_num(r))
-            if op == "<<":  return JsValue("number", li << ri)
-            if op == ">>":  return JsValue("number", li >> ri)
-            if op == ">>>": return JsValue("number", (li & 0xFFFFFFFF) >> ri)
-            if op == "&":   return JsValue("number", li & ri)
-            if op == "^":   return JsValue("number", li ^ ri)
-            if op == "|":   return JsValue("number", li | ri)
-            return UNDEFINED
-
-        if tp == "LogicalExpression":
-            l = self._eval(node["left"], env)
-            op = node["operator"]
-            if op == "&&":
-                return self._eval(node["right"], env) if self._truthy(l) else l
-            if op == "||":
-                return l if self._truthy(l) else self._eval(node["right"], env)
-            if op == "??":
-                return l if l.type not in ("null","undefined") else self._eval(node["right"], env)
-            return l
-
-        if tp == "UpdateExpression":
-            arg = node["argument"]
-            prefix = node.get("prefix", True)
-            op = node["operator"]
-            if arg["type"] == "Identifier":
-                old = env.get(arg["name"])
-                new = JsValue("number", self._to_num(old) + (1 if op=="++" else -1))
-                env.set(arg["name"], new)
-                return old if not prefix else new
-            if arg["type"] == "MemberExpression":
-                obj = self._eval(arg["object"], env)
-                prop = self._eval(arg["property"], env) if arg["computed"] else arg["property"]["name"]
-                old = self._get_prop(obj, prop)
-                new = JsValue("number", self._to_num(old) + (1 if op=="++" else -1))
-                self._set_prop(obj, prop, new)
-                return old if not prefix else new
-            return UNDEFINED
-
-        if tp == "AssignmentExpression":
-            left = node["left"]
-            op = node["operator"]
-            if op == "=" and left.get("type") in ("ObjectPattern", "ArrayPattern"):
-                right = self._eval(node["right"], env)
-                self._bind_pattern(left, right, env, 'let', False)
-                return right
-            getter, setter = self._resolve_target(left, env)
-            old = getter()
-            if op == "&&=":
-                if not self._truthy(old):
-                    return old
-                right = self._eval(node["right"], env)
-                setter(right)
-                return right
-            if op == "||=":
-                if self._truthy(old):
-                    return old
-                right = self._eval(node["right"], env)
-                setter(right)
-                return right
-            if op == "??=":
-                if not self._is_nullish(old):
-                    return old
-                right = self._eval(node["right"], env)
-                setter(right)
-                return right
-            right = self._eval(node["right"], env)
-            if op == "=":
-                setter(right)
-                return right
-            new_value = self._do_assign_op(op, old, right)
-            setter(new_value)
-            return new_value
-
-        if tp == "ConditionalExpression":
-            test = self._eval(node["test"], env)
-            return self._eval(node["consequent"] if self._truthy(test) else node["alternate"], env)
-
-        if tp == "MemberExpression":
-            obj = self._eval(node["object"], env)
-            if node.get("optional") and self._is_nullish(obj):
-                return UNDEFINED
-            if obj.type in ('null', 'undefined'):
-                prop_name = node["property"].get("name", "?") if not node["computed"] else "?"
-                raise _JSError(self._make_js_error('TypeError',
-                    f"Cannot read properties of {obj.type} (reading '{prop_name}')"))
-            prop = self._eval(node["property"], env) if node["computed"] else node["property"]["name"]
-            return self._get_prop(obj, prop)
-
-        if tp == "CallExpression":
-            args = self._eval_arguments(node["arguments"], env)
-            this_val = UNDEFINED
-            if node["callee"]["type"] == "MemberExpression":
-                obj = self._eval(node["callee"]["object"], env)
-                if node["callee"].get("optional") and self._is_nullish(obj):
-                    return UNDEFINED
-                prop = self._eval(node["callee"]["property"], env) if node["callee"]["computed"] else node["callee"]["property"]["name"]
-                callee = self._get_prop(obj, prop)
-                if obj.type == 'object' and '__super_this__' in obj.value:
-                    this_val = obj.value['__super_this__']
-                else:
-                    this_val = obj
-            else:
-                callee = self._eval(node["callee"], env)
-            if node.get("optional") and self._is_nullish(callee):
-                return UNDEFINED
-            return self._call_js(callee, args, this_val)
-
-        if tp == "NewExpression":
-            callee = self._eval(node["callee"], env)
-            args = self._eval_arguments(node["arguments"], env)
-            if callee.type == 'proxy':
-                proxy = callee.value
-                trap = self._get_trap(proxy.handler, 'construct')
-                if trap:
-                    return self._call_js(trap, [proxy.target, JsValue('array', args), callee], UNDEFINED)
-                callee = proxy.target
-            if callee.type in ("function","intrinsic","class"):
-                new_obj = JsValue("object", {})
-                proto = callee.value.get("prototype")
-                if proto and proto.type == "object":
-                    new_obj.value["__proto__"] = proto
-                # initialize instance fields before constructor
-                instance_fields = callee.value.get("__instance_fields__", []) if isinstance(callee.value, dict) else []
-                if instance_fields:
-                    field_env = Environment(env)
-                    field_env._is_fn_env = True
-                    field_env._is_arrow = False
-                    field_env._this = new_obj
-                    for field in instance_fields:
-                        fval = self._eval(field["value"], field_env) if field.get("value") else UNDEFINED
-                        new_obj.value[field["key"]] = fval
-                result = self._call_js(callee, args, new_obj, is_new_call=True)
-                if isinstance(result, JsValue) and result.type in ('object', 'array', 'function', 'intrinsic', 'class', 'promise', 'proxy'):
-                    return result
-                return new_obj
-            return py_to_js({})
-
-        if tp == "SequenceExpression":
-            result = UNDEFINED
-            for expr in node["expressions"]:
-                result = self._eval(expr, env)
-            return result
-
-        if tp == "TemplateLiteral":
-            parts = []
-            for part in node["quasis"]:
-                if isinstance(part, tuple) and part[0] == "expr":
-                    val = self._eval(Parser(Lexer(part[1]).tokenize()).parse()["body"][0]["expression"], env)
-                    parts.append(self._to_str(self._to_primitive(val, 'string')))
-                else:
-                    parts.append(str(part))
-            return JsValue("string", "".join(parts))
-
-        if tp == "TaggedTemplateExpression":
-            tag_fn = self._eval(node["tag"], env)
-            quasis = node["quasi"]["quasis"]
-            strs = []
-            vals = []
-            current_str_parts = []
-            for part in quasis:
-                if isinstance(part, tuple) and part[0] == "expr":
-                    strs.append(JsValue("string", "".join(current_str_parts)))
-                    current_str_parts = []
-                    vals.append(self._eval(Parser(Lexer(part[1]).tokenize()).parse()["body"][0]["expression"], env))
-                else:
-                    current_str_parts.append(str(part))
-            strs.append(JsValue("string", "".join(current_str_parts)))
-            strings_arr = JsValue("array", strs)
-            strings_arr.extras = {"raw": JsValue("array", list(strs))}
-            return self._call_js(tag_fn, [strings_arr] + vals, UNDEFINED)
-
-        if tp == "AwaitExpression":
-            awaited = self._eval(node["argument"], env)
-            if awaited.type != 'promise':
-                return awaited
-            if not self._run_event_loop(awaited):
-                raise _JSError(py_to_js('Awaited promise did not settle'))
-            if awaited.value['state'] == 'rejected':
-                raise _JSError(awaited.value['value'])
-            return awaited.value['value']
-
-        if tp == "SpreadElement":
-            return self._eval(node["argument"], env)
-
-        if tp == "MetaProperty":
-            if node["meta"] == "new" and node["property"] == "target":
-                e = env
-                while e is not None:
-                    if '__new_target__' in e.bindings:
-                        return e.bindings['__new_target__'][1]
-                    e = e.parent
-                return UNDEFINED
-
-        if tp == "ImportMeta":
-            meta = JsValue('object', {})
-            url = self._module_url or (
-                f"file://{self._module_file}" if self._module_file else 'file:///unknown'
-            )
-            meta.value['url'] = py_to_js(url)
-            return meta
-
-        if tp == "YieldExpression":
-            arg = UNDEFINED
-            if node.get('argument'):
-                arg = self._eval(node['argument'], env)
-            gen = self._find_generator(env)
-            if gen is None:
-                raise _JSError(py_to_js('yield used outside generator'))
-            if node.get('delegate'):
-                # yield* — delegate to inner iterable, yielding each value
-                it = self._get_js_iterator(arg)
-                last = UNDEFINED
+    def _eval_array_expression(self, node, env):
+        elems = []
+        for e in node["elements"]:
+            if e is None:
+                elems.append(UNDEFINED)
+            elif e.get("type") == "SpreadElement":
+                v = self._eval(e["argument"], env)
+                it = self._get_js_iterator(v)
                 if it is not None:
                     while True:
                         r = it()
                         done = self._get_prop(r, 'done')
-                        val = self._get_prop(r, 'value')
-                        if self._truthy(done):
-                            last = val
-                            break
-                        gen.yield_value(val)
-                return last
+                        if self._truthy(done): break
+                        elems.append(self._get_prop(r, 'value'))
+                elif v.type == "array":
+                    elems.extend(v.value)
+                else:
+                    elems.append(v)
             else:
-                return gen.yield_value(arg)
+                elems.append(self._eval(e, env))
+        return JsValue("array", elems)
 
-        if tp == "DynamicImport":
-            src = self._eval(node['source'], env) if node.get('source') else py_to_js('')
-            if self._module_loader is not None:
-                try:
-                    mod_path = self._to_str(src)
-                    ns = self._module_loader.load(mod_path, self._module_file)
-                    return self._resolved_promise(ns)
-                except (_JSReturn, _JSBreak, _JSContinue):
-                    raise
-                except _JSError as e:
-                    return self._rejected_promise(e.value)
-                except Exception as e:
-                    return self._rejected_promise(self._make_js_error('Error', str(e)))
-            return self._resolved_promise(JsValue('object', {}))
+    def _eval_object_expression(self, node, env):
+        obj = {}
+        for p in node["properties"]:
+            if p.get("type") == "SpreadElement":
+                v = self._eval(p["argument"], env)
+                if v.type == "object": obj.update(v.value)
+                elif v.type == "array":
+                    for i,x in enumerate(v.value): obj[str(i)] = x
+                elif v.type == "string":
+                    for i, ch in enumerate(v.value): obj[str(i)] = JsValue("string", ch)
+                continue
+            if p.get("shorthand"):
+                k = p["key"]
+                obj[k] = env.get(k) if isinstance(k, str) else self._eval(k, env)
+            else:
+                k = p["key"] if isinstance(p["key"], str) else self._eval(p["key"], env)
+                k = self._to_key(k)
+                kind = p.get("kind", "init")
+                if kind == "get":
+                    obj[f"__get__{k}"] = self._eval(p["value"], env)
+                elif kind == "set":
+                    obj[f"__set__{k}"] = self._eval(p["value"], env)
+                else:
+                    obj[k] = self._eval(p["value"], env)
+        return JsValue("object", obj)
 
+    def _eval_function_expression(self, node, env):
+        return self._make_fn(node, env)
+
+    def _eval_unary_expression(self, node, env):
+        arg = self._eval(node["argument"], env)
+        op = node["operator"]
+        if op == "typeof":
+            try:
+                if node["argument"]["type"] == "Identifier":
+                    if not env.has(node["argument"]["name"]):
+                        return JsValue("string", "undefined")
+            except (KeyError, AttributeError, TypeError): pass
+            return JsValue("string", self._typeof(arg))
+        if op == "!":  return JS_FALSE if self._truthy(arg) else JS_TRUE
+        if op == "-":  return JsValue("number", -self._to_num(arg))
+        if op == "+":
+            prim = self._to_primitive(arg, 'number')
+            return JsValue("number", self._to_num(prim))
+        if op == "~":  return JsValue("number", ~int(self._to_num(arg)))
+        if op == "void": return UNDEFINED
+        if op == "delete":
+            na = node["argument"]
+            if na["type"] == "MemberExpression":
+                obj = self._eval(na["object"], env)
+                prop = self._eval(na["property"], env) if na["computed"] else na["property"]["name"]
+                key = self._to_key(prop)
+                desc = self._get_desc(obj, key)
+                if desc is not None and not desc.get('configurable', True):
+                    if env._strict:
+                        raise _JSError(self._make_js_error('TypeError',
+                            f"Cannot delete property '{key}'"))
+                    return JS_FALSE
+                self._del_prop(obj, prop)
+                return JS_TRUE
+            return JS_TRUE
+        return arg
+
+    def _eval_binary_expression(self, node, env):
+        op = node["operator"]
+        l = self._eval(node["left"], env)
+        if op in ("||","&&"):
+            if op == "||":
+                if self._truthy(l): return l
+                return self._eval(node["right"], env)
+            else:
+                if not self._truthy(l): return l
+                return self._eval(node["right"], env)
+        r = self._eval(node["right"], env)
+        if op == "+":
+            if l.type == "bigint" and r.type == "bigint":
+                return JsValue("bigint", l.value + r.value)
+            lp = self._to_primitive(l)
+            rp = self._to_primitive(r)
+            if lp.type == "string" or rp.type == "string":
+                return JsValue("string", self._to_str(lp) + self._to_str(rp))
+            return JsValue("number", self._to_num(lp) + self._to_num(rp))
+        if op == "-":
+            if l.type == "bigint" and r.type == "bigint":
+                return JsValue("bigint", l.value - r.value)
+            return JsValue("number", self._to_num(l) - self._to_num(r))
+        if op == "*":
+            if l.type == "bigint" and r.type == "bigint":
+                return JsValue("bigint", l.value * r.value)
+            return JsValue("number", self._to_num(l) * self._to_num(r))
+        if op == "/":
+            if l.type == "bigint" and r.type == "bigint":
+                return JsValue("bigint", l.value // r.value) if r.value != 0 else JsValue("bigint", 0)
+            return JsValue("number", self._to_num(l) / self._to_num(r))
+        if op == "%":
+            if l.type == "bigint" and r.type == "bigint":
+                return JsValue("bigint", l.value % r.value)
+            return JsValue("number", self._to_num(l) % self._to_num(r))
+        if op == "**":
+            if l.type == "bigint" and r.type == "bigint":
+                return JsValue("bigint", l.value ** r.value)
+            return JsValue("number", self._to_num(l) ** self._to_num(r))
+        if op == "==":  return JS_TRUE if self._eq(l, r) else JS_FALSE
+        if op == "!=":  return JS_FALSE if self._eq(l, r) else JS_TRUE
+        if op == "===": return JS_TRUE if self._strict_eq(l, r) else JS_FALSE
+        if op == "!==": return JS_FALSE if self._strict_eq(l, r) else JS_TRUE
+        if op in ("<",">","<=",">="):
+            return JS_TRUE if self._cmp(op, l, r) else JS_FALSE
+        if op == "instanceof":
+            _error_ctor_names = {'Error','TypeError','RangeError','SyntaxError','ReferenceError','URIError','EvalError','AggregateError'}
+            if r.type in ("function","intrinsic","class"):
+                ctor_name = r.value.get("name") if isinstance(r.value, dict) else None
+                if isinstance(ctor_name, str) and ctor_name in _error_ctor_names:
+                    if l.type == 'object':
+                        err_type = l.value.get('__error_type__')
+                        if isinstance(err_type, JsValue) and err_type.type == 'string':
+                            if ctor_name == 'Error' or err_type.value == ctor_name:
+                                return JS_TRUE
+                    return JS_FALSE
+                proto = r.value.get("prototype")
+                if proto and l.type == "object":
+                    lp = self._get_proto(l)
+                    while lp:
+                        if lp is proto: return JS_TRUE
+                        lp = self._get_proto(lp) if isinstance(lp, JsValue) else None
+            return JS_FALSE
+        if op == "in":
+            key = self._to_str(l)
+            target = r
+            if r.type == 'proxy':
+                proxy = r.value
+                trap = self._get_trap(proxy.handler, 'has')
+                if trap:
+                    return self._call_js(trap, [proxy.target, py_to_js(key)], UNDEFINED)
+                target = proxy.target
+            if target.type == "object":
+                cur = target
+                while cur and cur.type == 'object':
+                    if key in cur.value:
+                        return JS_TRUE
+                    cur = self._get_proto(cur)
+                return JS_FALSE
+            if target.type == "array":
+                try: return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
+                except (ValueError, TypeError): return JS_FALSE
+            if target.type == "string": return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
+            return JS_FALSE
+        # bitwise
+        li, ri = int(self._to_num(l)), int(self._to_num(r))
+        if op == "<<":  return JsValue("number", li << ri)
+        if op == ">>":  return JsValue("number", li >> ri)
+        if op == ">>>": return JsValue("number", (li & 0xFFFFFFFF) >> ri)
+        if op == "&":   return JsValue("number", li & ri)
+        if op == "^":   return JsValue("number", li ^ ri)
+        if op == "|":   return JsValue("number", li | ri)
+        return UNDEFINED
+
+    def _eval_logical_expression(self, node, env):
+        l = self._eval(node["left"], env)
+        op = node["operator"]
+        if op == "&&":
+            return self._eval(node["right"], env) if self._truthy(l) else l
+        if op == "||":
+            return l if self._truthy(l) else self._eval(node["right"], env)
+        if op == "??":
+            return l if l.type not in ("null","undefined") else self._eval(node["right"], env)
+        return l
+
+    def _eval_update_expression(self, node, env):
+        arg = node["argument"]
+        prefix = node.get("prefix", True)
+        op = node["operator"]
+        if arg["type"] == "Identifier":
+            old = env.get(arg["name"])
+            new = JsValue("number", self._to_num(old) + (1 if op=="++" else -1))
+            env.set(arg["name"], new)
+            return old if not prefix else new
+        if arg["type"] == "MemberExpression":
+            obj = self._eval(arg["object"], env)
+            prop = self._eval(arg["property"], env) if arg["computed"] else arg["property"]["name"]
+            old = self._get_prop(obj, prop)
+            new = JsValue("number", self._to_num(old) + (1 if op=="++" else -1))
+            self._set_prop(obj, prop, new)
+            return old if not prefix else new
+        return UNDEFINED
+
+    def _eval_assignment_expression(self, node, env):
+        left = node["left"]
+        op = node["operator"]
+        if op == "=" and left.get("type") in ("ObjectPattern", "ArrayPattern"):
+            right = self._eval(node["right"], env)
+            self._bind_pattern(left, right, env, 'let', False)
+            return right
+        getter, setter = self._resolve_target(left, env)
+        old = getter()
+        if op == "&&=":
+            if not self._truthy(old):
+                return old
+            right = self._eval(node["right"], env)
+            setter(right)
+            return right
+        if op == "||=":
+            if self._truthy(old):
+                return old
+            right = self._eval(node["right"], env)
+            setter(right)
+            return right
+        if op == "??=":
+            if not self._is_nullish(old):
+                return old
+            right = self._eval(node["right"], env)
+            setter(right)
+            return right
+        right = self._eval(node["right"], env)
+        if op == "=":
+            setter(right)
+            return right
+        new_value = self._do_assign_op(op, old, right)
+        setter(new_value)
+        return new_value
+
+    def _eval_conditional_expression(self, node, env):
+        test = self._eval(node["test"], env)
+        return self._eval(node["consequent"] if self._truthy(test) else node["alternate"], env)
+
+    def _eval_member_expression(self, node, env):
+        obj = self._eval(node["object"], env)
+        if node.get("optional") and self._is_nullish(obj):
+            return UNDEFINED
+        if obj.type in ('null', 'undefined'):
+            prop_name = node["property"].get("name", "?") if not node["computed"] else "?"
+            raise _JSError(self._make_js_error('TypeError',
+                f"Cannot read properties of {obj.type} (reading '{prop_name}')"))
+        prop = self._eval(node["property"], env) if node["computed"] else node["property"]["name"]
+        return self._get_prop(obj, prop)
+
+    def _eval_call_expression(self, node, env):
+        args = self._eval_arguments(node["arguments"], env)
+        this_val = UNDEFINED
+        if node["callee"]["type"] == "MemberExpression":
+            obj = self._eval(node["callee"]["object"], env)
+            if node["callee"].get("optional") and self._is_nullish(obj):
+                return UNDEFINED
+            prop = self._eval(node["callee"]["property"], env) if node["callee"]["computed"] else node["callee"]["property"]["name"]
+            callee = self._get_prop(obj, prop)
+            if obj.type == 'object' and '__super_this__' in obj.value:
+                this_val = obj.value['__super_this__']
+            else:
+                this_val = obj
+        else:
+            callee = self._eval(node["callee"], env)
+        if node.get("optional") and self._is_nullish(callee):
+            return UNDEFINED
+        return self._call_js(callee, args, this_val)
+
+    def _eval_new_expression(self, node, env):
+        callee = self._eval(node["callee"], env)
+        args = self._eval_arguments(node["arguments"], env)
+        if callee.type == 'proxy':
+            proxy = callee.value
+            trap = self._get_trap(proxy.handler, 'construct')
+            if trap:
+                return self._call_js(trap, [proxy.target, JsValue('array', args), callee], UNDEFINED)
+            callee = proxy.target
+        if callee.type in ("function","intrinsic","class"):
+            new_obj = JsValue("object", {})
+            proto = callee.value.get("prototype")
+            if proto and proto.type == "object":
+                new_obj.value["__proto__"] = proto
+            instance_fields = callee.value.get("__instance_fields__", []) if isinstance(callee.value, dict) else []
+            if instance_fields:
+                field_env = Environment(env)
+                field_env._is_fn_env = True
+                field_env._is_arrow = False
+                field_env._this = new_obj
+                for field in instance_fields:
+                    fval = self._eval(field["value"], field_env) if field.get("value") else UNDEFINED
+                    new_obj.value[field["key"]] = fval
+            result = self._call_js(callee, args, new_obj, is_new_call=True)
+            if isinstance(result, JsValue) and result.type in ('object', 'array', 'function', 'intrinsic', 'class', 'promise', 'proxy'):
+                return result
+            return new_obj
+        return py_to_js({})
+
+    def _eval_sequence_expression(self, node, env):
+        result = UNDEFINED
+        for expr in node["expressions"]:
+            result = self._eval(expr, env)
+        return result
+
+    def _eval_template_literal(self, node, env):
+        parts = []
+        for part in node["quasis"]:
+            if isinstance(part, tuple) and part[0] == "expr":
+                val = self._eval(Parser(Lexer(part[1]).tokenize()).parse()["body"][0]["expression"], env)
+                parts.append(self._to_str(self._to_primitive(val, 'string')))
+            else:
+                parts.append(str(part))
+        return JsValue("string", "".join(parts))
+
+    def _eval_tagged_template_expression(self, node, env):
+        tag_fn = self._eval(node["tag"], env)
+        quasis = node["quasi"]["quasis"]
+        strs = []
+        vals = []
+        current_str_parts = []
+        for part in quasis:
+            if isinstance(part, tuple) and part[0] == "expr":
+                strs.append(JsValue("string", "".join(current_str_parts)))
+                current_str_parts = []
+                vals.append(self._eval(Parser(Lexer(part[1]).tokenize()).parse()["body"][0]["expression"], env))
+            else:
+                current_str_parts.append(str(part))
+        strs.append(JsValue("string", "".join(current_str_parts)))
+        strings_arr = JsValue("array", strs)
+        strings_arr.extras = {"raw": JsValue("array", list(strs))}
+        return self._call_js(tag_fn, [strings_arr] + vals, UNDEFINED)
+
+    def _eval_await_expression(self, node, env):
+        awaited = self._eval(node["argument"], env)
+        if awaited.type != 'promise':
+            return awaited
+        if not self._run_event_loop(awaited):
+            raise _JSError(py_to_js('Awaited promise did not settle'))
+        if awaited.value['state'] == 'rejected':
+            raise _JSError(awaited.value['value'])
+        return awaited.value['value']
+
+    def _eval_spread_element(self, node, env):
+        return self._eval(node["argument"], env)
+
+    def _eval_meta_property(self, node, env):
+        if node["meta"] == "new" and node["property"] == "target":
+            e = env
+            while e is not None:
+                if '__new_target__' in e.bindings:
+                    return e.bindings['__new_target__'][1]
+                e = e.parent
+            return UNDEFINED
+        return UNDEFINED
+
+    def _eval_import_meta(self, node, env):
+        meta = JsValue('object', {})
+        url = self._module_url or (
+            f"file://{self._module_file}" if self._module_file else 'file:///unknown'
+        )
+        meta.value['url'] = py_to_js(url)
+        return meta
+
+    def _eval_yield_expression(self, node, env):
+        arg = UNDEFINED
+        if node.get('argument'):
+            arg = self._eval(node['argument'], env)
+        gen = self._find_generator(env)
+        if gen is None:
+            raise _JSError(py_to_js('yield used outside generator'))
+        if node.get('delegate'):
+            it = self._get_js_iterator(arg)
+            last = UNDEFINED
+            if it is not None:
+                while True:
+                    r = it()
+                    done = self._get_prop(r, 'done')
+                    val = self._get_prop(r, 'value')
+                    if self._truthy(done):
+                        last = val
+                        break
+                    gen.yield_value(val)
+            return last
+        else:
+            return gen.yield_value(arg)
+
+    def _eval_dynamic_import(self, node, env):
+        src = self._eval(node['source'], env) if node.get('source') else py_to_js('')
+        if self._module_loader is not None:
+            try:
+                mod_path = self._to_str(src)
+                ns = self._module_loader.load(mod_path, self._module_file)
+                return self._resolved_promise(ns)
+            except (_JSReturn, _JSBreak, _JSContinue):
+                raise
+            except _JSError as e:
+                return self._rejected_promise(e.value)
+            except Exception as e:
+                return self._rejected_promise(self._make_js_error('Error', str(e)))
+        return self._resolved_promise(JsValue('object', {}))
+
+    _EVAL_DISPATCH = None  # initialized in _init_dispatch_tables
+
+    def _init_eval_dispatch(self):
+        self._EVAL_DISPATCH = {
+            'Literal': self._eval_literal,
+            'RegexLiteral': self._eval_regex_literal,
+            'Identifier': self._eval_identifier,
+            'ThisExpression': self._eval_this_expression,
+            'ArrayExpression': self._eval_array_expression,
+            'ObjectExpression': self._eval_object_expression,
+            'FunctionExpression': self._eval_function_expression,
+            'UnaryExpression': self._eval_unary_expression,
+            'BinaryExpression': self._eval_binary_expression,
+            'LogicalExpression': self._eval_logical_expression,
+            'UpdateExpression': self._eval_update_expression,
+            'AssignmentExpression': self._eval_assignment_expression,
+            'ConditionalExpression': self._eval_conditional_expression,
+            'MemberExpression': self._eval_member_expression,
+            'CallExpression': self._eval_call_expression,
+            'NewExpression': self._eval_new_expression,
+            'SequenceExpression': self._eval_sequence_expression,
+            'TemplateLiteral': self._eval_template_literal,
+            'TaggedTemplateExpression': self._eval_tagged_template_expression,
+            'AwaitExpression': self._eval_await_expression,
+            'SpreadElement': self._eval_spread_element,
+            'MetaProperty': self._eval_meta_property,
+            'ImportMeta': self._eval_import_meta,
+            'YieldExpression': self._eval_yield_expression,
+            'DynamicImport': self._eval_dynamic_import,
+        }
+
+    def _eval(self, node, env=None):
+        if env is None: env = self.env
+        _log_eval.debug("eval %s", node["type"])
+        handler = self._EVAL_DISPATCH.get(node["type"])
+        if handler:
+            return handler(node, env)
         return UNDEFINED
 
     def _do_assign_op(self, op, old, val):

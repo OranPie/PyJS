@@ -28,6 +28,11 @@ class Lexer:
         'async','await','import','export','from','yield',
     }
 
+    ESCAPE_MAP = {
+        'n':'\n','t':'\t','r':'\r','\\':'\\',"'":"'",'"':'"',
+        '0':'\0','b':'\b','f':'\f','v':'\v',
+    }
+
     def __init__(self, source: str):
         self.s = source
         self.length = len(source)
@@ -128,9 +133,7 @@ class Lexer:
             if self._ch() == '\\':
                 self._nxt()
                 esc = self._ch()
-                mp = {'n':'\n','t':'\t','r':'\r','\\':'\\',"'":"'",'"':'"',
-                      '0':'\0','b':'\b','f':'\f','v':'\v'}
-                buf.append(mp.get(esc, esc)); self._nxt()
+                buf.append(self.ESCAPE_MAP.get(esc, esc)); self._nxt()
             else:
                 buf.append(self._nxt())
         if not self._end():

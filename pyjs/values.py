@@ -50,3 +50,8 @@ SYMBOL_IS_CONCAT_SPREADABLE = 11
 
 _symbol_id_counter = [11]  # incremented for each new Symbol()
 _symbol_registry   = {}    # for Symbol.for()
+
+# Populate the small-integer / NaN / Inf number cache now that JsValue exists
+from .core import _init_number_cache as _init_nc  # noqa: E402
+_init_nc()
+del _init_nc
