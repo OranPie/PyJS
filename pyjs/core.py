@@ -8,11 +8,11 @@ class JSTypeError(Exception):
 
 
 if TYPE_CHECKING:
-    from .runtime import JsValue
+    from .values import JsValue
 
 
 def _js_value_class():
-    from .runtime import JsValue
+    from .values import JsValue
 
     return JsValue
 

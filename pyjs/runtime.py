@@ -21,255 +21,36 @@ from typing import Any, Dict, List, Optional
 from .core import JSTypeError, js_to_py, py_to_js
 from .lexer import Lexer
 from .parser import N, Parser
+from .trace import configure as _configure_trace, get_logger
+from .values import (
+    JsValue, JsProxy, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE,
+    SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
+    SYMBOL_TO_STRING_TAG, SYMBOL_ASYNC_ITERATOR, SYMBOL_SPECIES,
+    SYMBOL_MATCH, SYMBOL_REPLACE, SYMBOL_SPLIT, SYMBOL_SEARCH,
+    SYMBOL_IS_CONCAT_SPREADABLE,
+    _symbol_id_counter, _symbol_registry,
+    _js_regex_to_python,
+)
+from .environment import Environment
+from .exceptions import _JSBreak, _JSContinue, _JSReturn, _JSError, flatten_one
+from .generators import JsGenerator, JsAsyncGenerator
+from .builtins_core import register_core_builtins
+from .builtins_object import register_object_builtins
+from .builtins_advanced import register_advanced_builtins
+from .builtins_promise import register_promise_builtins
+from .builtins_typed import register_typed_builtins
 
-
-def _js_regex_to_python(pattern: str) -> str:
-    """Convert JS regex named-group syntax to Python re syntax."""
-    result = re.sub(r'\(\?<([^>]+)>', r'(?P<\1>', pattern)
-    result = re.sub(r'\\k<([^>]+)>', r'(?P=\1)', result)
-    return result
-
-class JsProxy:
-    """Wraps a JsValue so that property access goes through handler traps."""
-    __slots__ = ('target', 'handler')
-    def __init__(self, target: 'JsValue', handler: 'JsValue'):
-        self.target = target
-        self.handler = handler
-
-
-class JsValue:
-    __slots__ = ('type', 'value', 'extras')
-    def __init__(self, tp: str, val: Any):
-        self.type = tp; self.value = val; self.extras = None
-    def __repr__(self):
-        if self.type == 'null': return 'null'
-        if self.type == 'undefined': return 'undefined'
-        return f"JsValue({self.type}, {self.value!r})"
-
-UNDEFINED = JsValue("undefined", None)
-JS_NULL   = JsValue("null", None)
-JS_TRUE   = JsValue("boolean", True)
-JS_FALSE  = JsValue("boolean", False)
-
-# Well-known Symbol IDs (fixed)
-SYMBOL_ITERATOR           = 1
-SYMBOL_TO_PRIMITIVE       = 2
-SYMBOL_HAS_INSTANCE       = 3
-SYMBOL_TO_STRING_TAG      = 4
-SYMBOL_ASYNC_ITERATOR     = 5
-SYMBOL_SPECIES            = 6
-SYMBOL_MATCH              = 7
-SYMBOL_REPLACE            = 8
-SYMBOL_SPLIT              = 9
-SYMBOL_SEARCH             = 10
-SYMBOL_IS_CONCAT_SPREADABLE = 11
-
-_symbol_id_counter = [11]  # incremented for each new Symbol()
-_symbol_registry   = {}    # for Symbol.for()
-
-# ============================================================================
-#  Environment
-# ============================================================================
-
-class Environment:
-    __slots__ = ('parent', 'bindings', '_this', '_fn_args', '_is_arrow', '_is_fn_env', '_generator', '_fn_val')
-
-    def __init__(self, parent: Optional['Environment'] = None):
-        self.parent = parent
-        self.bindings: Dict[str, Any] = {}       # name -> (keyword, JsValue)
-        self._this = UNDEFINED
-        self._fn_args: List[JsValue] = []
-        self._is_arrow: bool = False
-        self._is_fn_env: bool = False
-        self._generator = None
-        self._fn_val = None
-
-    def declare(self, name, value, keyword='var'):
-        if keyword == 'const':
-            if name in self.bindings:
-                raise JSTypeError(f"Identifier '{name}' has already been declared")
-            self.bindings[name] = ('const', value)
-        elif keyword == 'let':
-            if name in self.bindings:
-                raise JSTypeError(f"Identifier '{name}' has already been declared")
-            self.bindings[name] = ('let', value)
-        else:  # var
-            self.bindings[name] = ('var', value)
-
-    def has(self, name):
-        if name in self.bindings: return True
-        return self.parent.has(name) if self.parent else False
-
-    def _find(self, name):
-        e = self
-        while e:
-            if name in e.bindings: return e
-            e = e.parent
-        return None
-
-    def get(self, name):
-        e = self._find(name)
-        if not e:
-            raise ReferenceError(f"{name} is not defined")
-        return e.bindings[name][1]
-
-    def set(self, name, value):
-        e = self._find(name)
-        if not e:
-            raise ReferenceError(f"{name} is not defined")
-        if e.bindings[name][0] == 'const':
-            raise JSTypeError(f"Assignment to constant variable '{name}'")
-        e.bindings[name] = (e.bindings[name][0], value)
-
-    def set_own(self, name, value):
-        if name not in self.bindings:
-            raise ReferenceError(f"{name} is not defined")
-        if self.bindings[name][0] == 'const':
-            raise JSTypeError(f"Assignment to constant variable '{name}'")
-        self.bindings[name] = (self.bindings[name][0], value)
-
-
-# ============================================================================
-#  JS Generator (thread-based coroutine)
-# ============================================================================
-
-class JsGenerator:
-    """JS generator object backed by a Python thread."""
-
-    def __init__(self, fn_val, args, interp):
-        self._fn_val = fn_val
-        self._args = args
-        self._interp = interp
-        self._done = False
-        self._to_gen   = _queue_mod.Queue()
-        self._from_gen = _queue_mod.Queue()
-        self._thread = threading.Thread(target=self._body, daemon=True)
-        self._thread.start()
-
-    def _body(self):
-        interp = self._interp
-        fn_val = self._fn_val
-        info   = fn_val.value
-        node   = info['node']
-        env    = info['env']
-
-        # Wait for the first next() call before running the body
-        msg = self._to_gen.get()
-        if msg['type'] != 'next':
-            self._from_gen.put({'type': 'return', 'value': UNDEFINED})
-            return
-
-        call_env = Environment(env)
-        call_env._this     = UNDEFINED
-        call_env._fn_args  = list(self._args)
-        call_env._is_fn_env = True
-        call_env._generator = self
-
-        super_proto = info.get('super_proto')
-        if isinstance(super_proto, JsValue):
-            call_env.declare('super', interp._make_super_proxy(super_proto, call_env._this), 'const')
-
-        params = node.get('params', [])
-        for i, p in enumerate(params):
-            if isinstance(p, dict) and p.get('type') == 'RestElement':
-                interp._bind_pattern(p['argument'], JsValue('array', list(self._args[i:])), call_env, 'var', True)
-                break
-            interp._bind_pattern(p, self._args[i] if i < len(self._args) else UNDEFINED, call_env, 'var', True)
-
-        old_env = interp.env
-        try:
-            interp._exec(node['body'], call_env)
-            self._from_gen.put({'type': 'return', 'value': UNDEFINED})
-        except _JSReturn as e:
-            self._from_gen.put({'type': 'return', 'value': e.value})
-        except _JSError as e:
-            self._from_gen.put({'type': 'throw', 'value': e.value})
-        except Exception as e:
-            self._from_gen.put({'type': 'throw', 'value': py_to_js(str(e))})
-        finally:
-            interp.env = old_env
-
-    def yield_value(self, value):
-        """Called from the generator thread when a yield is encountered."""
-        self._from_gen.put({'type': 'yield', 'value': value})
-        msg = self._to_gen.get()
-        if msg['type'] == 'next':
-            return msg.get('value', UNDEFINED)
-        elif msg['type'] == 'return':
-            raise _JSReturn(msg.get('value', UNDEFINED))
-        elif msg['type'] == 'throw':
-            raise _JSError(msg.get('value', UNDEFINED))
-        return UNDEFINED
-
-    def next(self, value=None):
-        if value is None:
-            value = UNDEFINED
-        if self._done:
-            return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
-        self._to_gen.put({'type': 'next', 'value': value})
-        msg = self._from_gen.get()
-        return self._handle_msg(msg)
-
-    def js_return(self, value=None):
-        if value is None:
-            value = UNDEFINED
-        if self._done:
-            return JsValue('object', {'value': value, 'done': JS_TRUE})
-        self._done = True
-        self._to_gen.put({'type': 'return', 'value': value})
-        try:
-            self._from_gen.get(timeout=2.0)
-        except _queue_mod.Empty:
-            pass
-        return JsValue('object', {'value': value, 'done': JS_TRUE})
-
-    def js_throw(self, error):
-        if self._done:
-            raise _JSError(error)
-        self._to_gen.put({'type': 'throw', 'value': error})
-        msg = self._from_gen.get()
-        return self._handle_msg(msg)
-
-    def _handle_msg(self, msg):
-        if msg['type'] == 'yield':
-            return JsValue('object', {'value': msg['value'], 'done': JS_FALSE})
-        elif msg['type'] == 'return':
-            self._done = True
-            return JsValue('object', {'value': msg['value'], 'done': JS_TRUE})
-        elif msg['type'] == 'throw':
-            self._done = True
-            raise _JSError(msg['value'])
-        self._done = True
-        return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
-
-
-class JsAsyncGenerator(JsGenerator):
-    """Async generator: next() returns a Promise instead of {value, done} directly."""
-
-    def next(self, value=None):
-        try:
-            sync_result = super().next(value)
-            return self._interp._resolved_promise(sync_result)
-        except _JSError as e:
-            return self._interp._rejected_promise(e.value)
-
-    def js_return(self, value=None):
-        try:
-            sync_result = super().js_return(value)
-            return self._interp._resolved_promise(sync_result)
-        except _JSError as e:
-            return self._interp._rejected_promise(e.value)
-
-    def js_throw(self, error):
-        try:
-            sync_result = super().js_throw(error)
-            return self._interp._resolved_promise(sync_result)
-        except _JSError as e:
-            return self._interp._rejected_promise(e.value)
+_log_exec = get_logger("exec")
+_log_eval = get_logger("eval")
+_log_call = get_logger("call")
+_log_prop = get_logger("prop")
+_log_event = get_logger("event")
+_log_promise = get_logger("promise")
 
 
 # ============================================================================
 #  Interpreter
+# ============================================================================
 # ============================================================================
 
 class Interpreter:
@@ -279,7 +60,15 @@ class Interpreter:
     PROMISE_METHODS = frozenset({'then', 'catch', 'finally'})
     EVENT_LOOP_LIMIT = 10000
 
-    def __init__(self):
+    MAX_CALL_DEPTH = 200
+    MAX_EXEC_STEPS = 10_000_000
+
+    def __init__(self, log_level: str | None = None):
+        _configure_trace(log_level)
+        # Ensure Python's recursion limit can accommodate our JS call depth
+        _min_py_limit = self.MAX_CALL_DEPTH * 6
+        if sys.getrecursionlimit() < _min_py_limit:
+            sys.setrecursionlimit(_min_py_limit)
         self.output: List[str] = []
         self._clock = 0.0
         self._next_timer_id = 1
@@ -290,6 +79,8 @@ class Interpreter:
         self._console_counts: Dict[str, int] = {}
         self._console_timers: Dict[str, float] = {}
         self._console_indent: int = 0
+        self._call_depth: int = 0
+        self._exec_steps: int = 0
         self.genv = self._global_env()
         self.env  = self.genv
         self._module_exports: dict = {}
@@ -450,6 +241,7 @@ class Interpreter:
         return promise
 
     def _resolve_promise(self, promise, value):
+        _log_promise.debug("resolve promise (state=%s)", promise.value['state'])
         if promise.value['state'] != 'pending':
             return promise
         if value is promise:
@@ -460,6 +252,7 @@ class Interpreter:
         return self._settle_promise(promise, 'fulfilled', value)
 
     def _reject_promise(self, promise, value):
+        _log_promise.debug("reject promise")
         return self._settle_promise(promise, 'rejected', value)
 
     def _chain_promise(self, source, next_promise, on_fulfilled=UNDEFINED, on_rejected=UNDEFINED):
@@ -676,6 +469,7 @@ class Interpreter:
 
     def _run_event_loop(self, until_promise=None):
         steps = 0
+        _log_event.debug("event loop start")
         while True:
             if until_promise and until_promise.value['state'] != 'pending':
                 break
@@ -714,2608 +508,14 @@ class Interpreter:
         g.declare('NaN',        JsValue("number", float('nan')), 'var')
         g.declare('Infinity',   JsValue("number", float('inf')), 'var')
 
-        # -- helper to wrap a Python fn as an intrinsic --
         def intr(fn, name='?'):
             return self._make_intrinsic(lambda this_val, args, interp: fn(args, interp), name)
 
-        # -- parseInt / parseFloat --
-        def _parseInt(args, interp):
-            s = interp._to_str(args[0]) if args else 'undefined'
-            base = int(args[1].value) if len(args)>1 and args[1].type=='number' else 10
-            try:
-                if base == 0:
-                    s2 = s.lstrip()
-                    if s2.startswith(('0x','0X')): base=16
-                    elif s2.startswith(('0o','0O')): base=8
-                    elif s2.startswith(('0b','0B')): base=2
-                    else: base=10
-                return JsValue("number", int(s, base))
-            except: return JsValue("number", float('nan'))
-
-        def _parseFloat(args, interp):
-            s = interp._to_str(args[0]) if args else 'undefined'
-            try:
-                m = re.match(r'^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?', s)
-                return JsValue("number", float(m.group()) if m else float('nan'))
-            except: return JsValue("number", float('nan'))
-
-        g.declare('parseInt',   intr(_parseInt, 'parseInt'),   'var')
-        g.declare('parseFloat', intr(_parseFloat, 'parseFloat'),'var')
-        g.declare('isNaN',      intr(lambda a,i: JS_TRUE if a and i._to_num(a[0])!=i._to_num(a[0]) else JS_FALSE, 'isNaN'), 'var')
-        g.declare('isFinite',   intr(lambda a,i: py_to_js(bool(a and a[0].type=='number' and math.isfinite(a[0].value))), 'isFinite'), 'var')
-        import urllib.parse as _urlparse
-        _URI_SAFE = "-_.!~*'();/?:@&=+$,#"
-        _URI_COMPONENT_SAFE = "-_.!~*'()"
-        def _encode_uri(args, interp):
-            s = interp._to_str(args[0]) if args else 'undefined'
-            return JsValue('string', _urlparse.quote(s, safe=_URI_SAFE))
-        def _decode_uri(args, interp):
-            s = interp._to_str(args[0]) if args else 'undefined'
-            return JsValue('string', _urlparse.unquote(s))
-        def _encode_uri_component(args, interp):
-            s = interp._to_str(args[0]) if args else 'undefined'
-            return JsValue('string', _urlparse.quote(s, safe=_URI_COMPONENT_SAFE))
-        def _decode_uri_component(args, interp):
-            s = interp._to_str(args[0]) if args else 'undefined'
-            return JsValue('string', _urlparse.unquote(s))
-        g.declare('encodeURI',  intr(_encode_uri, 'encodeURI'), 'var')
-        g.declare('decodeURI',  intr(_decode_uri, 'decodeURI'), 'var')
-        g.declare('encodeURIComponent', intr(_encode_uri_component, 'encodeURIComponent'), 'var')
-        g.declare('decodeURIComponent', intr(_decode_uri_component, 'decodeURIComponent'), 'var')
-
-        # -- atob / btoa --
-        import base64 as _b64
-        def _btoa(args, interp):
-            s = interp._to_str(args[0]) if args else ''
-            try:
-                return JsValue('string', _b64.b64encode(s.encode('latin-1')).decode('ascii'))
-            except (UnicodeEncodeError, ValueError):
-                raise _JSError(py_to_js("InvalidCharacterError: String contains characters outside of the Latin1 range"))
-        def _atob(args, interp):
-            s = interp._to_str(args[0]) if args else ''
-            try:
-                return JsValue('string', _b64.b64decode(s).decode('latin-1'))
-            except Exception:
-                raise _JSError(py_to_js("InvalidCharacterError: Invalid base64 string"))
-        g.declare('btoa', intr(_btoa, 'btoa'), 'var')
-        g.declare('atob', intr(_atob, 'atob'), 'var')
-
-        # -- console --
-        console = JsValue("object", {})
-        def _log(args, interp):
-            parts = [interp._to_str(a) for a in args]
-            line = ' '.join(parts)
-            indent = '  ' * interp._console_indent
-            interp.output.append(indent + line)
-            print(indent + line)
-        def _make_log_method(fn_name):
-            return intr(lambda a,i: _log(a,i), fn_name)
-        console.value['log']   = _make_log_method('log')
-        console.value['error'] = _make_log_method('error')
-        console.value['warn']  = _make_log_method('warn')
-        console.value['info']  = _make_log_method('info')
-        console.value['table'] = _make_log_method('table')
-        def _assert(args, interp):
-            if not args or not interp._truthy(args[0]):
-                msgs = [interp._to_str(a) for a in args[1:]] if len(args) > 1 else []
-                msg = 'Assertion failed: ' + ' '.join(msgs) if msgs else 'Assertion failed'
-                indent = '  ' * interp._console_indent
-                interp.output.append(indent + msg)
-                print(indent + msg)
-        console.value['assert'] = intr(_assert, 'assert')
-        def _dir(args, interp):
-            if args:
-                v = args[0]
-                if v.type == 'object':
-                    print(json.dumps({k: interp._to_str(val) for k,val in v.value.items()}, indent=2))
-                else:
-                    print(interp._to_str(v))
-        console.value['dir'] = intr(_dir, 'dir')
-        def _count(args, interp):
-            label = interp._to_str(args[0]) if args else 'default'
-            interp._console_counts[label] = interp._console_counts.get(label, 0) + 1
-            line = f"{label}: {interp._console_counts[label]}"
-            indent = '  ' * interp._console_indent
-            interp.output.append(indent + line)
-            print(indent + line)
-        console.value['count'] = intr(_count, 'count')
-        def _count_reset(args, interp):
-            label = interp._to_str(args[0]) if args else 'default'
-            interp._console_counts[label] = 0
-        console.value['countReset'] = intr(_count_reset, 'countReset')
-        def _time(args, interp):
-            label = interp._to_str(args[0]) if args else 'default'
-            interp._console_timers[label] = time.time()
-        console.value['time'] = intr(_time, 'time')
-        def _time_end(args, interp):
-            label = interp._to_str(args[0]) if args else 'default'
-            start = interp._console_timers.pop(label, None)
-            elapsed = (time.time() - start) * 1000 if start is not None else 0.0
-            line = f"{label}: {elapsed:.3f}ms"
-            indent = '  ' * interp._console_indent
-            interp.output.append(indent + line)
-            print(indent + line)
-        console.value['timeEnd'] = intr(_time_end, 'timeEnd')
-        def _time_log(args, interp):
-            label = interp._to_str(args[0]) if args else 'default'
-            start = interp._console_timers.get(label)
-            elapsed = (time.time() - start) * 1000 if start is not None else 0.0
-            line = f"{label}: {elapsed:.3f}ms"
-            indent = '  ' * interp._console_indent
-            interp.output.append(indent + line)
-            print(indent + line)
-        console.value['timeLog'] = intr(_time_log, 'timeLog')
-        def _group(args, interp):
-            label = interp._to_str(args[0]) if args else ''
-            if label:
-                indent = '  ' * interp._console_indent
-                interp.output.append(indent + label)
-                print(indent + label)
-            interp._console_indent += 1
-        console.value['group'] = intr(_group, 'group')
-        console.value['groupCollapsed'] = intr(_group, 'groupCollapsed')
-        def _group_end(args, interp):
-            if interp._console_indent > 0:
-                interp._console_indent -= 1
-        console.value['groupEnd'] = intr(_group_end, 'groupEnd')
-        def _trace(args, interp):
-            parts = [interp._to_str(a) for a in args]
-            line = 'Trace: ' + ' '.join(parts) if parts else 'Trace'
-            indent = '  ' * interp._console_indent
-            interp.output.append(indent + line)
-            print(indent + line)
-        console.value['trace'] = intr(_trace, 'trace')
-        console.value['clear'] = intr(lambda a, i: UNDEFINED, 'clear')
-        g.declare('console', console, 'var')
-
-        # -- Math --
-        math_obj = JsValue("object", {})
-        for cn, cv in [('PI',math.pi),('E',math.e),('LN2',math.log(2)),
-                       ('LN10',math.log(10)),('LOG2E',math.log2(math.e)),
-                       ('LOG10E',math.log10(math.e)),('SQRT1_2',math.sqrt(0.5)),
-                       ('SQRT2',math.sqrt(2))]:
-            math_obj.value[cn] = JsValue("number", cv)
-        for fn_name, py_fn in [
-            ('abs',abs),('ceil',math.ceil),('floor',math.floor),('round',round),
-            ('sqrt',math.sqrt),('log',math.log),('log2',math.log2),
-            ('log10',math.log10),('exp',math.exp),
-            ('sin',math.sin),('cos',math.cos),('tan',math.tan),
-            ('asin',math.asin),('acos',math.acos),('atan',math.atan),
-            ('sinh',math.sinh),('cosh',math.cosh),('tanh',math.tanh),
-        ]:
-            _f = py_fn
-            math_obj.value[fn_name] = intr(lambda a,i,f=_f: JsValue("number", f(*[i._to_num(x) for x in a])), fn_name)
-        math_obj.value['atan2'] = intr(lambda a,i: JsValue("number", math.atan2(i._to_num(a[0]),i._to_num(a[1]))), 'atan2')
-        math_obj.value['pow']   = intr(lambda a,i: JsValue("number", i._to_num(a[0])**i._to_num(a[1])), 'pow')
-        math_obj.value['min']   = intr(lambda a,i: JsValue("number", min(i._to_num(x) for x in a) if a else float('inf')), 'min')
-        math_obj.value['max']   = intr(lambda a,i: JsValue("number", max(i._to_num(x) for x in a) if a else float('-inf')), 'max')
-        math_obj.value['random']= intr(lambda a,i: JsValue("number", random.random()), 'random')
-        math_obj.value['sign']  = intr(lambda a,i: JsValue("number", (lambda n: 1 if n>0 else -1 if n<0 else 0)(i._to_num(a[0]))), 'sign')
-        math_obj.value['trunc'] = intr(lambda a,i: JsValue("number", math.trunc(i._to_num(a[0]))), 'trunc')
-        math_obj.value['imul']  = intr(lambda a,i: JsValue("number", (int(i._to_num(a[0]))*int(i._to_num(a[1])))&0xFFFFFFFF), 'imul')
-        math_obj.value['clz32'] = intr(lambda a,i: JsValue("number", (32-(int(i._to_num(a[0]))&0xFFFFFFFF).bit_length()) if int(i._to_num(a[0]))&0xFFFFFFFF else 32), 'clz32')
-        math_obj.value['fround']= intr(lambda a,i: JsValue("number", float(struct.pack('f',i._to_num(a[0])))), 'fround') if False else intr(lambda a,i: JsValue("number", i._to_num(a[0])), 'fround')
-        math_obj.value['hypot'] = intr(lambda a, i: JsValue("number", math.hypot(*[i._to_num(x) for x in a])), 'hypot')
-        def _math_cbrt(args, interp):
-            x = interp._to_num(args[0]) if args else 0
-            if x < 0:
-                return JsValue("number", -((-x) ** (1.0/3.0)))
-            return JsValue("number", x ** (1.0/3.0))
-        math_obj.value['cbrt'] = intr(_math_cbrt, 'cbrt')
-        g.declare('Math', math_obj, 'var')
-
-        # -- JSON --
-        json_obj = JsValue("object", {})
-        def _stringify(args, interp):
-            if not args or args[0].type in ('null', 'undefined'):
-                return JS_NULL
-            val = args[0]
-            replacer = args[1] if len(args) > 1 else UNDEFINED
-            space_arg = args[2] if len(args) > 2 else UNDEFINED
-
-            # Determine indent
-            indent = None
-            if space_arg.type == 'number':
-                n = int(interp._to_num(space_arg))
-                if n > 0:
-                    indent = n
-            elif space_arg.type == 'string' and space_arg.value:
-                indent = space_arg.value
-
-            # Build allowed keys set from array replacer
-            allowed_keys = None
-            if replacer.type == 'array':
-                allowed_keys = [interp._to_str(k) for k in replacer.value]
-
-            _OMIT = object()
-
-            def _convert(key, v):
-                # Check for toJSON method
-                if v.type in ('object', 'array') and isinstance(v.value, (dict, list)):
-                    to_json = v.value.get('toJSON') if isinstance(v.value, dict) else None
-                    if to_json and isinstance(to_json, JsValue) and to_json.type in ('function', 'arrow', 'intrinsic'):
-                        v = interp._call_js(to_json, [py_to_js(key)], v)
-                # Apply function replacer if provided
-                if interp._is_callable(replacer):
-                    v = interp._call_js(replacer, [py_to_js(key), v], UNDEFINED)
-                if v.type == 'undefined':
-                    return _OMIT
-                if v.type in ('null',):
-                    return None
-                if v.type == 'boolean':
-                    return v.value
-                if v.type == 'number':
-                    n = v.value
-                    if math.isnan(n) or math.isinf(n):
-                        return None
-                    if n == int(n) and abs(n) < 1e15:
-                        return int(n)
-                    return n
-                if v.type == 'string':
-                    return v.value
-                if v.type == 'array':
-                    return [_convert(str(i), x) for i, x in enumerate(v.value)]
-                if v.type == 'object':
-                    keys = [k for k in v.value.keys()
-                            if not k.startswith('__') and not (k.startswith('@@') and k.endswith('@@'))]
-                    if allowed_keys is not None and not interp._is_callable(replacer):
-                        keys = [k for k in allowed_keys if k in v.value]
-                    result = {}
-                    for k in keys:
-                        pv = _convert(k, v.value[k])
-                        if pv is not _OMIT:
-                            result[k] = pv
-                    return result
-                return None
-
-            py_val = _convert('', val)
-            if py_val is _OMIT:
-                return UNDEFINED
-            if indent is None:
-                return JsValue("string", json.dumps(py_val, separators=(',', ':'), default=str))
-            return JsValue("string", json.dumps(py_val, indent=indent, default=str))
-
-        def _parse(args, interp):
-            if not args:
-                raise _JSError(py_to_js('JSON.parse requires argument'))
-            parsed = interp._from_py(json.loads(args[0].value))
-            reviver = args[1] if len(args) > 1 else UNDEFINED
-            if not interp._is_callable(reviver):
-                return parsed
-            def _walk(key, v):
-                if v.type == 'object':
-                    for k in list(v.value.keys()):
-                        new_val = _walk(k, v.value[k])
-                        if new_val.type == 'undefined':
-                            del v.value[k]
-                        else:
-                            v.value[k] = new_val
-                elif v.type == 'array':
-                    for i in range(len(v.value)):
-                        new_val = _walk(str(i), v.value[i])
-                        v.value[i] = new_val
-                return interp._call_js(reviver, [py_to_js(key), v], UNDEFINED)
-            return _walk('', parsed)
-        json_obj.value['stringify'] = intr(_stringify, 'stringify')
-        json_obj.value['parse']     = intr(_parse, 'parse')
-        g.declare('JSON', json_obj, 'var')
-
-        # -- Object statics --
-        obj_ctor = JsValue("object", {})
-
-        def _public_keys(d, obj=None):
-            keys = [k for k in d.keys() if not k.startswith('__') and not (k.startswith('@@') and k.endswith('@@'))]
-            if obj is not None:
-                keys = [k for k in keys if interp._is_enumerable(obj, k)]
-            return keys
-
-        obj_ctor.value['keys']   = intr(lambda a,i: py_to_js(_public_keys(a[0].value, a[0])) if a and a[0].type=='object' else py_to_js([]), 'keys')
-        obj_ctor.value['values'] = intr(lambda a,i: py_to_js([a[0].value[k] for k in _public_keys(a[0].value, a[0])]) if a and a[0].type=='object' else py_to_js([]), 'values')
-        obj_ctor.value['entries']= intr(lambda a,i: py_to_js([[k,a[0].value[k]] for k in _public_keys(a[0].value, a[0])]) if a and a[0].type=='object' else py_to_js([]), 'entries')
-        obj_ctor.value['assign'] = intr(lambda a,i: _obj_assign(a,i), 'assign')
-        def _obj_assign(args, interp):
-            target = args[0] if args else py_to_js({})
-            for src in args[1:]:
-                if src.type not in ('object', 'array') or not isinstance(src.value, dict):
-                    continue
-                # Collect own keys: regular keys + getter-only keys from __get__xxx
-                all_keys = set()
-                for key in src.value.keys():
-                    if key.startswith('__') and key.endswith('__'):
-                        continue
-                    if key.startswith('@@') and key.endswith('@@'):
-                        continue
-                    if key.startswith('__get__'):
-                        all_keys.add(key[len('__get__'):])
-                        continue
-                    if key.startswith('__set__'):
-                        continue
-                    all_keys.add(key)
-                for key in all_keys:
-                    if not interp._is_enumerable(src, key):
-                        continue
-                    val = interp._get_prop(src, key)
-                    interp._set_prop(target, key, val)
-            return target
-        obj_ctor.value['hasOwn'] = intr(
-            lambda a, i: JS_TRUE if len(a) > 1 and a[0].type == 'object' and i._to_key(a[1]) in a[0].value else JS_FALSE,
-            'hasOwn',
-        )
-        def _obj_from_entries(args, interp):
-            if not args:
-                return py_to_js({})
-            src = args[0]
-            out = {}
-            for entry in interp._array_like_items(src):
-                if isinstance(entry, JsValue) and entry.type == 'array' and len(entry.value) >= 2:
-                    out[interp._to_key(entry.value[0])] = entry.value[1]
-            return JsValue('object', out)
-        obj_ctor.value['fromEntries'] = intr(_obj_from_entries, 'fromEntries')
-        def _obj_group_by(args, interp):
-            iterable = args[0] if args else UNDEFINED
-            callback = args[1] if len(args) > 1 else UNDEFINED
-            if not interp._is_callable(callback):
-                raise _JSError(py_to_js('TypeError: callback is not a function'))
-            items = interp._array_like_items(iterable)
-            result = JsValue('object', {})
-            for idx, item in enumerate(items):
-                key = interp._to_str(interp._call_js(callback, [item, JsValue('number', float(idx))], UNDEFINED))
-                existing = result.value.get(key)
-                if existing is None:
-                    result.value[key] = JsValue('array', [item])
-                else:
-                    existing.value.append(item)
-            return result
-        obj_ctor.value['groupBy'] = intr(_obj_group_by, 'Object.groupBy')
-        def _obj_create(args, interp):
-            proto = args[0] if args else UNDEFINED
-            new_obj = JsValue('object', {})
-            if proto.type not in ('undefined', 'null'):
-                new_obj.value['__proto__'] = proto
-            return new_obj
-        obj_ctor.value['create'] = intr(_obj_create, 'Object.create')
-        def _obj_define_property(args, interp):
-            if len(args) < 3: return args[0] if args else UNDEFINED
-            obj, key, desc = args[0], interp._to_key(args[1]), args[2]
-            if obj.type not in ('object', 'function', 'intrinsic', 'class'): return obj
-            if desc.type == 'object':
-                getter = desc.value.get('get')
-                setter = desc.value.get('set')
-                if getter and interp._is_callable(getter):
-                    obj.value[f"__get__{key}"] = getter
-                if setter and interp._is_callable(setter):
-                    obj.value[f"__set__{key}"] = setter
-                value = desc.value.get('value')
-                if value is not None:
-                    obj.value[key] = value
-                # Build and store descriptor dict
-                existing = interp._get_desc(obj, key) or {}
-                w_raw = desc.value.get('writable')
-                e_raw = desc.value.get('enumerable')
-                c_raw = desc.value.get('configurable')
-                if w_raw is not None:
-                    existing['writable'] = interp._truthy(w_raw)
-                if e_raw is not None:
-                    existing['enumerable'] = interp._truthy(e_raw)
-                if c_raw is not None:
-                    existing['configurable'] = interp._truthy(c_raw)
-                if getter:
-                    existing['get'] = getter
-                if setter:
-                    existing['set'] = setter
-                # Only store descriptor if any flag was explicitly set
-                if existing:
-                    interp._set_desc(obj, key, existing)
-            return obj
-        obj_ctor.value['defineProperty'] = intr(_obj_define_property, 'defineProperty')
-        obj_ctor.value['getOwnPropertyNames'] = intr(
-            lambda a, i: py_to_js([k for k in (a[0].value.keys() if a and a[0].type == 'object' else []) if not k.startswith('__')]),
-            'getOwnPropertyNames',
-        )
-
-        def _obj_is(args, interp):
-            a = args[0] if args else UNDEFINED
-            b = args[1] if len(args) > 1 else UNDEFINED
-            if a.type != b.type:
-                return JS_FALSE
-            if a.type == 'number':
-                av, bv = a.value, b.value
-                if math.isnan(av) and math.isnan(bv):
-                    return JS_TRUE
-                if av == 0.0 and bv == 0.0:
-                    return JS_TRUE if math.copysign(1, av) == math.copysign(1, bv) else JS_FALSE
-                return JS_TRUE if av == bv else JS_FALSE
-            return JS_TRUE if interp._strict_eq(a, b) else JS_FALSE
-
-        obj_ctor.value['is'] = intr(_obj_is, 'Object.is')
-        obj_ctor.value['getPrototypeOf'] = intr(lambda a, i: i._get_proto(a[0]) if a else UNDEFINED, 'Object.getPrototypeOf')
-
-        def _obj_set_prototype_of(args, interp):
-            obj = args[0] if args else UNDEFINED
-            proto = args[1] if len(args) > 1 else UNDEFINED
-            if isinstance(obj.value, dict):
-                if proto.type == 'null':
-                    obj.value['__proto__'] = JS_NULL
-                elif proto.type in ('object', 'function', 'class', 'intrinsic'):
-                    obj.value['__proto__'] = proto
-            return obj
-
-        obj_ctor.value['setPrototypeOf'] = intr(_obj_set_prototype_of, 'Object.setPrototypeOf')
-
-        def _obj_proto_to_string(this_val, args, interp):
-            target = this_val
-            if target.type == 'null': return py_to_js('[object Null]')
-            if target.type == 'undefined': return py_to_js('[object Undefined]')
-            if target.type == 'number': return py_to_js('[object Number]')
-            if target.type == 'string': return py_to_js('[object String]')
-            if target.type == 'boolean': return py_to_js('[object Boolean]')
-            if target.type == 'array': return py_to_js('[object Array]')
-            if target.type == 'function': return py_to_js('[object Function]')
-            if target.type in ('object', 'intrinsic', 'class'):
-                if isinstance(target.value, dict):
-                    tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
-                    tag = target.value.get(tag_key)
-                    if tag and isinstance(tag, JsValue) and tag.type == 'string':
-                        return py_to_js(f'[object {tag.value}]')
-                    kind = target.value.get('__kind__')
-                    if isinstance(kind, JsValue) and kind.type == 'string':
-                        return py_to_js(f'[object {kind.value}]')
-                return py_to_js('[object Object]')
-            return py_to_js('[object Object]')
-
-        proto_obj = JsValue('object', {})
-        proto_obj.value['toString'] = self._make_intrinsic(_obj_proto_to_string, 'Object.prototype.toString')
-        obj_ctor.value['prototype'] = proto_obj
-
-        def _obj_get_own_prop_desc(args, interp):
-            if len(args) < 2:
-                return UNDEFINED
-            obj, key = args[0], interp._to_key(args[1])
-            if obj.type not in ('object', 'function', 'intrinsic', 'class'):
-                return UNDEFINED
-            getter_key = f"__get__{key}"
-            setter_key = f"__set__{key}"
-            stored = interp._get_desc(obj, key) or {}
-            if getter_key in obj.value or setter_key in obj.value:
-                desc = JsValue('object', {})
-                if getter_key in obj.value:
-                    desc.value['get'] = obj.value[getter_key]
-                if setter_key in obj.value:
-                    desc.value['set'] = obj.value[setter_key]
-                desc.value['enumerable'] = JS_TRUE if stored.get('enumerable', True) else JS_FALSE
-                desc.value['configurable'] = JS_TRUE if stored.get('configurable', True) else JS_FALSE
-                return desc
-            if key in obj.value:
-                desc = JsValue('object', {})
-                desc.value['value'] = obj.value[key]
-                desc.value['writable'] = JS_TRUE if stored.get('writable', True) else JS_FALSE
-                desc.value['enumerable'] = JS_TRUE if stored.get('enumerable', True) else JS_FALSE
-                desc.value['configurable'] = JS_TRUE if stored.get('configurable', True) else JS_FALSE
-                return desc
-            return UNDEFINED
-
-        obj_ctor.value['getOwnPropertyDescriptor'] = intr(_obj_get_own_prop_desc, 'Object.getOwnPropertyDescriptor')
-
-        def _obj_get_own_prop_descs(args, interp):
-            if not args or args[0].type not in ('object', 'function', 'intrinsic', 'class'):
-                return py_to_js({})
-            obj = args[0]
-            result = JsValue('object', {})
-            for k in list(obj.value.keys()):
-                desc = _obj_get_own_prop_desc([obj, py_to_js(k)], interp)
-                if desc.type != 'undefined':
-                    result.value[k] = desc
-            return result
-
-        obj_ctor.value['getOwnPropertyDescriptors'] = intr(_obj_get_own_prop_descs, 'Object.getOwnPropertyDescriptors')
-
-        def _obj_get_own_prop_symbols(args, interp):
-            if not args or args[0].type not in ('object', 'function', 'intrinsic', 'class'):
-                return py_to_js([])
-            obj = args[0]
-            syms = [JsValue('string', k) for k in obj.value.keys()
-                    if k.startswith('@@') and k.endswith('@@') and len(k) > 4]
-            return JsValue('array', syms)
-
-        obj_ctor.value['getOwnPropertySymbols'] = intr(_obj_get_own_prop_symbols, 'Object.getOwnPropertySymbols')
-        def _obj_freeze(args, interp):
-            if not args: return UNDEFINED
-            obj = args[0]
-            if isinstance(obj.value, dict):
-                obj.value['__extensible__'] = False
-                for k in list(obj.value.keys()):
-                    if k.startswith('__') and k.endswith('__'):
-                        continue
-                    existing = interp._get_desc(obj, k) or {}
-                    existing['writable'] = False
-                    existing['configurable'] = False
-                    if 'enumerable' not in existing:
-                        existing['enumerable'] = True
-                    interp._set_desc(obj, k, existing)
-            return obj
-
-        def _obj_seal(args, interp):
-            if not args: return UNDEFINED
-            obj = args[0]
-            if isinstance(obj.value, dict):
-                obj.value['__extensible__'] = False
-                for k in list(obj.value.keys()):
-                    if k.startswith('__') and k.endswith('__'):
-                        continue
-                    existing = interp._get_desc(obj, k) or {}
-                    existing['configurable'] = False
-                    if 'enumerable' not in existing:
-                        existing['enumerable'] = True
-                    interp._set_desc(obj, k, existing)
-            return obj
-
-        def _obj_prevent_extensions(args, interp):
-            if not args: return UNDEFINED
-            obj = args[0]
-            if isinstance(obj.value, dict):
-                obj.value['__extensible__'] = False
-            return obj
-
-        def _obj_is_extensible(args, interp):
-            if not args: return JS_TRUE
-            obj = args[0]
-            if not isinstance(getattr(obj, 'value', None), dict):
-                return JS_TRUE
-            return JS_FALSE if obj.value.get('__extensible__') is False else JS_TRUE
-
-        def _obj_is_frozen(args, interp):
-            if not args: return JS_FALSE
-            obj = args[0]
-            if not isinstance(getattr(obj, 'value', None), dict):
-                return JS_FALSE
-            if obj.value.get('__extensible__', True) is not False:
-                return JS_FALSE
-            for k in obj.value:
-                if k.startswith('__') and k.endswith('__'):
-                    continue
-                desc = interp._get_desc(obj, k) or {}
-                if desc.get('writable', True) or desc.get('configurable', True):
-                    return JS_FALSE
-            return JS_TRUE
-
-        def _obj_is_sealed(args, interp):
-            if not args: return JS_FALSE
-            obj = args[0]
-            if not isinstance(getattr(obj, 'value', None), dict):
-                return JS_FALSE
-            if obj.value.get('__extensible__', True) is not False:
-                return JS_FALSE
-            for k in obj.value:
-                if k.startswith('__') and k.endswith('__'):
-                    continue
-                desc = interp._get_desc(obj, k) or {}
-                if desc.get('configurable', True):
-                    return JS_FALSE
-            return JS_TRUE
-
-        obj_ctor.value['freeze'] = intr(_obj_freeze, 'Object.freeze')
-        obj_ctor.value['seal'] = intr(_obj_seal, 'Object.seal')
-        obj_ctor.value['preventExtensions'] = intr(_obj_prevent_extensions, 'Object.preventExtensions')
-        obj_ctor.value['isExtensible'] = intr(_obj_is_extensible, 'Object.isExtensible')
-        obj_ctor.value['isFrozen'] = intr(_obj_is_frozen, 'Object.isFrozen')
-        obj_ctor.value['isSealed'] = intr(_obj_is_sealed, 'Object.isSealed')
-        g.declare('Object', obj_ctor, 'var')
-
-        # -- Array constructor (used for Array.isArray etc.) --
-        arr_ctor = JsValue("object", {})
-        arr_ctor.value['isArray'] = intr(lambda a,i: JS_TRUE if a and a[0].type=='array' else JS_FALSE, 'isArray')
-        def _array_from(args, interp):
-            if not args:
-                return py_to_js([])
-            src = args[0]
-            map_fn = args[1] if len(args) > 1 and interp._is_callable(args[1]) else None
-            it = interp._get_js_iterator(src)
-            if it is not None:
-                items = []
-                seen = 0
-                while seen < 100000:
-                    r = it()
-                    seen += 1
-                    done = interp._get_prop(r, 'done')
-                    if interp._truthy(done):
-                        break
-                    items.append(interp._get_prop(r, 'value'))
-            elif src.type == 'array':
-                items = list(src.value)
-            elif src.type == 'string':
-                items = [JsValue('string', ch) for ch in src.value]
-            elif src.type == 'object':
-                raw_length = src.value.get('length', UNDEFINED)
-                if isinstance(raw_length, JsValue) and raw_length.type != 'undefined':
-                    length = max(0, int(interp._to_num(raw_length)))
-                    items = [src.value.get(str(index), UNDEFINED) for index in range(length)]
-                else:
-                    items = []
-            else:
-                items = []
-            if map_fn:
-                items = [interp._call_js(map_fn, [item, JsValue('number', i)], UNDEFINED) for i, item in enumerate(items)]
-            return JsValue('array', items)
-        arr_ctor.value['from']    = intr(_array_from, 'from')
-        arr_ctor.value['of']      = intr(lambda a, i: JsValue('array', list(a)), 'of')
-        g.declare('Array', arr_ctor, 'var')
-
-        number_ctor = intr(lambda a,i: py_to_js(i._to_num(a[0]) if a else 0), 'Number')
-        number_ctor.value['isNaN'] = self._make_intrinsic(
-            lambda this_val, args, interp: JS_TRUE if args and math.isnan(interp._to_num(args[0])) else JS_FALSE,
-            'Number.isNaN',
-        )
-        number_ctor.value['isFinite'] = self._make_intrinsic(
-            lambda this_val, args, interp: JS_TRUE if args and math.isfinite(interp._to_num(args[0])) else JS_FALSE,
-            'Number.isFinite',
-        )
-        number_ctor.value['isInteger'] = self._make_intrinsic(
-            lambda this_val, args, interp: JS_TRUE if args and interp._to_num(args[0]) == int(interp._to_num(args[0])) and math.isfinite(interp._to_num(args[0])) else JS_FALSE,
-            'Number.isInteger',
-        )
-        number_ctor.value['EPSILON'] = JsValue('number', 2.220446049250313e-16)
-        number_ctor.value['MAX_SAFE_INTEGER'] = JsValue('number', float(2**53 - 1))
-        number_ctor.value['MIN_SAFE_INTEGER'] = JsValue('number', float(-(2**53 - 1)))
-        number_ctor.value['MAX_VALUE'] = JsValue('number', 1.7976931348623157e+308)
-        number_ctor.value['MIN_VALUE'] = JsValue('number', 5e-324)
-        number_ctor.value['POSITIVE_INFINITY'] = JsValue('number', float('inf'))
-        number_ctor.value['NEGATIVE_INFINITY'] = JsValue('number', float('-inf'))
-        number_ctor.value['NaN'] = JsValue('number', float('nan'))
-        number_ctor.value['isSafeInteger'] = self._make_intrinsic(
-            lambda this_val, args, interp: (
-                JS_TRUE if args and math.isfinite(interp._to_num(args[0]))
-                and interp._to_num(args[0]) == int(interp._to_num(args[0]))
-                and abs(interp._to_num(args[0])) <= 2**53 - 1
-                else JS_FALSE
-            ),
-            'Number.isSafeInteger',
-        )
-        number_ctor.value['parseFloat'] = intr(_parseFloat, 'Number.parseFloat')
-        number_ctor.value['parseInt'] = intr(_parseInt, 'Number.parseInt')
-
-        string_ctor = intr(lambda a,i: py_to_js(i._to_str(a[0]) if a else ''), 'String')
-        def _string_raw(args, interp):
-            if not args:
-                return JsValue('string', '')
-            template = args[0]
-            raw = interp._get_prop(template, 'raw')
-            parts = interp._array_like_items(raw)
-            out = []
-            for index, part in enumerate(parts):
-                out.append(interp._to_str(part))
-                if index + 1 < len(args):
-                    out.append(interp._to_str(args[index + 1]))
-            return JsValue('string', ''.join(out))
-        string_ctor.value['raw'] = self._make_intrinsic(lambda this_val, args, interp: _string_raw(args, interp), 'String.raw')
-        string_ctor.value['fromCodePoint'] = self._make_intrinsic(
-            lambda this_val, args, interp: JsValue('string', ''.join(chr(int(interp._to_num(a))) for a in args)),
-            'String.fromCodePoint',
-        )
-
-        def _make_regexp(source, flags=''):
-            flag_text = ''.join(sorted(set(flags)))
-            py_flags = 0
-            if 'i' in flag_text:
-                py_flags |= re.IGNORECASE
-            if 'm' in flag_text:
-                py_flags |= re.MULTILINE
-            if 's' in flag_text:
-                py_flags |= re.DOTALL
-            if 'u' in flag_text or 'v' in flag_text:
-                py_flags |= re.UNICODE
-            py_source = _js_regex_to_python(source)
-
-            def _regexp_test(args, interp):
-                text = interp._to_str(args[0]) if args else ''
-                return JS_TRUE if re.search(py_source, text, py_flags) else JS_FALSE
-
-            def _regexp_exec(args, interp):
-                text = interp._to_str(args[0]) if args else ''
-                match = re.search(py_source, text, py_flags)
-                if not match:
-                    return JS_NULL
-                values = [JsValue('string', match.group(0))]
-                values.extend(JsValue('string', group) if group is not None else UNDEFINED for group in match.groups())
-                result = JsValue('array', values)
-                groups_dict = match.groupdict()
-                if groups_dict:
-                    groups_obj = JsValue('object', {
-                        k: JsValue('string', v) if v is not None else UNDEFINED
-                        for k, v in groups_dict.items()
-                    })
-                else:
-                    groups_obj = UNDEFINED
-                if result.extras is None:
-                    result.extras = {}
-                result.extras['groups'] = groups_obj
-                if 'd' in flag_text:
-                    indices_arr = []
-                    for i in range(len(match.regs)):
-                        start, end = match.regs[i]
-                        if start == -1:
-                            indices_arr.append(UNDEFINED)
-                        else:
-                            indices_arr.append(JsValue('array', [py_to_js(float(start)), py_to_js(float(end))]))
-                    result.extras['indices'] = JsValue('array', indices_arr)
-                return result
-
-            regexp = JsValue('object', {})
-            regexp.value['__kind__'] = JsValue('string', 'RegExp')
-            regexp.value['source'] = JsValue('string', source)
-            regexp.value['flags'] = JsValue('string', flag_text)
-            regexp.value['global'] = JS_TRUE if 'g' in flag_text else JS_FALSE
-            regexp.value['ignoreCase'] = JS_TRUE if 'i' in flag_text else JS_FALSE
-            regexp.value['multiline'] = JS_TRUE if 'm' in flag_text else JS_FALSE
-            regexp.value['test'] = intr(_regexp_test, 'RegExp.test')
-            regexp.value['exec'] = intr(_regexp_exec, 'RegExp.exec')
-            return regexp
-
-        def _regexp_ctor(args, interp):
-            source = interp._to_str(args[0]) if args else ''
-            flags = interp._to_str(args[1]) if len(args) > 1 else ''
-            return _make_regexp(source, flags)
-
-        g.declare('RegExp', self._make_intrinsic(lambda this_val, args, interp: _regexp_ctor(args, interp), 'RegExp'), 'var')
-
-        def _make_date(value_ms=None):
-            _ms = [float(value_ms if value_ms is not None else time.time() * 1000.0)]
-
-            def _get_dt():
-                return datetime.fromtimestamp(_ms[0] / 1000.0, tz=timezone.utc)
-
-            def _date_get_time(args, interp):
-                return JsValue('number', _ms[0])
-
-            def _date_to_iso(args, interp):
-                text = _get_dt().isoformat().replace('+00:00', 'Z')
-                return JsValue('string', text)
-
-            def _date_to_string(args, interp):
-                return JsValue('string', _get_dt().ctime())
-
-            def _date_get_full_year(args, interp):
-                return JsValue('number', float(_get_dt().year))
-
-            def _date_get_month(args, interp):
-                return JsValue('number', float(_get_dt().month - 1))
-
-            def _date_get_date(args, interp):
-                return JsValue('number', float(_get_dt().day))
-
-            def _date_get_day(args, interp):
-                return JsValue('number', float((_get_dt().weekday() + 1) % 7))
-
-            def _date_get_hours(args, interp):
-                return JsValue('number', float(_get_dt().hour))
-
-            def _date_get_minutes(args, interp):
-                return JsValue('number', float(_get_dt().minute))
-
-            def _date_get_seconds(args, interp):
-                return JsValue('number', float(_get_dt().second))
-
-            def _date_get_milliseconds(args, interp):
-                return JsValue('number', float(_ms[0] % 1000))
-
-            def _date_get_timezone_offset(args, interp):
-                return JsValue('number', 0.0)
-
-            def _date_set_full_year(args, interp):
-                if not args: return JsValue('number', _ms[0])
-                new_year = int(interp._to_num(args[0]))
-                _ms[0] = _get_dt().replace(year=new_year).timestamp() * 1000
-                return JsValue('number', _ms[0])
-
-            def _date_set_month(args, interp):
-                if not args: return JsValue('number', _ms[0])
-                new_month = int(interp._to_num(args[0])) + 1
-                _ms[0] = _get_dt().replace(month=new_month).timestamp() * 1000
-                return JsValue('number', _ms[0])
-
-            def _date_set_date(args, interp):
-                if not args: return JsValue('number', _ms[0])
-                _ms[0] = _get_dt().replace(day=int(interp._to_num(args[0]))).timestamp() * 1000
-                return JsValue('number', _ms[0])
-
-            def _date_set_hours(args, interp):
-                if not args: return JsValue('number', _ms[0])
-                _ms[0] = _get_dt().replace(hour=int(interp._to_num(args[0]))).timestamp() * 1000
-                return JsValue('number', _ms[0])
-
-            def _date_set_minutes(args, interp):
-                if not args: return JsValue('number', _ms[0])
-                _ms[0] = _get_dt().replace(minute=int(interp._to_num(args[0]))).timestamp() * 1000
-                return JsValue('number', _ms[0])
-
-            def _date_set_seconds(args, interp):
-                if not args: return JsValue('number', _ms[0])
-                _ms[0] = _get_dt().replace(second=int(interp._to_num(args[0]))).timestamp() * 1000
-                return JsValue('number', _ms[0])
-
-            def _date_set_milliseconds(args, interp):
-                if not args: return JsValue('number', _ms[0])
-                new_ms_part = int(interp._to_num(args[0]))
-                _ms[0] = math.floor(_ms[0] / 1000) * 1000 + new_ms_part
-                return JsValue('number', _ms[0])
-
-            def _date_to_locale_date_string(args, interp):
-                dt = _get_dt()
-                return JsValue('string', f'{dt.month}/{dt.day}/{dt.year}')
-
-            def _date_to_locale_time_string(args, interp):
-                s = _get_dt().strftime('%I:%M:%S %p').lstrip('0')
-                return JsValue('string', s)
-
-            def _date_to_locale_string(args, interp):
-                dt = _get_dt()
-                date_part = f'{dt.month}/{dt.day}/{dt.year}'
-                time_part = dt.strftime('%I:%M:%S %p').lstrip('0')
-                return JsValue('string', f'{date_part}, {time_part}')
-
-            obj = JsValue('object', {})
-            obj.value['__kind__'] = JsValue('string', 'Date')
-            obj.value['__date_ts__'] = _ms
-            obj.value['getTime'] = intr(_date_get_time, 'Date.getTime')
-            obj.value['toISOString'] = intr(_date_to_iso, 'Date.toISOString')
-            obj.value['toJSON'] = intr(_date_to_iso, 'Date.toJSON')
-            obj.value['toString'] = intr(_date_to_string, 'Date.toString')
-            obj.value['valueOf'] = intr(_date_get_time, 'Date.valueOf')
-            obj.value['getFullYear'] = intr(_date_get_full_year, 'Date.getFullYear')
-            obj.value['getMonth'] = intr(_date_get_month, 'Date.getMonth')
-            obj.value['getDate'] = intr(_date_get_date, 'Date.getDate')
-            obj.value['getDay'] = intr(_date_get_day, 'Date.getDay')
-            obj.value['getHours'] = intr(_date_get_hours, 'Date.getHours')
-            obj.value['getMinutes'] = intr(_date_get_minutes, 'Date.getMinutes')
-            obj.value['getSeconds'] = intr(_date_get_seconds, 'Date.getSeconds')
-            obj.value['getMilliseconds'] = intr(_date_get_milliseconds, 'Date.getMilliseconds')
-            obj.value['getTimezoneOffset'] = intr(_date_get_timezone_offset, 'Date.getTimezoneOffset')
-            obj.value['setFullYear'] = intr(_date_set_full_year, 'Date.setFullYear')
-            obj.value['setMonth'] = intr(_date_set_month, 'Date.setMonth')
-            obj.value['setDate'] = intr(_date_set_date, 'Date.setDate')
-            obj.value['setHours'] = intr(_date_set_hours, 'Date.setHours')
-            obj.value['setMinutes'] = intr(_date_set_minutes, 'Date.setMinutes')
-            obj.value['setSeconds'] = intr(_date_set_seconds, 'Date.setSeconds')
-            obj.value['setMilliseconds'] = intr(_date_set_milliseconds, 'Date.setMilliseconds')
-            obj.value['toLocaleDateString'] = intr(_date_to_locale_date_string, 'Date.toLocaleDateString')
-            obj.value['toLocaleTimeString'] = intr(_date_to_locale_time_string, 'Date.toLocaleTimeString')
-            obj.value['toLocaleString'] = intr(_date_to_locale_string, 'Date.toLocaleString')
-            return obj
-
-        def _date_ctor_fn(this_val, args, interp):
-            if len(args) >= 2:
-                year = int(interp._to_num(args[0]))
-                month = int(interp._to_num(args[1])) + 1
-                day = int(interp._to_num(args[2])) if len(args) > 2 else 1
-                hours = int(interp._to_num(args[3])) if len(args) > 3 else 0
-                minutes = int(interp._to_num(args[4])) if len(args) > 4 else 0
-                seconds = int(interp._to_num(args[5])) if len(args) > 5 else 0
-                ms_part = int(interp._to_num(args[6])) if len(args) > 6 else 0
-                from datetime import datetime as _dt2
-                dt = _dt2(year, month, day, hours, minutes, seconds, ms_part * 1000, tzinfo=timezone.utc)
-                return _make_date(dt.timestamp() * 1000)
-            return _make_date(interp._to_num(args[0]) if args else None)
-
-        date_ctor = self._make_intrinsic(_date_ctor_fn, 'Date')
-        date_ctor.value['now'] = self._make_intrinsic(
-            lambda this_val, args, interp: JsValue('number', time.time() * 1000.0),
-            'Date.now',
-        )
-        def _date_parse(this_val, args, interp):
-            s = interp._to_str(args[0]) if args else ''
-            from datetime import datetime as _dt_parse
-            for fmt in ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S.%f',
-                        '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d', '%b %d, %Y', '%d %b %Y',
-                        '%Y/%m/%d', '%m/%d/%Y'):
-                try:
-                    dt = _dt_parse.strptime(s.strip(), fmt)
-                    return JsValue('number', dt.replace(tzinfo=timezone.utc).timestamp() * 1000.0)
-                except ValueError:
-                    continue
-            return JsValue('number', float('nan'))
-        date_ctor.value['parse'] = self._make_intrinsic(_date_parse, 'Date.parse')
-        def _date_utc(this_val, args, interp):
-            nums = [int(interp._to_num(a)) for a in args]
-            year = nums[0] if len(nums) > 0 else 1970
-            if 0 <= year <= 99:
-                year += 1900
-            month = (nums[1] if len(nums) > 1 else 0) + 1
-            day = nums[2] if len(nums) > 2 else 1
-            hours = nums[3] if len(nums) > 3 else 0
-            minutes = nums[4] if len(nums) > 4 else 0
-            seconds = nums[5] if len(nums) > 5 else 0
-            ms = nums[6] if len(nums) > 6 else 0
-            from datetime import datetime as _dt_utc
-            try:
-                dt = _dt_utc(year, month, day, hours, minutes, seconds, ms * 1000, tzinfo=timezone.utc)
-                return JsValue('number', dt.timestamp() * 1000.0)
-            except (ValueError, OverflowError):
-                return JsValue('number', float('nan'))
-        date_ctor.value['UTC'] = self._make_intrinsic(_date_utc, 'Date.UTC')
-        g.declare('Date', date_ctor, 'var')
-
-        # -- task queue / timers --
-        def _queue_microtask(args, interp):
-            fn = args[0] if args else UNDEFINED
-            if not interp._is_callable(fn):
-                raise _JSError(py_to_js('queueMicrotask callback must be a function'))
-            interp._enqueue_microtask(lambda fn=fn: interp._call_js(fn, [], UNDEFINED))
-            return UNDEFINED
-
-        def _set_timeout(args, interp):
-            fn = args[0] if args else UNDEFINED
-            if not interp._is_callable(fn):
-                raise _JSError(py_to_js('setTimeout callback must be a function'))
-            delay = interp._to_num(args[1]) if len(args) > 1 else 0
-            return JsValue('number', interp._schedule_timer(fn, delay, False, args[2:]))
-
-        def _set_interval(args, interp):
-            fn = args[0] if args else UNDEFINED
-            if not interp._is_callable(fn):
-                raise _JSError(py_to_js('setInterval callback must be a function'))
-            delay = interp._to_num(args[1]) if len(args) > 1 else 0
-            return JsValue('number', interp._schedule_timer(fn, delay, True, args[2:]))
-
-        def _clear_timer(args, interp):
-            if args:
-                interp._clear_timer(int(interp._to_num(args[0])))
-            return UNDEFINED
-
-        g.declare('queueMicrotask', intr(_queue_microtask, 'queueMicrotask'), 'var')
-        g.declare('setTimeout', intr(_set_timeout, 'setTimeout'), 'var')
-        g.declare('setInterval', intr(_set_interval, 'setInterval'), 'var')
-        g.declare('clearTimeout', intr(_clear_timer, 'clearTimeout'), 'var')
-        g.declare('clearInterval', intr(_clear_timer, 'clearInterval'), 'var')
-
-        # -- performance --
-        _perf_origin = time.perf_counter()
-        perf_obj = JsValue('object', {})
-        perf_obj.value['now'] = intr(lambda a, i: JsValue('number', (time.perf_counter() - _perf_origin) * 1000.0), 'performance.now')
-        g.declare('performance', perf_obj, 'var')
-
-        # -- String / Number / Boolean / Symbol constructors (minimal) --
-        g.declare('String',  string_ctor, 'var')
-        g.declare('Number',  number_ctor, 'var')
-        g.declare('Boolean', intr(lambda a,i: JS_TRUE if a and i._truthy(a[0]) else JS_FALSE, 'Boolean'), 'var')
-
-        # -- Full Symbol implementation --
-        def _make_symbol(desc=''):
-            _symbol_id_counter[0] += 1
-            return JsValue('symbol', {'id': _symbol_id_counter[0], 'desc': str(desc)})
-
-        def _symbol_ctor(args, interp):
-            desc = interp._to_str(args[0]) if args and args[0].type != 'undefined' else ''
-            return _make_symbol(desc)
-
-        sym_ctor = intr(_symbol_ctor, 'Symbol')
-        sym_ctor.value['iterator']     = JsValue('symbol', {'id': SYMBOL_ITERATOR,       'desc': 'Symbol.iterator'})
-        sym_ctor.value['toPrimitive']  = JsValue('symbol', {'id': SYMBOL_TO_PRIMITIVE,   'desc': 'Symbol.toPrimitive'})
-        sym_ctor.value['hasInstance']  = JsValue('symbol', {'id': SYMBOL_HAS_INSTANCE,   'desc': 'Symbol.hasInstance'})
-        sym_ctor.value['toStringTag']  = JsValue('symbol', {'id': SYMBOL_TO_STRING_TAG,  'desc': 'Symbol.toStringTag'})
-        sym_ctor.value['asyncIterator']= JsValue('symbol', {'id': SYMBOL_ASYNC_ITERATOR, 'desc': 'Symbol.asyncIterator'})
-        sym_ctor.value['species']      = JsValue('symbol', {'id': SYMBOL_SPECIES,        'desc': 'Symbol.species'})
-        sym_ctor.value['match']        = JsValue('symbol', {'id': SYMBOL_MATCH,          'desc': 'Symbol.match'})
-        sym_ctor.value['replace']      = JsValue('symbol', {'id': SYMBOL_REPLACE,        'desc': 'Symbol.replace'})
-        sym_ctor.value['split']        = JsValue('symbol', {'id': SYMBOL_SPLIT,          'desc': 'Symbol.split'})
-        sym_ctor.value['search']       = JsValue('symbol', {'id': SYMBOL_SEARCH,         'desc': 'Symbol.search'})
-        sym_ctor.value['isConcatSpreadable'] = JsValue('symbol', {'id': SYMBOL_IS_CONCAT_SPREADABLE, 'desc': 'Symbol.isConcatSpreadable'})
-
-        def _sym_for(args, interp):
-            if not args:
-                return _make_symbol('')
-            key = interp._to_str(args[0])
-            if key in _symbol_registry:
-                return _symbol_registry[key]
-            sym = _make_symbol(key)
-            _symbol_registry[key] = sym
-            return sym
-
-        def _sym_key_for(args, interp):
-            if not args or args[0].type != 'symbol':
-                return UNDEFINED
-            sym_id = args[0].value['id']
-            for key, val in _symbol_registry.items():
-                if val.value['id'] == sym_id:
-                    return JsValue('string', key)
-            return UNDEFINED
-
-        sym_ctor.value['for']    = intr(_sym_for, 'Symbol.for')
-        sym_ctor.value['keyFor'] = intr(_sym_key_for, 'Symbol.keyFor')
-        g.declare('Symbol', sym_ctor, 'var')
-
-        # -- Proxy (real implementation) --
-        g.declare('Proxy', self._make_intrinsic(
-            lambda this_val, args, interp: JsValue('proxy', JsProxy(
-                args[0] if args else py_to_js({}),
-                args[1] if len(args) > 1 else py_to_js({})
-            )),
-            'Proxy',
-        ), 'var')
-
-        # -- WeakMap / WeakSet --
-        def _make_weakmap():
-            store = {}  # {id(key_pyobj): (key_pyobj, value)}
-            wm = JsValue('object', {})
-
-            def _wm_set(args, interp):
-                key = args[0] if args else UNDEFINED
-                val = args[1] if len(args) > 1 else UNDEFINED
-                if key.type not in ('object', 'function', 'intrinsic', 'array', 'proxy'):
-                    raise _JSError(py_to_js("Invalid value used as weak map key"))
-                store[id(key)] = (key, val)
-                return wm
-
-            def _wm_get(args, interp):
-                key = args[0] if args else UNDEFINED
-                entry = store.get(id(key))
-                return entry[1] if entry else UNDEFINED
-
-            def _wm_has(args, interp):
-                key = args[0] if args else UNDEFINED
-                return JS_TRUE if id(key) in store else JS_FALSE
-
-            def _wm_delete(args, interp):
-                key = args[0] if args else UNDEFINED
-                if id(key) in store:
-                    del store[id(key)]
-                    return JS_TRUE
-                return JS_FALSE
-
-            wm.value['set']    = intr(_wm_set,    'WeakMap.set')
-            wm.value['get']    = intr(_wm_get,    'WeakMap.get')
-            wm.value['has']    = intr(_wm_has,    'WeakMap.has')
-            wm.value['delete'] = intr(_wm_delete, 'WeakMap.delete')
-            return wm
-
-        def _make_weakset():
-            store = {}  # {id(key_pyobj): key_pyobj}
-            ws = JsValue('object', {})
-
-            def _ws_add(args, interp):
-                key = args[0] if args else UNDEFINED
-                if key.type not in ('object', 'function', 'intrinsic', 'array', 'proxy'):
-                    raise _JSError(py_to_js("Invalid value used in weak set"))
-                store[id(key)] = key
-                return ws
-
-            def _ws_has(args, interp):
-                key = args[0] if args else UNDEFINED
-                return JS_TRUE if id(key) in store else JS_FALSE
-
-            def _ws_delete(args, interp):
-                key = args[0] if args else UNDEFINED
-                if id(key) in store:
-                    del store[id(key)]
-                    return JS_TRUE
-                return JS_FALSE
-
-            ws.value['add']    = intr(_ws_add,    'WeakSet.add')
-            ws.value['has']    = intr(_ws_has,    'WeakSet.has')
-            ws.value['delete'] = intr(_ws_delete, 'WeakSet.delete')
-            return ws
-
-        g.declare('WeakMap', self._make_intrinsic(lambda this_val, args, interp: _make_weakmap(), 'WeakMap'), 'var')
-        g.declare('WeakSet', self._make_intrinsic(lambda this_val, args, interp: _make_weakset(), 'WeakSet'), 'var')
-
-        # -- WeakRef --
-        def _make_weakref(args, interp):
-            target = args[0] if args else UNDEFINED
-            return JsValue('object', {'__type__': py_to_js('WeakRef'), '__target__': target})
-
-        g.declare('WeakRef', intr(_make_weakref, 'WeakRef'), 'var')
-
-        # -- FinalizationRegistry --
-        def _make_finalization_registry(args, interp):
-            callback = args[0] if args else UNDEFINED
-            obj = JsValue('object', {
-                '__type__': py_to_js('FinalizationRegistry'),
-                '__cb__': callback,
-                '__entries__': JsValue('array', []),
-            })
-
-            def _fr_register(rargs, rinterp):
-                target = rargs[0] if rargs else UNDEFINED
-                held = rargs[1] if len(rargs) > 1 else UNDEFINED
-                token = rargs[2] if len(rargs) > 2 else UNDEFINED
-                entry = JsValue('object', {'target': target, 'held': held, 'token': token})
-                obj.value['__entries__'].value.append(entry)
-                return UNDEFINED
-
-            def _fr_unregister(rargs, rinterp):
-                token = rargs[0] if rargs else UNDEFINED
-                entries = obj.value['__entries__'].value
-                obj.value['__entries__'].value = [
-                    e for e in entries
-                    if not (e.type == 'object' and e.value.get('token') is token)
-                ]
-                return UNDEFINED
-
-            obj.value['register'] = intr(_fr_register, 'FinalizationRegistry.register')
-            obj.value['unregister'] = intr(_fr_unregister, 'FinalizationRegistry.unregister')
-            return obj
-
-        g.declare('FinalizationRegistry', intr(_make_finalization_registry, 'FinalizationRegistry'), 'var')
-
-        # -- Reflect --
-        reflect_obj = JsValue('object', {})
-
-        def _reflect_get(args, interp):
-            if not args: return UNDEFINED
-            target = args[0]
-            prop = args[1] if len(args) > 1 else UNDEFINED
-            return interp._get_prop(target, prop)
-
-        def _reflect_set(args, interp):
-            if len(args) < 3: return JS_FALSE
-            interp._set_prop(args[0], args[1], args[2])
-            return JS_TRUE
-
-        def _reflect_has(args, interp):
-            if len(args) < 2: return JS_FALSE
-            target, key = args[0], interp._to_key(args[1])
-            if target.type == 'proxy':
-                proxy = target.value
-                trap = interp._get_trap(proxy.handler, 'has')
-                if trap:
-                    return interp._call_js(trap, [proxy.target, py_to_js(key)], UNDEFINED)
-                return _reflect_has([proxy.target, args[1]], interp)
-            if target.type in ('object', 'function', 'intrinsic', 'class'):
-                return JS_TRUE if key in target.value else JS_FALSE
-            if target.type == 'array':
-                try: return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
-                except: return JS_FALSE
-            return JS_FALSE
-
-        def _reflect_delete(args, interp):
-            if len(args) < 2: return JS_FALSE
-            return JS_TRUE if interp._del_prop(args[0], args[1]) else JS_FALSE
-
-        def _reflect_apply(args, interp):
-            fn = args[0] if args else UNDEFINED
-            this_arg = args[1] if len(args) > 1 else UNDEFINED
-            fn_args = list(args[2].value) if len(args) > 2 and args[2].type == 'array' else []
-            return interp._call_js(fn, fn_args, this_arg)
-
-        def _reflect_construct(args, interp):
-            fn = args[0] if args else UNDEFINED
-            fn_args = list(args[1].value) if len(args) > 1 and args[1].type == 'array' else []
-            new_obj = JsValue('object', {})
-            proto = fn.value.get('prototype') if isinstance(fn.value, dict) else None
-            if proto and proto.type == 'object':
-                new_obj.value['__proto__'] = proto
-            result = interp._call_js(fn, fn_args, new_obj, is_new_call=True)
-            if isinstance(result, JsValue) and result.type in ('object', 'array', 'function', 'intrinsic', 'class', 'promise', 'proxy'):
-                return result
-            return new_obj
-
-        def _reflect_own_keys(args, interp):
-            if not args: return py_to_js([])
-            target = args[0]
-            if target.type in ('object', 'function', 'intrinsic', 'class'):
-                return py_to_js([k for k in target.value.keys() if not k.startswith('__')])
-            if target.type == 'array':
-                return py_to_js([str(i) for i in range(len(target.value))])
-            return py_to_js([])
-
-        def _reflect_define_property(args, interp):
-            if len(args) < 3: return JS_FALSE
-            obj, key, desc = args[0], interp._to_key(args[1]), args[2]
-            if obj.type in ('object', 'function', 'intrinsic', 'class') and desc.type == 'object':
-                getter = desc.value.get('get')
-                setter = desc.value.get('set')
-                if getter and interp._is_callable(getter):
-                    obj.value[f"__get__{key}"] = getter
-                if setter and interp._is_callable(setter):
-                    obj.value[f"__set__{key}"] = setter
-                value = desc.value.get('value')
-                if value is not None:
-                    obj.value[key] = value
-            return JS_TRUE
-
-        def _reflect_get_own_prop_desc(args, interp):
-            if len(args) < 2: return UNDEFINED
-            target, key = args[0], interp._to_key(args[1])
-            if target.type not in ('object', 'function', 'intrinsic', 'class'): return UNDEFINED
-            getter_key = f"__get__{key}"
-            setter_key = f"__set__{key}"
-            if getter_key in target.value or setter_key in target.value:
-                desc = JsValue('object', {})
-                if getter_key in target.value:
-                    desc.value['get'] = target.value[getter_key]
-                if setter_key in target.value:
-                    desc.value['set'] = target.value[setter_key]
-                desc.value['enumerable'] = JS_TRUE
-                desc.value['configurable'] = JS_TRUE
-                return desc
-            if key in target.value:
-                desc = JsValue('object', {})
-                desc.value['value'] = target.value[key]
-                desc.value['writable'] = JS_TRUE
-                desc.value['enumerable'] = JS_TRUE
-                desc.value['configurable'] = JS_TRUE
-                return desc
-            return UNDEFINED
-
-        reflect_obj.value['get']                      = intr(_reflect_get,              'Reflect.get')
-        reflect_obj.value['set']                      = intr(_reflect_set,              'Reflect.set')
-        reflect_obj.value['has']                      = intr(_reflect_has,              'Reflect.has')
-        reflect_obj.value['deleteProperty']           = intr(_reflect_delete,           'Reflect.deleteProperty')
-        reflect_obj.value['apply']                    = intr(_reflect_apply,            'Reflect.apply')
-        reflect_obj.value['construct']                = intr(_reflect_construct,         'Reflect.construct')
-        reflect_obj.value['ownKeys']                  = intr(_reflect_own_keys,         'Reflect.ownKeys')
-        reflect_obj.value['defineProperty']           = intr(_reflect_define_property,  'Reflect.defineProperty')
-        reflect_obj.value['getOwnPropertyDescriptor'] = intr(_reflect_get_own_prop_desc,'Reflect.getOwnPropertyDescriptor')
-        reflect_obj.value['getPrototypeOf']           = intr(
-            lambda a, i: i._get_proto(a[0]) if a else UNDEFINED, 'Reflect.getPrototypeOf',
-        )
-        reflect_obj.value['setPrototypeOf']           = intr(lambda a, i: JS_TRUE, 'Reflect.setPrototypeOf')
-        reflect_obj.value['isExtensible']             = intr(lambda a, i: JS_TRUE, 'Reflect.isExtensible')
-        reflect_obj.value['preventExtensions']        = intr(lambda a, i: JS_TRUE, 'Reflect.preventExtensions')
-        g.declare('Reflect', reflect_obj, 'var')
-
-        # -- BigInt constructor --
-        def _bigint_ctor(args, interp):
-            if not args:
-                raise _JSError(py_to_js('BigInt requires an argument'))
-            v = args[0]
-            if v.type == 'bigint': return v
-            if v.type == 'number':
-                if not math.isfinite(v.value):
-                    raise _JSError(py_to_js('Cannot convert non-finite number to BigInt'))
-                return JsValue('bigint', int(v.value))
-            if v.type == 'boolean': return JsValue('bigint', 1 if v.value else 0)
-            if v.type == 'string':
-                try: return JsValue('bigint', int(v.value.strip()))
-                except: raise _JSError(py_to_js(f'Cannot convert "{v.value}" to a BigInt'))
-            raise _JSError(py_to_js('Cannot convert to BigInt'))
-
-        bigint_ctor = intr(_bigint_ctor, 'BigInt')
-
-        def _bigint_as_int_n(args, interp):
-            if len(args) < 2: return UNDEFINED
-            n = int(interp._to_num(args[0]))
-            val = args[1].value if args[1].type == 'bigint' else int(interp._to_num(args[1]))
-            mod = 1 << n
-            result = val % mod
-            if result >= mod // 2:
-                result -= mod
-            return JsValue('bigint', result)
-
-        def _bigint_as_uint_n(args, interp):
-            if len(args) < 2: return UNDEFINED
-            n = int(interp._to_num(args[0]))
-            val = args[1].value if args[1].type == 'bigint' else int(interp._to_num(args[1]))
-            return JsValue('bigint', val % (1 << n))
-
-        bigint_ctor.value['asIntN']  = intr(_bigint_as_int_n,  'BigInt.asIntN')
-        bigint_ctor.value['asUintN'] = intr(_bigint_as_uint_n, 'BigInt.asUintN')
-        g.declare('BigInt', bigint_ctor, 'var')
-        def _make_map(entries=None):
-            store = []
-
-            def _find_index(key):
-                for index, (existing_key, _value) in enumerate(store):
-                    if self._strict_eq(existing_key, key):
-                        return index
-                return -1
-
-            map_obj = JsValue('object', {})
-
-            def _map_set(args, interp):
-                key = args[0] if args else UNDEFINED
-                value = args[1] if len(args) > 1 else UNDEFINED
-                index = _find_index(key)
-                if index >= 0:
-                    store[index] = (key, value)
-                else:
-                    store.append((key, value))
-                return map_obj
-
-            def _map_get(args, interp):
-                key = args[0] if args else UNDEFINED
-                index = _find_index(key)
-                return store[index][1] if index >= 0 else UNDEFINED
-
-            def _map_has(args, interp):
-                return JS_TRUE if _find_index(args[0] if args else UNDEFINED) >= 0 else JS_FALSE
-
-            def _map_delete(args, interp):
-                index = _find_index(args[0] if args else UNDEFINED)
-                if index >= 0:
-                    del store[index]
-                    return JS_TRUE
-                return JS_FALSE
-
-            def _map_clear(args, interp):
-                store.clear()
-                return UNDEFINED
-
-            map_obj.value['__kind__'] = JsValue('string', 'Map')
-            map_obj.value['set'] = intr(_map_set, 'Map.set')
-            map_obj.value['get'] = intr(_map_get, 'Map.get')
-            map_obj.value['has'] = intr(_map_has, 'Map.has')
-            map_obj.value['delete'] = intr(_map_delete, 'Map.delete')
-            map_obj.value['clear'] = intr(_map_clear, 'Map.clear')
-            map_obj.value['__size_fn__'] = intr(lambda a, i: JsValue('number', len(store)), 'Map.__size__')
-            def _make_map_iter_fn(get_items_fn):
-                def _make_it(a, i):
-                    items = get_items_fn()
-                    idx = [0]
-                    it_obj = JsValue('object', {})
-                    def _next(tv, a2, intp, _items=items, _idx=idx):
-                        if _idx[0] >= len(_items):
-                            return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
-                        val = _items[_idx[0]]; _idx[0] += 1
-                        return JsValue('object', {'value': val, 'done': JS_FALSE})
-                    it_obj.value['next'] = i._make_intrinsic(_next, 'MapIterator.next')
-                    sym_k = f"@@{SYMBOL_ITERATOR}@@"
-                    it_obj.value[sym_k] = i._make_intrinsic(lambda tv, a2, intp, it=it_obj: it, '[Symbol.iterator]')
-                    i._add_iterator_helpers(it_obj)
-                    return it_obj
-                return intr(_make_it, 'MapIterator')
-            map_obj.value['keys'] = _make_map_iter_fn(lambda: [key for key, _ in store])
-            map_obj.value['values'] = _make_map_iter_fn(lambda: [value for _, value in store])
-            map_obj.value['entries'] = _make_map_iter_fn(lambda: [JsValue('array', [key, value]) for key, value in store])
-            map_obj.value[f"@@{SYMBOL_ITERATOR}@@"] = _make_map_iter_fn(lambda: [JsValue('array', [key, value]) for key, value in store])
-            def _map_for_each(args, interp):
-                callback = args[0] if args else UNDEFINED
-                this_arg = args[1] if len(args) > 1 else UNDEFINED
-                if not interp._is_callable(callback):
-                    raise _JSError(py_to_js('TypeError: callback is not a function'))
-                for key, value in list(store):
-                    interp._call_js(callback, [value, key, map_obj], this_arg)
-                return UNDEFINED
-            map_obj.value['forEach'] = intr(_map_for_each, 'Map.forEach')
-            if entries is not None:
-                for entry in self._array_like_items(entries):
-                    if isinstance(entry, JsValue) and entry.type == 'array' and len(entry.value) >= 2:
-                        store.append((entry.value[0], entry.value[1]))
-            return map_obj
-
-        def _make_set(values=None):
-            store = []
-
-            def _find_index(value):
-                for index, existing in enumerate(store):
-                    if self._strict_eq(existing, value):
-                        return index
-                return -1
-
-            set_obj = JsValue('object', {})
-
-            def _set_add(args, interp):
-                value = args[0] if args else UNDEFINED
-                if _find_index(value) < 0:
-                    store.append(value)
-                return set_obj
-
-            def _set_has(args, interp):
-                return JS_TRUE if _find_index(args[0] if args else UNDEFINED) >= 0 else JS_FALSE
-
-            def _set_delete(args, interp):
-                index = _find_index(args[0] if args else UNDEFINED)
-                if index >= 0:
-                    del store[index]
-                    return JS_TRUE
-                return JS_FALSE
-
-            def _set_clear(args, interp):
-                store.clear()
-                return UNDEFINED
-
-            set_obj.value['__kind__'] = JsValue('string', 'Set')
-            set_obj.value['add'] = intr(_set_add, 'Set.add')
-            set_obj.value['has'] = intr(_set_has, 'Set.has')
-            set_obj.value['delete'] = intr(_set_delete, 'Set.delete')
-            set_obj.value['clear'] = intr(_set_clear, 'Set.clear')
-            set_obj.value['__size_fn__'] = intr(lambda a, i: JsValue('number', len(store)), 'Set.__size__')
-            def _make_set_iter_fn(get_items_fn):
-                def _make_it(a, i):
-                    items = get_items_fn()
-                    idx = [0]
-                    it_obj = JsValue('object', {})
-                    def _next(tv, a2, intp, _items=items, _idx=idx):
-                        if _idx[0] >= len(_items):
-                            return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
-                        val = _items[_idx[0]]; _idx[0] += 1
-                        return JsValue('object', {'value': val, 'done': JS_FALSE})
-                    it_obj.value['next'] = i._make_intrinsic(_next, 'SetIterator.next')
-                    sym_k = f"@@{SYMBOL_ITERATOR}@@"
-                    it_obj.value[sym_k] = i._make_intrinsic(lambda tv, a2, intp, it=it_obj: it, '[Symbol.iterator]')
-                    i._add_iterator_helpers(it_obj)
-                    return it_obj
-                return intr(_make_it, 'SetIterator')
-            set_obj.value['values'] = _make_set_iter_fn(lambda: list(store))
-            set_obj.value['keys'] = _make_set_iter_fn(lambda: list(store))
-            set_obj.value['entries'] = _make_set_iter_fn(lambda: [JsValue('array', [v, v]) for v in store])
-            set_obj.value[f"@@{SYMBOL_ITERATOR}@@"] = _make_set_iter_fn(lambda: list(store))
-
-            def _set_for_each(args, interp):
-                callback = args[0] if args else UNDEFINED
-                this_arg = args[1] if len(args) > 1 else UNDEFINED
-                if not interp._is_callable(callback):
-                    raise _JSError(py_to_js('TypeError: callback is not a function'))
-                for value in list(store):
-                    interp._call_js(callback, [value, value, set_obj], this_arg)
-                return UNDEFINED
-            set_obj.value['forEach'] = intr(_set_for_each, 'Set.forEach')
-
-            # ES2025 Set methods
-            def _drain_set_iterable(other):
-                """Drain any JS iterable to a Python list of JsValues."""
-                if other.type == 'array':
-                    return list(other.value)
-                it_fn = self._get_js_iterator(other)
-                if it_fn is None:
-                    return []
-                items = []
-                while True:
-                    r = it_fn()
-                    if not isinstance(r, JsValue) or r.type != 'object':
-                        break
-                    done = r.value.get('done', JS_FALSE)
-                    if isinstance(done, JsValue) and done.value is True:
-                        break
-                    items.append(r.value.get('value', UNDEFINED))
-                return items
-
-            def _make_new_set(items):
-                new_s = _make_set()
-                new_add = new_s.value['add']
-                for item in items:
-                    self._call_js(new_add, [item], new_s)
-                return new_s
-
-            def _other_contains(other_items, value):
-                return any(self._strict_eq(item, value) for item in other_items)
-
-            def _set_union(args, interp):
-                other = args[0] if args else UNDEFINED
-                other_items = _drain_set_iterable(other)
-                result_items = list(store)
-                for item in other_items:
-                    if not _other_contains(result_items, item):
-                        result_items.append(item)
-                return _make_new_set(result_items)
-
-            def _set_intersection(args, interp):
-                other = args[0] if args else UNDEFINED
-                other_items = _drain_set_iterable(other)
-                return _make_new_set([v for v in store if _other_contains(other_items, v)])
-
-            def _set_difference(args, interp):
-                other = args[0] if args else UNDEFINED
-                other_items = _drain_set_iterable(other)
-                return _make_new_set([v for v in store if not _other_contains(other_items, v)])
-
-            def _set_symmetric_difference(args, interp):
-                other = args[0] if args else UNDEFINED
-                other_items = _drain_set_iterable(other)
-                result = [v for v in store if not _other_contains(other_items, v)]
-                for item in other_items:
-                    if not _other_contains(store, item):
-                        result.append(item)
-                return _make_new_set(result)
-
-            def _set_is_subset_of(args, interp):
-                other = args[0] if args else UNDEFINED
-                other_items = _drain_set_iterable(other)
-                return JS_TRUE if all(_other_contains(other_items, v) for v in store) else JS_FALSE
-
-            def _set_is_superset_of(args, interp):
-                other = args[0] if args else UNDEFINED
-                other_items = _drain_set_iterable(other)
-                return JS_TRUE if all(_other_contains(store, v) for v in other_items) else JS_FALSE
-
-            def _set_is_disjoint_from(args, interp):
-                other = args[0] if args else UNDEFINED
-                other_items = _drain_set_iterable(other)
-                return JS_FALSE if any(_other_contains(other_items, v) for v in store) else JS_TRUE
-
-            set_obj.value['union'] = intr(_set_union, 'Set.union')
-            set_obj.value['intersection'] = intr(_set_intersection, 'Set.intersection')
-            set_obj.value['difference'] = intr(_set_difference, 'Set.difference')
-            set_obj.value['symmetricDifference'] = intr(_set_symmetric_difference, 'Set.symmetricDifference')
-            set_obj.value['isSubsetOf'] = intr(_set_is_subset_of, 'Set.isSubsetOf')
-            set_obj.value['isSupersetOf'] = intr(_set_is_superset_of, 'Set.isSupersetOf')
-            set_obj.value['isDisjointFrom'] = intr(_set_is_disjoint_from, 'Set.isDisjointFrom')
-            if values is not None:
-                for value in self._array_like_items(values):
-                    if _find_index(value) < 0:
-                        store.append(value)
-            return set_obj
-
-        map_ctor = self._make_intrinsic(lambda this_val, args, interp: _make_map(args[0] if args else None), 'Map')
-        def _map_group_by(args, interp):
-            iterable = args[0] if args else UNDEFINED
-            callback = args[1] if len(args) > 1 else UNDEFINED
-            if not interp._is_callable(callback):
-                raise _JSError(py_to_js('TypeError: callback is not a function'))
-            items = interp._array_like_items(iterable)
-            result = _make_map()
-            map_set_fn = result.value['set']
-            for idx, item in enumerate(items):
-                key = interp._call_js(callback, [item, JsValue('number', float(idx))], UNDEFINED)
-                map_get_fn = result.value['get']
-                map_has_fn = result.value['has']
-                has = interp._call_js(map_has_fn, [key], result)
-                if self._truthy(has):
-                    existing = interp._call_js(map_get_fn, [key], result)
-                    existing.value.append(item)
-                else:
-                    interp._call_js(map_set_fn, [key, JsValue('array', [item])], result)
-            return result
-        map_ctor.value['groupBy'] = intr(_map_group_by, 'Map.groupBy')
-        g.declare('Map', map_ctor, 'var')
-        g.declare('Set', self._make_intrinsic(lambda this_val, args, interp: _make_set(args[0] if args else None), 'Set'), 'var')
-
-        def _promise_ctor(this_val, args, interp):
-            executor = args[0] if args else UNDEFINED
-            if not interp._is_callable(executor):
-                raise _JSError(py_to_js('Promise executor must be a function'))
-            promise = interp._new_promise()
-            resolve_fn = interp._make_intrinsic(
-                lambda _this, call_args, inner: inner._resolve_promise(promise, call_args[0] if call_args else UNDEFINED),
-                'Promise.resolve',
-            )
-            reject_fn = interp._make_intrinsic(
-                lambda _this, call_args, inner: inner._reject_promise(promise, call_args[0] if call_args else UNDEFINED),
-                'Promise.reject',
-            )
-            try:
-                interp._call_js(executor, [resolve_fn, reject_fn], UNDEFINED)
-            except _JSError as exc:
-                interp._reject_promise(promise, exc.value)
-            return promise
-
-        promise_ctor = self._make_intrinsic(_promise_ctor, 'Promise')
-        promise_ctor.value['resolve'] = self._make_intrinsic(
-            lambda this_val, args, interp: interp._to_promise(args[0] if args else UNDEFINED),
-            'Promise.resolve',
-        )
-        promise_ctor.value['reject'] = self._make_intrinsic(
-            lambda this_val, args, interp: interp._rejected_promise(args[0] if args else UNDEFINED),
-            'Promise.reject',
-        )
-        promise_ctor.value['all'] = self._make_intrinsic(
-            lambda this_val, args, interp: interp._promise_all(args[0].value if args and args[0].type == 'array' else []),
-            'Promise.all',
-        )
-        promise_ctor.value['race'] = self._make_intrinsic(
-            lambda this_val, args, interp: interp._promise_race(args[0].value if args and args[0].type == 'array' else []),
-            'Promise.race',
-        )
-        promise_ctor.value['allSettled'] = self._make_intrinsic(
-            lambda this_val, args, interp: interp._promise_all_settled(
-                args[0].value if args and args[0].type == 'array' else []
-            ),
-            'Promise.allSettled',
-        )
-        promise_ctor.value['any'] = self._make_intrinsic(
-            lambda this_val, args, interp: interp._promise_any(
-                args[0].value if args and args[0].type == 'array' else []
-            ),
-            'Promise.any',
-        )
-
-        def _promise_with_resolvers(args, interp):
-            promise = interp._new_promise()
-            resolve_fn = interp._make_intrinsic(
-                lambda _this, call_args, inner: inner._resolve_promise(
-                    promise, call_args[0] if call_args else UNDEFINED
-                ),
-                'resolve',
-            )
-            reject_fn = interp._make_intrinsic(
-                lambda _this, call_args, inner: inner._reject_promise(
-                    promise, call_args[0] if call_args else UNDEFINED
-                ),
-                'reject',
-            )
-            return JsValue('object', {
-                'promise': promise,
-                'resolve': resolve_fn,
-                'reject': reject_fn,
-            })
-
-        promise_ctor.value['withResolvers'] = intr(_promise_with_resolvers, 'Promise.withResolvers')
-
-        def _promise_try(args, interp):
-            fn = args[0] if args else UNDEFINED
-            try:
-                result = interp._call_js(fn, args[1:], UNDEFINED)
-                return interp._to_promise(result)
-            except _JSError as e:
-                return interp._rejected_promise(e.value)
-            except Exception as e:
-                js_err = interp._make_js_error('Error', str(e))
-                return interp._rejected_promise(js_err)
-
-        promise_ctor.value['try'] = intr(_promise_try, 'Promise.try')
-        g.declare('Promise', promise_ctor, 'var')
-
-        pyvm_obj = JsValue('object', {})
-
-        def _pyvm_args(value, interp):
-            if value is None or value is UNDEFINED:
-                return []
-            if value.type != 'array':
-                raise _JSError(py_to_js('PyVM argv must be an array'))
-            return [interp._to_str(item) for item in value.value]
-
-        def _pyvm_arg_list(value, interp, label):
-            if value is None or value is UNDEFINED:
-                return []
-            if value.type == 'array':
-                return [interp._to_str(item) for item in value.value]
-            if value.type == 'string':
-                return [value.value]
-            raise _JSError(py_to_js(f'{label} must be a string or array'))
-
-        def _pyvm_timeout(value, interp):
-            if value is None or value is UNDEFINED:
-                return None
-            timeout_ms = interp._to_num(value)
-            return max(0.0, timeout_ms) / 1000.0
-
-        def _pyvm_options(value, interp):
-            if value is None or value is UNDEFINED:
-                return {}
-            if value.type != 'object':
-                raise _JSError(py_to_js('PyVM options must be an object'))
-            raw = interp._to_py(value)
-            options = {}
-            if raw.get('cwd') is not None:
-                options['cwd'] = str(raw['cwd'])
-            timeout_ms = raw.get('timeoutMs')
-            if timeout_ms is not None:
-                options['timeout'] = max(0.0, float(timeout_ms)) / 1000.0
-            env = raw.get('env')
-            if env is not None:
-                merged = dict(os.environ)
-                for key, item in env.items():
-                    merged[str(key)] = '' if item is None else str(item)
-                options['env'] = merged
-            return options
-
-        def _pyvm_result(proc, command):
-            return py_to_js({
-                'ok': proc.returncode == 0,
-                'code': proc.returncode,
-                'stdout': proc.stdout,
-                'stderr': proc.stderr,
-                'command': command,
-            })
-
-        def _pyvm_run_command(command, options):
-            return subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                cwd=options.get('cwd'),
-                env=options.get('env'),
-                timeout=options.get('timeout'),
-            )
-
-        def _pyvm_exec(args, interp):
-            if not args:
-                raise _JSError(py_to_js('PyVM.exec requires Python source'))
-            code = interp._to_str(args[0])
-            argv = _pyvm_args(args[1] if len(args) > 1 else UNDEFINED, interp)
-            options = _pyvm_options(args[2] if len(args) > 2 else UNDEFINED, interp)
-            command = [sys.executable, '-c', code, *argv]
-            proc = _pyvm_run_command(command, options)
-            return _pyvm_result(proc, command)
-
-        def _pyvm_run_file(args, interp):
-            if not args:
-                raise _JSError(py_to_js('PyVM.runFile requires a path'))
-            path = interp._to_str(args[0])
-            argv = _pyvm_args(args[1] if len(args) > 1 else UNDEFINED, interp)
-            options = _pyvm_options(args[2] if len(args) > 2 else UNDEFINED, interp)
-            command = [sys.executable, path, *argv]
-            proc = _pyvm_run_command(command, options)
-            return _pyvm_result(proc, command)
-
-        def _pyvm_run_module(args, interp):
-            if not args:
-                raise _JSError(py_to_js('PyVM.runModule requires a module name'))
-            module = interp._to_str(args[0])
-            argv = _pyvm_args(args[1] if len(args) > 1 else UNDEFINED, interp)
-            options = _pyvm_options(args[2] if len(args) > 2 else UNDEFINED, interp)
-            command = [sys.executable, '-m', module, *argv]
-            proc = _pyvm_run_command(command, options)
-            return _pyvm_result(proc, command)
-
-        def _pyvm_pip_install(args, interp):
-            packages = _pyvm_arg_list(args[0] if args else UNDEFINED, interp, 'PyVM.pipInstall packages')
-            if not packages:
-                raise _JSError(py_to_js('PyVM.pipInstall requires at least one package'))
-            extra_args = _pyvm_args(args[1] if len(args) > 1 else UNDEFINED, interp)
-            options = _pyvm_options(args[2] if len(args) > 2 else UNDEFINED, interp)
-            command = [sys.executable, '-m', 'pip', 'install', *packages, *extra_args]
-            proc = _pyvm_run_command(command, options)
-            return _pyvm_result(proc, command)
-
-        def _pyvm_pip_show(args, interp):
-            packages = _pyvm_arg_list(args[0] if args else UNDEFINED, interp, 'PyVM.pipShow packages')
-            if not packages:
-                raise _JSError(py_to_js('PyVM.pipShow requires at least one package'))
-            options = _pyvm_options(args[1] if len(args) > 1 else UNDEFINED, interp)
-            command = [sys.executable, '-m', 'pip', 'show', *packages]
-            proc = _pyvm_run_command(command, options)
-            return _pyvm_result(proc, command)
-
-        def _pyvm_pip_list(args, interp):
-            options = _pyvm_options(args[0] if args else UNDEFINED, interp)
-            command = [sys.executable, '-m', 'pip', 'list', '--format=json']
-            proc = _pyvm_run_command(command, options)
-            result = _pyvm_result(proc, command)
-            if proc.returncode == 0:
-                result.value['packages'] = py_to_js(json.loads(proc.stdout or '[]'))
-            else:
-                result.value['packages'] = py_to_js([])
-            return result
-
-        def _host_os_cwd(args, interp):
-            return py_to_js(os.getcwd())
-
-        def _host_os_chdir(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.chdir requires a path'))
-            os.chdir(interp._to_str(args[0]))
-            return py_to_js(os.getcwd())
-
-        def _host_os_listdir(args, interp):
-            path = interp._to_str(args[0]) if args else '.'
-            return py_to_js(sorted(os.listdir(path)))
-
-        def _host_os_exists(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.exists requires a path'))
-            return py_to_js(os.path.exists(interp._to_str(args[0])))
-
-        def _host_os_mkdir(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.mkdir requires a path'))
-            path = interp._to_str(args[0])
-            parents = bool(args[1].value) if len(args) > 1 and args[1].type == 'boolean' else False
-            if parents:
-                os.makedirs(path, exist_ok=True)
-            else:
-                os.mkdir(path)
-            return py_to_js(path)
-
-        def _host_os_read_text(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.readText requires a path'))
-            path = interp._to_str(args[0])
-            encoding = interp._to_str(args[1]) if len(args) > 1 else 'utf-8'
-            with open(path, encoding=encoding) as handle:
-                return py_to_js(handle.read())
-
-        def _host_os_write_text(args, interp):
-            if len(args) < 2:
-                raise _JSError(py_to_js('os.writeText requires path and content'))
-            path = interp._to_str(args[0])
-            content = interp._to_str(args[1])
-            encoding = interp._to_str(args[2]) if len(args) > 2 else 'utf-8'
-            with open(path, 'w', encoding=encoding) as handle:
-                handle.write(content)
-            return py_to_js(path)
-
-        def _host_os_stat(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.stat requires a path'))
-            path = interp._to_str(args[0])
-            info = os.stat(path)
-            return py_to_js({
-                'size': info.st_size,
-                'mode': info.st_mode,
-                'mtimeMs': info.st_mtime * 1000.0,
-                'isFile': os.path.isfile(path),
-                'isDir': os.path.isdir(path),
-            })
-
-        def _host_os_getenv(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.getenv requires a key'))
-            key = interp._to_str(args[0])
-            default = interp._to_str(args[1]) if len(args) > 1 else None
-            value = os.environ.get(key, default)
-            return UNDEFINED if value is None else py_to_js(value)
-
-        def _host_os_setenv(args, interp):
-            if len(args) < 2:
-                raise _JSError(py_to_js('os.setenv requires key and value'))
-            key = interp._to_str(args[0])
-            value = interp._to_str(args[1])
-            os.environ[key] = value
-            return py_to_js(value)
-
-        def _host_os_unsetenv(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.unsetenv requires a key'))
-            key = interp._to_str(args[0])
-            existed = key in os.environ
-            os.environ.pop(key, None)
-            return py_to_js(existed)
-
-        def _host_os_which(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.which requires a command name'))
-            result = shutil.which(interp._to_str(args[0]))
-            return UNDEFINED if result is None else py_to_js(result)
-
-        def _host_os_join(args, interp):
-            if not args:
-                return py_to_js('')
-            return py_to_js(os.path.join(*(interp._to_str(arg) for arg in args)))
-
-        def _host_os_dirname(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.dirname requires a path'))
-            return py_to_js(os.path.dirname(interp._to_str(args[0])))
-
-        def _host_os_basename(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.basename requires a path'))
-            return py_to_js(os.path.basename(interp._to_str(args[0])))
-
-        def _host_os_abspath(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.abspath requires a path'))
-            return py_to_js(os.path.abspath(interp._to_str(args[0])))
-
-        def _host_os_remove(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.remove requires a path'))
-            path = interp._to_str(args[0])
-            os.remove(path)
-            return py_to_js(path)
-
-        def _host_os_rmdir(args, interp):
-            if not args:
-                raise _JSError(py_to_js('os.rmdir requires a path'))
-            path = interp._to_str(args[0])
-            recursive = bool(args[1].value) if len(args) > 1 and args[1].type == 'boolean' else False
-            if recursive:
-                shutil.rmtree(path)
-            else:
-                os.rmdir(path)
-            return py_to_js(path)
-
-        def _host_os_rename(args, interp):
-            if len(args) < 2:
-                raise _JSError(py_to_js('os.rename requires source and destination'))
-            src = interp._to_str(args[0])
-            dst = interp._to_str(args[1])
-            os.replace(src, dst)
-            return py_to_js(dst)
-
-        def _pyvm_async_runner(sync_fn, label):
-            def runner(args, interp):
-                promise = interp._new_promise()
-
-                def task():
-                    try:
-                        interp._resolve_promise(promise, sync_fn(args, interp))
-                    except _JSError as exc:
-                        interp._reject_promise(promise, exc.value)
-                    except subprocess.TimeoutExpired as exc:
-                        interp._reject_promise(promise, py_to_js(f'{label} timed out: {exc}'))
-                    except Exception as exc:
-                        interp._reject_promise(promise, py_to_js(str(exc)))
-
-                interp._enqueue_microtask(task)
-                return promise
-
-            return runner
-
-        pyvm_obj.value['executable'] = py_to_js(sys.executable)
-        pyvm_obj.value['version'] = py_to_js(sys.version)
-        pyvm_obj.value['exec'] = intr(_pyvm_exec, 'PyVM.exec')
-        pyvm_obj.value['runFile'] = intr(_pyvm_run_file, 'PyVM.runFile')
-        pyvm_obj.value['runModule'] = intr(_pyvm_run_module, 'PyVM.runModule')
-        pyvm_obj.value['pipInstall'] = intr(_pyvm_pip_install, 'PyVM.pipInstall')
-        pyvm_obj.value['pipShow'] = intr(_pyvm_pip_show, 'PyVM.pipShow')
-        pyvm_obj.value['pipList'] = intr(_pyvm_pip_list, 'PyVM.pipList')
-        pyvm_obj.value['execAsync'] = intr(_pyvm_async_runner(_pyvm_exec, 'PyVM.execAsync'), 'PyVM.execAsync')
-        pyvm_obj.value['runFileAsync'] = intr(_pyvm_async_runner(_pyvm_run_file, 'PyVM.runFileAsync'), 'PyVM.runFileAsync')
-        pyvm_obj.value['runModuleAsync'] = intr(_pyvm_async_runner(_pyvm_run_module, 'PyVM.runModuleAsync'), 'PyVM.runModuleAsync')
-        pyvm_obj.value['pipInstallAsync'] = intr(_pyvm_async_runner(_pyvm_pip_install, 'PyVM.pipInstallAsync'), 'PyVM.pipInstallAsync')
-        pyvm_obj.value['pipShowAsync'] = intr(_pyvm_async_runner(_pyvm_pip_show, 'PyVM.pipShowAsync'), 'PyVM.pipShowAsync')
-        pyvm_obj.value['pipListAsync'] = intr(_pyvm_async_runner(_pyvm_pip_list, 'PyVM.pipListAsync'), 'PyVM.pipListAsync')
-
-        g.declare('PyVM', pyvm_obj, 'var')
-
-        host_os = JsValue('object', {})
-        host_os.value['name'] = py_to_js(os.name)
-        host_os.value['sep'] = py_to_js(os.sep)
-        host_os.value['linesep'] = py_to_js(os.linesep)
-        host_os.value['cwd'] = intr(_host_os_cwd, 'os.cwd')
-        host_os.value['chdir'] = intr(_host_os_chdir, 'os.chdir')
-        host_os.value['listdir'] = intr(_host_os_listdir, 'os.listdir')
-        host_os.value['exists'] = intr(_host_os_exists, 'os.exists')
-        host_os.value['mkdir'] = intr(_host_os_mkdir, 'os.mkdir')
-        host_os.value['readText'] = intr(_host_os_read_text, 'os.readText')
-        host_os.value['writeText'] = intr(_host_os_write_text, 'os.writeText')
-        host_os.value['stat'] = intr(_host_os_stat, 'os.stat')
-        host_os.value['getenv'] = intr(_host_os_getenv, 'os.getenv')
-        host_os.value['setenv'] = intr(_host_os_setenv, 'os.setenv')
-        host_os.value['unsetenv'] = intr(_host_os_unsetenv, 'os.unsetenv')
-        host_os.value['which'] = intr(_host_os_which, 'os.which')
-        host_os.value['join'] = intr(_host_os_join, 'os.join')
-        host_os.value['dirname'] = intr(_host_os_dirname, 'os.dirname')
-        host_os.value['basename'] = intr(_host_os_basename, 'os.basename')
-        host_os.value['abspath'] = intr(_host_os_abspath, 'os.abspath')
-        host_os.value['remove'] = intr(_host_os_remove, 'os.remove')
-        host_os.value['rmdir'] = intr(_host_os_rmdir, 'os.rmdir')
-        host_os.value['rename'] = intr(_host_os_rename, 'os.rename')
-        g.declare('os', host_os, 'var')
-
-        host_sys = JsValue('object', {})
-        host_sys.value['executable'] = py_to_js(sys.executable)
-        host_sys.value['platform'] = py_to_js(sys.platform)
-        host_sys.value['version'] = py_to_js(sys.version)
-        host_sys.value['versionInfo'] = py_to_js(list(sys.version_info[:5]))
-        host_sys.value['path'] = py_to_js(list(sys.path))
-        g.declare('sys', host_sys, 'var')
-
-        # -- structuredClone --
-        def _structured_clone(args, interp):
-            val = args[0] if args else UNDEFINED
-            seen = {}
-            def _typed_array_type(d):
-                t = d.get('__type__')
-                if isinstance(t, JsValue): return t.value
-                return t
-            def clone(v):
-                if v.type in ('undefined', 'null', 'boolean', 'number', 'string', 'bigint', 'symbol'):
-                    return v
-                oid = id(v)
-                if oid in seen:
-                    raise _JSError(interp._make_js_error('DOMException', 'Circular reference'))
-                seen[oid] = True
-                try:
-                    if isinstance(v.value, dict) and _typed_array_type(v.value) == 'TypedArray':
-                        return JsValue('object', {
-                            '__type__': v.value['__type__'],
-                            '__name__': v.value['__name__'],
-                            '__bytes__': bytearray(v.value['__bytes__']),
-                            '__fmt__': v.value['__fmt__'],
-                            '__itemsize__': v.value['__itemsize__'],
-                            '__byteoffset__': v.value.get('__byteoffset__', 0),
-                            '__length__': v.value['__length__'],
-                        })
-                    if isinstance(v.value, dict) and _typed_array_type(v.value) == 'ArrayBuffer':
-                        return JsValue('object', {
-                            '__type__': v.value['__type__'],
-                            '__bytes__': bytearray(v.value['__bytes__']),
-                        })
-                    # Map
-                    if isinstance(v.value, dict):
-                        kind = v.value.get('__kind__')
-                        if isinstance(kind, JsValue) and kind.value == 'Map':
-                            entries_fn = v.value.get('entries')
-                            if entries_fn:
-                                it = interp._call_js(entries_fn, [], v)
-                                pairs = []
-                                while True:
-                                    r = interp._call_js(it.value['next'], [], it)
-                                    done = r.value.get('done', JS_FALSE)
-                                    if isinstance(done, JsValue) and done.value is True:
-                                        break
-                                    pair = r.value.get('value', UNDEFINED)
-                                    if pair.type == 'array' and len(pair.value) >= 2:
-                                        pairs.append(JsValue('array', [clone(pair.value[0]), clone(pair.value[1])]))
-                                return _make_map(JsValue('array', pairs))
-                        # Set
-                        if isinstance(kind, JsValue) and kind.value == 'Set':
-                            values_fn = v.value.get('values')
-                            if values_fn:
-                                it = interp._call_js(values_fn, [], v)
-                                items = []
-                                while True:
-                                    r = interp._call_js(it.value['next'], [], it)
-                                    done = r.value.get('done', JS_FALSE)
-                                    if isinstance(done, JsValue) and done.value is True:
-                                        break
-                                    items.append(clone(r.value.get('value', UNDEFINED)))
-                                return _make_set(JsValue('array', items))
-                    # Date
-                    if v.type == 'object' and isinstance(v.value, dict) and '__date_ts__' in v.value:
-                        ts = v.value['__date_ts__']
-                        ts_val = ts[0] if isinstance(ts, list) else (ts.value if isinstance(ts, JsValue) else ts)
-                        return _make_date(ts_val)
-                    # RegExp
-                    if v.type == 'regexp':
-                        src = v.value.get('source', '')
-                        flags = v.value.get('flags', '')
-                        if isinstance(src, JsValue): src = src.value
-                        if isinstance(flags, JsValue): flags = flags.value
-                        return interp._make_regexp_val(src, flags)
-                    # Error
-                    if v.type == 'object' and isinstance(v.value, dict) and 'name' in v.value and 'message' in v.value and 'stack' in v.value:
-                        name_v = v.value.get('name', UNDEFINED)
-                        if isinstance(name_v, JsValue) and name_v.type == 'string' and name_v.value.endswith('Error'):
-                            return JsValue('object', {k: clone(vv) for k, vv in v.value.items() if isinstance(vv, JsValue)})
-                    if v.type == 'array':
-                        return JsValue('array', [clone(el) for el in v.value])
-                    if v.type == 'object':
-                        return JsValue('object', {k: clone(vv) for k, vv in v.value.items()
-                                                    if isinstance(vv, JsValue)})
-                    return v
-                finally:
-                    seen.pop(oid, None)
-            return clone(val)
-        g.declare('structuredClone', intr(_structured_clone, 'structuredClone'), 'var')
-
-        # -- Error constructors --
-        _error_names = ('Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError', 'EvalError')
-        def _make_error_ctor(err_name):
-            def _ctor(args, interp):
-                msg = args[0] if args else UNDEFINED
-                opts = args[1] if len(args) > 1 else UNDEFINED
-                obj = JsValue('object', {
-                    'message': msg if msg.type != 'undefined' else py_to_js(''),
-                    'name': py_to_js(err_name),
-                    'stack': py_to_js(f"{err_name}: {interp._to_str(msg) if msg.type != 'undefined' else ''}"),
-                    '__error_type__': py_to_js(err_name),
-                })
-                if opts and opts.type == 'object' and 'cause' in opts.value:
-                    obj.value['cause'] = opts.value['cause']
-                return obj
-            fn = intr(_ctor, err_name)
-            return fn
-        for _ename in _error_names:
-            g.declare(_ename, _make_error_ctor(_ename), 'var')
-
-        # -- AggregateError constructor --
-        def _agg_error_ctor(args, interp):
-            errors = args[0] if args else UNDEFINED
-            msg = args[1] if len(args) > 1 else py_to_js('')
-            return JsValue('object', {
-                'message': msg if msg.type != 'undefined' else py_to_js(''),
-                'name': py_to_js('AggregateError'),
-                'errors': errors if errors.type == 'array' else JsValue('array', []),
-                'stack': py_to_js(f"AggregateError: {interp._to_str(msg)}"),
-                '__error_type__': py_to_js('AggregateError'),
-            })
-        g.declare('AggregateError', intr(_agg_error_ctor, 'AggregateError'), 'var')
-
-        # -- URL and URLSearchParams --
-        def _make_url_search_params(query_string=''):
-            params = []
-            if query_string:
-                for part in query_string.split('&'):
-                    if '=' in part:
-                        k, v = part.split('=', 1)
-                        params.append((k, v))
-                    elif part:
-                        params.append((part, ''))
-
-            sp = JsValue('object', {})
-
-            def _usp_get(args, interp):
-                key = interp._to_str(args[0]) if args else ''
-                for k, v in params:
-                    if k == key:
-                        return py_to_js(v)
-                return UNDEFINED
-
-            def _usp_get_all(args, interp):
-                key = interp._to_str(args[0]) if args else ''
-                return JsValue('array', [py_to_js(v) for k, v in params if k == key])
-
-            def _usp_set(args, interp):
-                nonlocal params
-                key = interp._to_str(args[0]) if args else ''
-                val = interp._to_str(args[1]) if len(args) > 1 else ''
-                params = [(k, v) for k, v in params if k != key]
-                params.append((key, val))
-                return UNDEFINED
-
-            def _usp_append(args, interp):
-                key = interp._to_str(args[0]) if args else ''
-                val = interp._to_str(args[1]) if len(args) > 1 else ''
-                params.append((key, val))
-                return UNDEFINED
-
-            def _usp_delete(args, interp):
-                nonlocal params
-                key = interp._to_str(args[0]) if args else ''
-                params = [(k, v) for k, v in params if k != key]
-                return UNDEFINED
-
-            def _usp_has(args, interp):
-                key = interp._to_str(args[0]) if args else ''
-                return JS_TRUE if any(k == key for k, v in params) else JS_FALSE
-
-            def _usp_to_string(args, interp):
-                return py_to_js('&'.join(f"{k}={v}" for k, v in params))
-
-            def _usp_keys(args, interp):
-                return JsValue('array', [py_to_js(k) for k, v in params])
-
-            def _usp_values(args, interp):
-                return JsValue('array', [py_to_js(v) for k, v in params])
-
-            def _usp_entries(args, interp):
-                return JsValue('array', [JsValue('array', [py_to_js(k), py_to_js(v)]) for k, v in params])
-
-            def _usp_for_each(args, interp):
-                fn = args[0] if args else UNDEFINED
-                for k, v in params:
-                    interp._call_js(fn, [py_to_js(v), py_to_js(k), sp], UNDEFINED)
-                return UNDEFINED
-
-            sp.value['get'] = intr(_usp_get, 'URLSearchParams.get')
-            sp.value['getAll'] = intr(_usp_get_all, 'URLSearchParams.getAll')
-            sp.value['set'] = intr(_usp_set, 'URLSearchParams.set')
-            sp.value['append'] = intr(_usp_append, 'URLSearchParams.append')
-            sp.value['delete'] = intr(_usp_delete, 'URLSearchParams.delete')
-            sp.value['has'] = intr(_usp_has, 'URLSearchParams.has')
-            sp.value['toString'] = intr(_usp_to_string, 'URLSearchParams.toString')
-            sp.value['keys'] = intr(_usp_keys, 'URLSearchParams.keys')
-            sp.value['values'] = intr(_usp_values, 'URLSearchParams.values')
-            sp.value['entries'] = intr(_usp_entries, 'URLSearchParams.entries')
-            sp.value['forEach'] = intr(_usp_for_each, 'URLSearchParams.forEach')
-            return sp
-
-        def _make_url(href_str):
-            from urllib.parse import urlparse
-            parsed = urlparse(href_str)
-            url_obj = JsValue('object', {})
-            url_obj.value['href'] = py_to_js(href_str)
-            url_obj.value['protocol'] = py_to_js(parsed.scheme + ':' if parsed.scheme else '')
-            url_obj.value['hostname'] = py_to_js(parsed.hostname or '')
-            url_obj.value['port'] = py_to_js(str(parsed.port) if parsed.port else '')
-            url_obj.value['host'] = py_to_js(parsed.netloc or '')
-            url_obj.value['pathname'] = py_to_js(parsed.path or '/')
-            url_obj.value['search'] = py_to_js(('?' + parsed.query) if parsed.query else '')
-            url_obj.value['hash'] = py_to_js(('#' + parsed.fragment) if parsed.fragment else '')
-            url_obj.value['origin'] = py_to_js(
-                f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else 'null'
-            )
-            url_obj.value['searchParams'] = _make_url_search_params(parsed.query)
-            url_obj.value['toString'] = intr(lambda a, i: url_obj.value['href'], 'URL.toString')
-            return url_obj
-
-        def _url_ctor(args, interp):
-            href = interp._to_str(args[0]) if args else ''
-            if len(args) > 1:
-                from urllib.parse import urljoin
-                base = interp._to_str(args[1])
-                if base and not href.startswith('http'):
-                    href = urljoin(base, href)
-            return _make_url(href)
-
-        def _usp_ctor(args, interp):
-            init = args[0] if args else UNDEFINED
-            qs = init.value.lstrip('?') if init.type == 'string' else ''
-            return _make_url_search_params(qs)
-
-        g.declare('URL', intr(_url_ctor, 'URL'), 'var')
-        g.declare('URLSearchParams', intr(_usp_ctor, 'URLSearchParams'), 'var')
-
-        # -- TextEncoder / TextDecoder --
-        def _make_text_encoder():
-            enc = JsValue('object', {})
-            enc.value['encoding'] = py_to_js('utf-8')
-            def _encode(args, interp):
-                s = interp._to_str(args[0]) if args else ''
-                data = s.encode('utf-8')
-                return JsValue('array', [py_to_js(float(b)) for b in data])
-            enc.value['encode'] = intr(_encode, 'TextEncoder.encode')
-            return enc
-
-        def _make_text_decoder(label='utf-8'):
-            dec = JsValue('object', {})
-            dec.value['encoding'] = py_to_js(label)
-            def _decode(args, interp):
-                buf = args[0] if args else UNDEFINED
-                if buf.type == 'array':
-                    data = bytes(int(v.value) for v in buf.value)
-                    return py_to_js(data.decode('utf-8', errors='replace'))
-                return py_to_js('')
-            dec.value['decode'] = intr(_decode, 'TextDecoder.decode')
-            return dec
-
-        g.declare('TextEncoder', intr(lambda a, i: _make_text_encoder(), 'TextEncoder'), 'var')
-        g.declare('TextDecoder', intr(
-            lambda a, i: _make_text_decoder(i._to_str(a[0]) if a else 'utf-8'), 'TextDecoder'
-        ), 'var')
-
-        # -- crypto object --
-        def _make_crypto():
-            import os as _os
-            crypto_obj = JsValue('object', {})
-
-            def _random_uuid(args, interp):
-                data = bytearray(_os.urandom(16))
-                data[6] = (data[6] & 0x0f) | 0x40
-                data[8] = (data[8] & 0x3f) | 0x80
-                h = data.hex()
-                return py_to_js(f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}")
-
-            def _get_random_values(args, interp):
-                arr = args[0] if args else UNDEFINED
-                if arr.type == 'array':
-                    random_bytes = _os.urandom(len(arr.value))
-                    for i, b in enumerate(random_bytes):
-                        arr.value[i] = py_to_js(float(b))
-                return arr
-
-            crypto_obj.value['randomUUID'] = intr(_random_uuid, 'crypto.randomUUID')
-            crypto_obj.value['getRandomValues'] = intr(_get_random_values, 'crypto.getRandomValues')
-            return crypto_obj
-
-        g.declare('crypto', _make_crypto(), 'var')
-
-        # -- AbortController / AbortSignal --
-        def _make_abort_controller_fn(args, interp):
-            signal = JsValue('object', {
-                'aborted': JS_FALSE,
-                'reason': UNDEFINED,
-            })
-            listeners = []
-
-            def _add_event_listener(a, i):
-                event_type = i._to_str(a[0]) if a else ''
-                fn = a[1] if len(a) > 1 else UNDEFINED
-                if event_type == 'abort':
-                    listeners.append(fn)
-                return UNDEFINED
-
-            signal.value['addEventListener'] = intr(_add_event_listener, 'AbortSignal.addEventListener')
-
-            ctrl = JsValue('object', {'signal': signal})
-
-            def _abort(a, i):
-                reason = a[0] if a else py_to_js('AbortError')
-                if signal.value['aborted'].value is False:
-                    signal.value['aborted'] = JS_TRUE
-                    signal.value['reason'] = reason
-                    for listener in listeners:
-                        i._call_js(listener, [py_to_js({'type': 'abort'})], signal)
-                return UNDEFINED
-
-            ctrl.value['abort'] = intr(_abort, 'AbortController.abort')
-            return ctrl
-
-        g.declare('AbortController', intr(_make_abort_controller_fn, 'AbortController'), 'var')
-
-        # -- ArrayBuffer --
-        def _ab_ctor(this_val, args, interp):
-            n = int(interp._to_num(args[0])) if args else 0
-            if n < 0:
-                raise _JSError(py_to_js('Invalid ArrayBuffer length'))
-            return JsValue('object', {
-                '__type__': py_to_js('ArrayBuffer'),
-                '__bytes__': bytearray(n),
-            })
-        ab_ctor = self._make_intrinsic(_ab_ctor, 'ArrayBuffer')
-        ab_ctor.value['isView'] = self._make_intrinsic(
-            lambda tv, a, i: JS_TRUE if (
-                a and isinstance(a[0], JsValue) and isinstance(a[0].value, dict) and
-                isinstance(a[0].value.get('__type__'), JsValue) and
-                a[0].value['__type__'].value in ('TypedArray', 'DataView')
-            ) else JS_FALSE,
-            'ArrayBuffer.isView',
-        )
-        g.declare('ArrayBuffer', ab_ctor, 'var')
-
-        # -- TypedArray constructors --
-        _TA_SPECS = [
-            ('Int8Array',         'b', 1),
-            ('Uint8Array',        'B', 1),
-            ('Uint8ClampedArray', 'B', 1),
-            ('Int16Array',        'h', 2),
-            ('Uint16Array',       'H', 2),
-            ('Int32Array',        'i', 4),
-            ('Uint32Array',       'I', 4),
-            ('Float32Array',      'f', 4),
-            ('Float64Array',      'd', 8),
-            ('BigInt64Array',     'q', 8),
-            ('BigUint64Array',    'Q', 8),
-        ]
-
-        def _make_ta_ctor(ta_name, ta_fmt, ta_itemsize):
-            def _ctor(this_val, args, interp):
-                if not args:
-                    return JsValue('object', {
-                        '__type__': py_to_js('TypedArray'),
-                        '__name__': ta_name,
-                        '__bytes__': bytearray(),
-                        '__fmt__': ta_fmt,
-                        '__itemsize__': ta_itemsize,
-                        '__byteoffset__': 0,
-                        '__length__': 0,
-                    })
-                arg0 = args[0]
-                # Case 1: integer -> allocate zeroed buffer
-                if arg0.type == 'number':
-                    length = max(0, int(interp._to_num(arg0)))
-                    return JsValue('object', {
-                        '__type__': py_to_js('TypedArray'),
-                        '__name__': ta_name,
-                        '__bytes__': bytearray(length * ta_itemsize),
-                        '__fmt__': ta_fmt,
-                        '__itemsize__': ta_itemsize,
-                        '__byteoffset__': 0,
-                        '__length__': length,
-                    })
-                # Case 2: ArrayBuffer -> view into it
-                if isinstance(arg0.value, dict):
-                    _at = arg0.value.get('__type__')
-                    _at_s = _at.value if isinstance(_at, JsValue) else _at
-                    if _at_s == 'ArrayBuffer':
-                        buf = arg0.value.get('__bytes__', bytearray())
-                        byte_off = int(interp._to_num(args[1])) if len(args) > 1 else 0
-                        if len(args) > 2:
-                            length = int(interp._to_num(args[2]))
-                        else:
-                            length = (len(buf) - byte_off) // ta_itemsize
-                        ta = JsValue('object', {
-                            '__type__': py_to_js('TypedArray'),
-                            '__name__': ta_name,
-                            '__bytes__': buf,
-                            '__fmt__': ta_fmt,
-                            '__itemsize__': ta_itemsize,
-                            '__byteoffset__': byte_off,
-                            '__length__': length,
-                            '__buffer_jv__': arg0,
-                        })
-                        return ta
-                    # Case 3: TypedArray -> copy from
-                    if _at_s == 'TypedArray':
-                        src_d = arg0.value
-                        src_fmt = src_d.get('__fmt__', 'B')
-                        src_is = src_d.get('__itemsize__', 1)
-                        src_off = src_d.get('__byteoffset__', 0)
-                        src_len = src_d.get('__length__', 0)
-                        src_buf = src_d.get('__bytes__', bytearray())
-                        buf = bytearray(src_len * ta_itemsize)
-                        for i in range(src_len):
-                            (raw,) = struct.unpack_from('=' + src_fmt, src_buf, src_off + i * src_is)
-                            if ta_fmt in ('f', 'd'):
-                                coerced = float(raw)
-                            elif ta_name == 'Uint8ClampedArray':
-                                coerced = max(0, min(255, int(float(raw))))
-                            elif ta_fmt in ('q', 'Q'):
-                                coerced = int(raw)
-                            else:
-                                coerced = _ta_coerce(JsValue('number', float(raw)), ta_fmt, interp)
-                            struct.pack_into('=' + ta_fmt, buf, i * ta_itemsize, coerced)
-                        return JsValue('object', {
-                            '__type__': py_to_js('TypedArray'),
-                            '__name__': ta_name,
-                            '__bytes__': buf,
-                            '__fmt__': ta_fmt,
-                            '__itemsize__': ta_itemsize,
-                            '__byteoffset__': 0,
-                            '__length__': src_len,
-                        })
-                # Case 4: array / iterable -> copy
-                items = list(arg0.value) if arg0.type == 'array' else interp._array_like_items(arg0)
-                length = len(items)
-                buf = bytearray(length * ta_itemsize)
-                ta = JsValue('object', {
-                    '__type__': py_to_js('TypedArray'),
-                    '__name__': ta_name,
-                    '__bytes__': buf,
-                    '__fmt__': ta_fmt,
-                    '__itemsize__': ta_itemsize,
-                    '__byteoffset__': 0,
-                    '__length__': length,
-                })
-                for i, item in enumerate(items):
-                    interp._set_prop(ta, str(i), item)
-                return ta
-
-            ta_ctor = self._make_intrinsic(_ctor, ta_name)
-            ta_ctor.value['BYTES_PER_ELEMENT'] = JsValue('number', float(ta_itemsize))
-            ta_ctor.value['from'] = self._make_intrinsic(
-                lambda tv, a, i, _c=_ctor: _c(UNDEFINED, [a[0]] if a else [], i),
-                f'{ta_name}.from',
-            )
-            ta_ctor.value['of'] = self._make_intrinsic(
-                lambda tv, a, i, _c=_ctor: _c(UNDEFINED, [JsValue('array', list(a))], i),
-                f'{ta_name}.of',
-            )
-            return ta_ctor
-
-        for _ta_name, _ta_fmt, _ta_itemsize in _TA_SPECS:
-            g.declare(_ta_name, _make_ta_ctor(_ta_name, _ta_fmt, _ta_itemsize), 'var')
-
-        # -- DataView --
-        def _dv_ctor(this_val, args, interp):
-            if not args:
-                raise _JSError(py_to_js('DataView constructor requires ArrayBuffer argument'))
-            buf_jv = args[0]
-            _at = buf_jv.value.get('__type__') if isinstance(buf_jv.value, dict) else None
-            _at_s = _at.value if isinstance(_at, JsValue) else _at
-            if _at_s != 'ArrayBuffer':
-                raise _JSError(py_to_js('DataView requires an ArrayBuffer'))
-            buf = buf_jv.value.get('__bytes__', bytearray())
-            byte_off = int(interp._to_num(args[1])) if len(args) > 1 else 0
-            byte_len = int(interp._to_num(args[2])) if len(args) > 2 else len(buf) - byte_off
-            return JsValue('object', {
-                '__type__': py_to_js('DataView'),
-                '__buffer__': buf_jv,
-                '__byteoffset__': byte_off,
-                '__bytelength__': byte_len,
-            })
-        g.declare('DataView', self._make_intrinsic(_dv_ctor, 'DataView'), 'var')
-
-        # -- Intl (best-effort, stdlib only) --
-        def _make_intl():
-            from datetime import datetime as _dt, timezone as _tz
-
-            def _make_dtf(args, interp):
-                locale_str = interp._to_str(args[0]) if args and args[0].type != 'undefined' else 'en'
-                opts = args[1] if len(args) > 1 and args[1].type == 'object' else UNDEFINED
-                opts_dict = opts.value if opts.type == 'object' and isinstance(opts.value, dict) else {}
-
-                def _get_opt(key, default=None):
-                    v = opts_dict.get(key)
-                    if isinstance(v, JsValue):
-                        return interp._to_str(v)
-                    return default
-
-                def _format(a, i):
-                    date_obj = a[0] if a else UNDEFINED
-                    ms = None
-                    if date_obj.type == 'number':
-                        ms = date_obj.value
-                    elif date_obj.type == 'object' and isinstance(date_obj.value, dict):
-                        gt = date_obj.value.get('getTime')
-                        if gt:
-                            ms = i._to_num(i._call_js(gt, [], date_obj))
-                    if ms is None:
-                        ms = _dt.now(_tz.utc).timestamp() * 1000
-                    d = _dt.fromtimestamp(ms / 1000.0, tz=_tz.utc)
-                    year_style = _get_opt('year')
-                    month_style = _get_opt('month')
-                    day_style = _get_opt('day')
-                    if year_style or month_style or day_style:
-                        parts = []
-                        if month_style == 'long':
-                            parts.append(d.strftime('%B'))
-                        elif month_style == 'short':
-                            parts.append(d.strftime('%b'))
-                        elif month_style == 'numeric' or month_style == '2-digit':
-                            parts.append(str(d.month) if month_style == 'numeric' else f'{d.month:02d}')
-                        if day_style == 'numeric':
-                            parts.append(str(d.day))
-                        elif day_style == '2-digit':
-                            parts.append(f'{d.day:02d}')
-                        if year_style == 'numeric':
-                            return py_to_js(f'{", ".join(parts)}, {d.year}' if parts else str(d.year))
-                        elif year_style == '2-digit':
-                            return py_to_js(f'{", ".join(parts)}, {d.year % 100:02d}' if parts else f'{d.year % 100:02d}')
-                        return py_to_js(', '.join(parts))
-                    return py_to_js(d.strftime('%m/%d/%Y'))
-
-                def _format_to_parts(a, i):
-                    formatted = interp._to_str(_format(a, i))
-                    part = JsValue('object', {'type': py_to_js('literal'), 'value': py_to_js(formatted)})
-                    return JsValue('array', [part])
-
-                def _resolved_options(a, i):
-                    obj = JsValue('object', {})
-                    obj.value['locale'] = py_to_js(locale_str)
-                    for k, v in opts_dict.items():
-                        obj.value[k] = v if isinstance(v, JsValue) else py_to_js(v)
-                    return obj
-
-                dtf = JsValue('object', {})
-                dtf.value['format'] = intr(_format, 'DateTimeFormat.format')
-                dtf.value['formatToParts'] = intr(_format_to_parts, 'DateTimeFormat.formatToParts')
-                dtf.value['resolvedOptions'] = intr(_resolved_options, 'DateTimeFormat.resolvedOptions')
-                return dtf
-
-            def _make_nf(args, interp):
-                locale_str = interp._to_str(args[0]) if args and args[0].type != 'undefined' else 'en'
-                opts = args[1] if len(args) > 1 and args[1].type == 'object' else UNDEFINED
-                opts_dict = opts.value if opts.type == 'object' and isinstance(opts.value, dict) else {}
-
-                def _get_opt(key, default=None):
-                    v = opts_dict.get(key)
-                    if isinstance(v, JsValue):
-                        return interp._to_str(v)
-                    return default
-
-                style = _get_opt('style', 'decimal')
-                currency = _get_opt('currency', 'USD')
-
-                def _format(a, i):
-                    n = i._to_num(a[0]) if a else 0.0
-                    if style == 'percent':
-                        pct = n * 100
-                        if pct == int(pct):
-                            return py_to_js(f'{int(pct):,}%')
-                        return py_to_js(f'{pct:,.2f}%')
-                    if style == 'currency':
-                        symbols = {'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥'}
-                        sym = symbols.get(currency, currency + ' ')
-                        return py_to_js(f'{sym}{n:,.2f}')
-                    # decimal (default)
-                    if n == int(n):
-                        return py_to_js(f'{int(n):,}')
-                    return py_to_js(f'{n:,.3f}'.rstrip('0').rstrip('.'))
-
-                nf = JsValue('object', {})
-                nf.value['format'] = intr(_format, 'NumberFormat.format')
-                return nf
-
-            def _make_collator(args, interp):
-                def _compare(a, i):
-                    s1 = i._to_str(a[0]) if a else ''
-                    s2 = i._to_str(a[1]) if len(a) > 1 else ''
-                    if s1 < s2: return py_to_js(-1.0)
-                    if s1 > s2: return py_to_js(1.0)
-                    return py_to_js(0.0)
-
-                coll = JsValue('object', {})
-                coll.value['compare'] = intr(_compare, 'Collator.compare')
-                return coll
-
-            def _make_rtf(args, interp):
-                def _format(a, i):
-                    val = int(i._to_num(a[0])) if a else 0
-                    unit = i._to_str(a[1]) if len(a) > 1 else 'second'
-                    # strip plural 's' if present
-                    unit = unit.rstrip('s') if unit.endswith('s') and unit != 'ss' else unit
-                    abs_val = abs(val)
-                    plural = 's' if abs_val != 1 else ''
-                    if val < 0:
-                        return py_to_js(f'{abs_val} {unit}{plural} ago')
-                    return py_to_js(f'in {val} {unit}{plural}')
-
-                rtf = JsValue('object', {})
-                rtf.value['format'] = intr(_format, 'RelativeTimeFormat.format')
-                return rtf
-
-            def _make_lf(args, interp):
-                opts = args[1] if len(args) > 1 and args[1].type == 'object' else UNDEFINED
-                opts_dict = opts.value if opts.type == 'object' and isinstance(opts.value, dict) else {}
-                lf_type_v = opts_dict.get('type')
-                lf_type = interp._to_str(lf_type_v) if isinstance(lf_type_v, JsValue) else 'conjunction'
-
-                def _format(a, i):
-                    arr = a[0] if a else UNDEFINED
-                    if arr.type != 'array':
-                        return py_to_js('')
-                    items = [i._to_str(v) for v in arr.value]
-                    if len(items) == 0:
-                        return py_to_js('')
-                    if len(items) == 1:
-                        return py_to_js(items[0])
-                    if lf_type == 'disjunction':
-                        if len(items) == 2:
-                            return py_to_js(f'{items[0]} or {items[1]}')
-                        return py_to_js(', '.join(items[:-1]) + f', or {items[-1]}')
-                    if lf_type == 'unit':
-                        return py_to_js(', '.join(items))
-                    # conjunction (default)
-                    if len(items) == 2:
-                        return py_to_js(f'{items[0]} and {items[1]}')
-                    return py_to_js(', '.join(items[:-1]) + f', and {items[-1]}')
-
-                lf = JsValue('object', {})
-                lf.value['format'] = intr(_format, 'ListFormat.format')
-                return lf
-
-            intl_obj = JsValue('object', {})
-            intl_obj.value['DateTimeFormat'] = intr(_make_dtf, 'Intl.DateTimeFormat')
-            intl_obj.value['NumberFormat'] = intr(_make_nf, 'Intl.NumberFormat')
-            intl_obj.value['Collator'] = intr(_make_collator, 'Intl.Collator')
-            intl_obj.value['RelativeTimeFormat'] = intr(_make_rtf, 'Intl.RelativeTimeFormat')
-            intl_obj.value['ListFormat'] = intr(_make_lf, 'Intl.ListFormat')
-            return intl_obj
-
-        g.declare('Intl', _make_intl(), 'var')
+        register_core_builtins(self, g, intr)
+        register_object_builtins(self, g, intr)
+        register_advanced_builtins(self, g, intr)
+        register_promise_builtins(self, g, intr)
+        register_typed_builtins(self, g, intr)
 
         global_obj = JsValue('object', {})
         g.declare('globalThis', global_obj, 'var')
@@ -3324,6 +524,13 @@ class Interpreter:
             global_obj.value[name] = value
 
         return g
+
+    # --------------------------------------------------------- step counter
+    def _check_step_limit(self):
+        """Check execution step counter, raise RangeError if exceeded."""
+        self._exec_steps += 1
+        if self._exec_steps > self.MAX_EXEC_STEPS:
+            raise _JSError(self._make_js_error('RangeError', 'Execution step limit exceeded (possible infinite loop)'))
 
     # --------------------------------------------------------- error helpers
     def _make_js_error(self, name, msg):
@@ -3687,6 +894,7 @@ class Interpreter:
 
     def _get_prop(self, obj: JsValue, prop):
         key = self._to_key(prop)
+        _log_prop.debug("get %s.%s", obj.type, key)
         if getattr(self, '_global_object', None) is obj and self.genv.has(key):
             return self.genv.get(key)
         if obj.type == 'proxy':
@@ -3871,6 +1079,7 @@ class Interpreter:
 
     def _set_prop(self, obj: JsValue, prop, val: JsValue):
         key = self._to_key(prop)
+        _log_prop.debug("set %s.%s", obj.type, key)
         if getattr(self, '_global_object', None) is obj and self.genv.has(key):
             self.genv.set(key, val)
             self._sync_global_binding(key, val, self.genv)
@@ -4967,11 +2176,95 @@ class Interpreter:
         return False
 
     # --------------------------------------------------------- execution
+    @staticmethod
+    def _hoist_tdz(stmts, block_env):
+        """Pre-scan a block body and create TDZ entries for let/const declarations."""
+        from .environment import _TDZ_SENTINEL
+        for s in stmts:
+            if s.get("type") == "VariableDeclaration" and s["kind"] in ("let", "const"):
+                for d in s["declarations"]:
+                    name = d["id"]
+                    if isinstance(name, str):
+                        block_env.declare_tdz(name, s["kind"])
+                    elif isinstance(name, dict) and name.get("type") == "Identifier":
+                        block_env.declare_tdz(name.get("name", name), s["kind"])
+
+    @staticmethod
+    def _collect_var_names(node):
+        """Recursively collect all var-declared names in a subtree, skipping nested functions."""
+        names = []
+        if not isinstance(node, dict):
+            return names
+        tp = node.get("type")
+        # Stop at function boundaries
+        if tp in ("FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"):
+            return names
+        if tp == "VariableDeclaration" and node.get("kind") == "var":
+            for d in node.get("declarations", []):
+                Interpreter._extract_binding_names(d.get("id"), names)
+            return names
+        # Recurse into statement bodies
+        for key in ("body", "consequent", "alternate", "block", "handler", "finalizer",
+                     "cases", "declarations", "init", "update"):
+            child = node.get(key)
+            if isinstance(child, list):
+                for item in child:
+                    if isinstance(item, dict):
+                        names.extend(Interpreter._collect_var_names(item))
+            elif isinstance(child, dict):
+                names.extend(Interpreter._collect_var_names(child))
+        return names
+
+    @staticmethod
+    def _extract_binding_names(pattern, names):
+        """Extract variable names from a binding pattern (Identifier, ObjectPattern, ArrayPattern)."""
+        if isinstance(pattern, str):
+            names.append(pattern)
+        elif isinstance(pattern, dict):
+            tp = pattern.get("type")
+            if tp == "Identifier":
+                names.append(pattern["name"])
+            elif tp == "ObjectPattern":
+                for prop in pattern.get("properties", []):
+                    Interpreter._extract_binding_names(prop.get("value", prop.get("argument")), names)
+            elif tp == "ArrayPattern":
+                for elem in pattern.get("elements", []):
+                    if elem is not None:
+                        Interpreter._extract_binding_names(elem.get("argument", elem) if isinstance(elem, dict) and elem.get("type") == "RestElement" else elem, names)
+            elif tp == "AssignmentPattern":
+                Interpreter._extract_binding_names(pattern.get("left"), names)
+            elif tp == "RestElement":
+                Interpreter._extract_binding_names(pattern.get("argument"), names)
+
+    @staticmethod
+    def _hoist_vars(stmts, fn_env):
+        """Pre-scan function/program body and hoist var declarations to fn_env."""
+        for s in stmts:
+            for name in Interpreter._collect_var_names(s):
+                if name not in fn_env.bindings:
+                    fn_env.bindings[name] = ('var', UNDEFINED)
+
+    @staticmethod
+    def _has_use_strict(stmts):
+        """Check if the first statement is a 'use strict' directive."""
+        if not stmts:
+            return False
+        s = stmts[0]
+        if s.get("type") == "ExpressionStatement":
+            expr = s.get("expression", {})
+            if expr.get("type") == "Literal" and expr.get("value") == "use strict":
+                return True
+        return False
+
     def _exec(self, node, env=None):
         if env is None: env = self.env
         tp = node["type"]
+        _log_exec.debug("exec %s", tp)
 
         if tp == "Program":
+            self._hoist_vars(node["body"], env)
+            if self._has_use_strict(node["body"]):
+                env._strict = True
             for s in node["body"]:
                 r = self._exec(s, env)
                 if r is not None: return r
@@ -5085,6 +2378,7 @@ class Interpreter:
 
         if tp == "BlockStatement":
             block_env = Environment(env)
+            self._hoist_tdz(node["body"], block_env)
             for s in node["body"]:
                 r = self._exec(s, block_env)
                 if r is not None: return r
@@ -5104,6 +2398,7 @@ class Interpreter:
 
         if tp == "WhileStatement":
             while self._truthy(self._eval(node["test"], env)):
+                self._check_step_limit()
                 try:
                     r = self._exec(node["body"], env)
                     if r is not None:
@@ -5122,6 +2417,7 @@ class Interpreter:
 
         if tp == "DoWhileStatement":
             while True:
+                self._check_step_limit()
                 try:
                     r = self._exec(node["body"], env)
                     if r is not None:
@@ -5159,6 +2455,7 @@ class Interpreter:
             while True:
                 if node.get("test") and not self._truthy(self._eval(node["test"], loop_env)):
                     break
+                self._check_step_limit()
                 # Create per-iteration env for let/const (closures capture this)
                 if uses_lex:
                     iter_env = Environment(loop_env)
@@ -5222,6 +2519,7 @@ class Interpreter:
             elif right.type == "array": keys = [str(i) for i in range(len(right.value))]
             elif right.type == "string": keys = [str(i) for i in range(len(right.value))]
             for key in keys:
+                self._check_step_limit()
                 loop_env = Environment(env)
                 loop_value = JsValue("string", str(key))
                 if node["left"]["type"] == "VariableDeclaration":
@@ -5252,6 +2550,7 @@ class Interpreter:
                 if async_it is not None:
                     while True:
                         promise = async_it()
+                        self._check_step_limit()
                         if isinstance(promise, JsValue) and promise.type == 'promise':
                             if not self._run_event_loop(promise):
                                 raise _JSError(py_to_js('for await: iterator did not settle'))
@@ -5285,6 +2584,7 @@ class Interpreter:
             iterator = self._get_js_iterator(right)
             if iterator is not None:
                 while True:
+                    self._check_step_limit()
                     result = iterator()
                     done = self._get_prop(result, 'done')
                     if self._truthy(done):
@@ -5369,15 +2669,23 @@ class Interpreter:
                 handler = node.get("handler")
                 if handler:
                     catch_env = Environment(env)
-                    if handler.get("param"):
-                        catch_env.declare(handler["param"], e.value, 'let')
+                    param = handler.get("param")
+                    if param:
+                        if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
+                            self._bind_pattern(param, e.value, catch_env, 'let', True)
+                        else:
+                            catch_env.declare(param, e.value, 'let')
                     self._exec(handler["body"], catch_env)
             except Exception:
                 handler = node.get("handler")
                 if handler:
                     catch_env = Environment(env)
-                    if handler.get("param"):
-                        catch_env.declare(handler["param"], py_to_js("Python exception"), 'let')
+                    param = handler.get("param")
+                    if param:
+                        if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
+                            self._bind_pattern(param, py_to_js("Python exception"), catch_env, 'let', True)
+                        else:
+                            catch_env.declare(param, py_to_js("Python exception"), 'let')
                     self._exec(handler["body"], catch_env)
             finally:
                 if node.get("finalizer"):
@@ -5527,6 +2835,7 @@ class Interpreter:
     def _eval(self, node, env=None):
         if env is None: env = self.env
         tp = node["type"]
+        _log_eval.debug("eval %s", tp)
 
         if tp == "Literal":
             kind = node.get("raw", "undefined")
@@ -5552,7 +2861,10 @@ class Interpreter:
                 return py_to_js([])
             try:
                 return env.get(node["name"])
-            except ReferenceError:
+            except ReferenceError as re:
+                msg = str(re)
+                if "before initialization" in msg:
+                    raise _JSError(self._make_js_error('ReferenceError', msg))
                 return UNDEFINED
 
         if tp == "ThisExpression":
@@ -6147,6 +3459,17 @@ class Interpreter:
         return gen_obj
 
     def _call_js(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):
+        _log_call.debug("call %s (new=%s, nargs=%d)", fn_val.type, is_new_call, len(args))
+        self._call_depth += 1
+        if self._call_depth > self.MAX_CALL_DEPTH:
+            self._call_depth -= 1
+            raise _JSError(self._make_js_error('RangeError', 'Maximum call stack size exceeded'))
+        try:
+            return self._call_js_impl(fn_val, args, this_val, extra_args, is_new_call)
+        finally:
+            self._call_depth -= 1
+
+    def _call_js_impl(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):
         if fn_val.type == 'proxy':
             proxy = fn_val.value
             if is_new_call:
@@ -6193,6 +3516,13 @@ class Interpreter:
                 self._bind_pattern(p, val, call_env, 'var', True)
                 arg_index += 1
             promise = self._new_promise() if node.get("async_") else None
+            body = node["body"]
+            # Hoist var declarations to function scope
+            body_stmts = body.get("body", []) if isinstance(body, dict) and body.get("type") == "BlockStatement" else []
+            if body_stmts:
+                self._hoist_vars(body_stmts, call_env)
+                if self._has_use_strict(body_stmts):
+                    call_env._strict = True
             try:
                 self.env = call_env
                 self._exec(node["body"], call_env)
@@ -6219,6 +3549,7 @@ class Interpreter:
 
     # --------------------------------------------------------- main run
     def run(self, source: str) -> str:
+        self._exec_steps = 0
         start = len(self.output)
         try:
             tokens = Lexer(source).tokenize()
@@ -6240,34 +3571,6 @@ class Interpreter:
         self._exec(ast, self.genv)
         self._run_event_loop()
 
-
-
-# ============================================================================
-#  Internal control-flow exceptions
-# ============================================================================
-
-class _JSBreak(Exception):
-    def __init__(self, label=None): self.label = label
-class _JSContinue(Exception):
-    def __init__(self, label=None): self.label = label
-class _JSReturn(Exception):
-    def __init__(self, value): self.value = value
-class _JSError(Exception):
-    def __init__(self, value: JsValue): self.value = value
-
-
-# ============================================================================
-#  flatten helper
-# ============================================================================
-
-def flatten_one(lst):
-    result = []
-    for x in lst:
-        if isinstance(x, JsValue) and x.type == "array":
-            result.extend(x.value)
-        else:
-            result.append(x)
-    return result
 
 
 def _ta_coerce(jsv, fmt, interp):

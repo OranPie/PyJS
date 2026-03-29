@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List
 
+from .trace import get_logger
+
+_log = get_logger("lexer")
+
 @dataclass(slots=True)
 class Token:
     type: str
@@ -191,6 +195,7 @@ class Lexer:
             self._skip()
             if self._end():
                 toks.append(self._mk('EOF', None, self.col, self.line))
+                _log.debug("tokenized %d tokens (%d lines)", len(toks), self.line)
                 return toks
             sc, sl = self.col, self.line
             c = self._ch()

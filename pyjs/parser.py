@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import List
 
 from .lexer import Lexer, Token
+from .trace import get_logger
+
+_log = get_logger("parser")
 
 IDENTIFIER_NAME_TOKENS = {'IDENTIFIER', *(keyword.upper() for keyword in Lexer.KEYWORDS)}
 
@@ -201,6 +204,7 @@ class Parser:
         body = []
         while not self._check('EOF'):
             body.append(self._stmt())
+        _log.debug("parsed %d top-level statements", len(body))
         return N.Program(body)
 
     def _semi(self):
@@ -395,7 +399,14 @@ class Parser:
             self._advance()
             param = None
             if self._check('LPAREN'):
-                self._advance(); param = self._expect('IDENTIFIER').value; self._expect('RPAREN')
+                self._advance()
+                if self._check('LBRACE'):
+                    param = self._object_pattern()
+                elif self._check('LBRACKET'):
+                    param = self._array_pattern()
+                else:
+                    param = self._expect('IDENTIFIER').value
+                self._expect('RPAREN')
             handler = N.CatchClause(param, self._block())
         finalizer = None
         if self._check('FINALLY'):

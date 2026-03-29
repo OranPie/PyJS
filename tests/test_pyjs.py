@@ -1619,6 +1619,192 @@ console.log(orig[0] + '|' + copy[0] + '|' + copy.length);
         lines = result.splitlines()
         self.assertEqual(lines, ['1', '99', '3', '4', 'true'])
 
+    # ---- Phase 19: Logging / tracing tests ----------------------------------
+
+    def test_trace_loggers_exist(self):
+        """All named loggers are accessible."""
+        import logging
+        from pyjs.trace import LOGGER_NAMES
+        for name in LOGGER_NAMES:
+            logger = logging.getLogger(name)
+            self.assertIsNotNone(logger)
+            self.assertEqual(logger.name, name)
+
+    def test_trace_debug_output(self):
+        """Loggers produce output at DEBUG level."""
+        import logging
+        from pyjs.trace import get_logger
+        logger = get_logger("exec")
+        handler = logging.Handler()
+        records = []
+        handler.emit = lambda r: records.append(r)
+        logger.addHandler(handler)
+        old_level = logger.level
+        logger.setLevel(logging.DEBUG)
+        try:
+            Interpreter(log_level="DEBUG").run("1 + 2")
+            self.assertTrue(len(records) > 0)
+            self.assertTrue(any("exec" in r.getMessage() for r in records))
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+
+    def test_trace_silent_by_default(self):
+        """At WARNING level, no debug output is emitted."""
+        import logging
+        from pyjs.trace import get_logger
+        logger = get_logger("exec")
+        handler = logging.Handler()
+        records = []
+        handler.emit = lambda r: records.append(r)
+        handler.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+        old_level = logger.level
+        logger.setLevel(logging.WARNING)
+        try:
+            Interpreter().run("1 + 2")
+            debug_records = [r for r in records if r.levelno <= logging.DEBUG]
+            self.assertEqual(len(debug_records), 0)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+
+    # ── Phase 19C: Production gap fix tests ──────────────────────────────
+
+    def test_json_stringify_circular_detection(self):
+        """C1: JSON.stringify throws TypeError on circular references."""
+        result = Interpreter().run(
+            'const o = {a:1}; o.self = o; '
+            'try { JSON.stringify(o); } catch(e) { console.log(e.message); }'
+        )
+        self.assertIn("circular", result.lower())
+
+    def test_json_stringify_nested_circular(self):
+        """C1: Nested circular reference detection."""
+        result = Interpreter().run(
+            'const a = []; const b = [a]; a.push(b); '
+            'try { JSON.stringify(a); } catch(e) { console.log(e.message); }'
+        )
+        self.assertIn("circular", result.lower())
+
+    def test_json_stringify_no_false_positive(self):
+        """C1: Non-circular repeated reference should not throw."""
+        result = Interpreter().run(
+            'const shared = {x: 1}; '
+            'console.log(JSON.stringify({a: shared, b: shared}))'
+        )
+        self.assertIn('"x":1', result.replace(" ", ""))
+
+    def test_recursion_depth_limit(self):
+        """C2: Deep recursion throws RangeError."""
+        result = Interpreter().run(
+            'function inf() { return inf(); } '
+            'try { inf(); } catch(e) { console.log(e.name); }'
+        )
+        self.assertEqual(result.strip(), "RangeError")
+
+    def test_recursion_depth_error_message(self):
+        """C2: RangeError message contains 'call stack'."""
+        result = Interpreter().run(
+            'function inf() { return inf(); } '
+            'try { inf(); } catch(e) { console.log(e.message); }'
+        )
+        self.assertIn("call stack", result.lower())
+
+    def test_tdz_let_before_init(self):
+        """C3: Accessing let before declaration throws ReferenceError."""
+        result = Interpreter().run(
+            'try { console.log(x); let x = 5; } '
+            'catch(e) { console.log(e.message); }'
+        )
+        self.assertIn("before initialization", result)
+
+    def test_tdz_const_before_init(self):
+        """C3: Accessing const before declaration throws ReferenceError."""
+        result = Interpreter().run(
+            '{ try { console.log(y); } catch(e) { console.log(e.message); } const y = 10; }'
+        )
+        self.assertIn("before initialization", result)
+
+    def test_tdz_after_init_works(self):
+        """C3: Accessing let/const after initialization works fine."""
+        result = Interpreter().run('{ let x = 42; console.log(x); }')
+        self.assertEqual(result.strip(), "42")
+
+    def test_strict_mode_undeclared_var(self):
+        """C4: 'use strict' prevents assignment to undeclared variables."""
+        result = Interpreter().run(
+            '"use strict"; '
+            'try { undeclared = 5; } catch(e) { console.log(e.message); }'
+        )
+        self.assertIn("not defined", result)
+
+    def test_strict_mode_function_directive(self):
+        """C4: Function-level 'use strict' is recognized."""
+        result = Interpreter().run('''
+            function f() {
+                "use strict";
+                try { bad = 10; } catch(e) { console.log(e.message); }
+            }
+            f()
+        ''')
+        self.assertIn("not defined", result)
+
+    def test_catch_object_destructuring(self):
+        """C6: Destructuring in catch clause (object pattern)."""
+        result = Interpreter().run(
+            'try { throw {code: 404, msg: "not found"}; } '
+            'catch ({code, msg}) { console.log(code, msg); }'
+        )
+        self.assertEqual(result.strip(), "404 not found")
+
+    def test_catch_array_destructuring(self):
+        """C6: Destructuring in catch clause (array pattern)."""
+        result = Interpreter().run(
+            'try { throw [1, 2, 3]; } '
+            'catch ([a, b, c]) { console.log(a + b + c); }'
+        )
+        self.assertEqual(result.strip(), "6")
+
+    def test_loop_timeout(self):
+        """C7: Infinite loop triggers execution step limit."""
+        interp = Interpreter()
+        interp.MAX_EXEC_STEPS = 100
+        result = interp.run(
+            'try { while(true) {} } catch(e) { console.log(e.name); }'
+        )
+        self.assertEqual(result.strip(), "RangeError")
+
+    def test_loop_timeout_for_loop(self):
+        """C7: Infinite for loop triggers execution step limit."""
+        interp = Interpreter()
+        interp.MAX_EXEC_STEPS = 100
+        result = interp.run(
+            'try { for(;;) {} } catch(e) { console.log(e.message); }'
+        )
+        self.assertIn("step limit", result.lower())
+
+    def test_var_hoisting_in_function(self):
+        """C8: var inside for loop is hoisted to function scope."""
+        result = Interpreter().run(
+            'function f() { for (var i = 0; i < 3; i++) {} console.log(i); } f()'
+        )
+        self.assertEqual(result.strip(), "3")
+
+    def test_var_hoisting_in_if(self):
+        """C8: var inside if block is hoisted to function scope."""
+        result = Interpreter().run(
+            'function g() { if (false) { var y = 10; } console.log(y); } g()'
+        )
+        self.assertEqual(result.strip(), "undefined")
+
+    def test_var_hoisting_program_level(self):
+        """C8: var hoisting at program level."""
+        result = Interpreter().run(
+            'console.log(x); var x = 5; console.log(x);'
+        )
+        self.assertEqual(result.strip(), "undefined\n5")
+
 
 if __name__ == '__main__':
     unittest.main()

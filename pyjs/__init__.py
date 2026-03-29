@@ -5,7 +5,9 @@ from typing import List
 
 from .lexer import Lexer, Token
 from .parser import N, Parser
-from .runtime import Environment, Interpreter, JS_FALSE, JS_NULL, JS_TRUE, UNDEFINED, JsValue
+from .values import JsValue, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE
+from .environment import Environment
+from .runtime import Interpreter
 from .modules import ModuleLoader
 
 
