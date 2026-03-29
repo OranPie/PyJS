@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyjs"
+version = "0.1.0"
+description = "Pure Python JavaScript interpreter"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "OranPie", email = "orangepie@tutamail.com" }
+]
+license = { text = "MIT" }
+keywords = ["javascript", "interpreter", "python", "parser", "runtime"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+
+[project.scripts]
+pyjs = "pyjs.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pyjs*"]
