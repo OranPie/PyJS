@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-01 | **215 tests passing** | ~12 400 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–22 added 153 tests)*
+*Updated: 2026-04-01 | **223 tests passing** | ~12 900 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–26 added 161 tests)*
 
 ---
 
@@ -8,8 +8,8 @@
 
 | File | Lines | Role |
 |---|---|---|
-| `pyjs/runtime.py` | 4 203 | Tree-walking interpreter, all built-ins, event loop |
-| `pyjs/parser.py` | 1 175 | Recursive-descent parser → AST dicts |
+| `pyjs/runtime.py` | 4 449 | Tree-walking interpreter, all built-ins, event loop |
+| `pyjs/parser.py` | 1 293 | Recursive-descent parser → AST dicts |
 | `pyjs/builtins_advanced.py` | 1 098 | Array, String, Math, JSON, Date, RegExp built-ins |
 | `pyjs/builtins_object.py` | 724 | Object.*, console.*, global utility functions |
 | `pyjs/builtins_typed.py` | 563 | TypedArray constructors, ArrayBuffer, DataView |
@@ -24,7 +24,7 @@
 | `pyjs/values.py` | 54 | JsValue class, JsProxy, well-known symbols incl. Symbol.dispose |
 | `pyjs/modules.py` | 48 | ModuleLoader: path resolution, caching, cycle detection |
 | `pyjs/exceptions.py` | 27 | Internal control-flow exceptions |
-| `tests/test_pyjs.py` | 2 400+ | 215 tests covering all phases |
+| `tests/test_pyjs.py` | 2 859 | 223 tests covering all phases |
 
 Architecture: **Lexer → Parser → AST → `Interpreter._exec/_eval` (tree-walk)**
 All values are `JsValue(type, value)`; environments are linked via parent chain.
@@ -179,7 +179,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | Async iterator helpers (full spec) | ES2025 | Sync helpers complete; async path partial |
 | Non-configurable built-in props | ES5 | Built-in method properties are all writable/configurable |
 | Proper `[[Prototype]]` chain for primitives | ES5 | Method dispatch via type-switch, not prototype walk |
-| `@decorator` syntax | Stage 3 | Not yet implemented |
+| `@decorator` syntax | Stage 3 | Class expressions not yet decorated |
 
 ## Phases Summary
 
@@ -201,6 +201,8 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **22** | Bug fixes: `Object.getPrototypeOf(null-proto)`, class static block class-name scope, `super` in object literals, `error.constructor.name`, `Function.prototype.toString`, `eval()` throws EvalError; lexer `\uXXXX`/`\u{H+}` string escapes | 8 | **199** |
 | **23** | Missing ES5 built-ins: `Object.prototype.propertyIsEnumerable`, `isPrototypeOf`; `String.prototype.normalize` (real Unicode); `Iterator.from()`; `Math.sumPrecise`; `RegExp.escape`; `Error.isError` | 8 | **207** |
 | **24–25** | ES2024 `using`/`await using` (Explicit Resource Management); `Symbol.dispose`/`Symbol.asyncDispose`; Unicode escape tests | 8 | **215** |
+| **25b** | Async iterator helpers (`map`, `filter`, `take`, `drop`, `flatMap`, `toArray`, `forEach`, `some`, `every`, `find`, `reduce`) on `async function*` results | 3 | **218** |
+| **26** | Decorator syntax (TC39 Stage 3): `@decorator` on classes, methods, fields; `@a.b.c`, `@factory(args)` forms; class/method/field decorator semantics | 5 | **223** |
 
 ---
 
@@ -235,10 +237,11 @@ See **[docs/plugins.md](plugins.md)** for the full plugin authoring guide.
 
 ## Verdict
 
-> **PyJS is a ~94% ES2015–ES2025 interpreter.**
-> All major language features are implemented and tested across 215 tests.
+> **PyJS is a ~96% ES2015–ES2025 interpreter.**
+> All major language features are implemented and tested across 223 tests.
 > Remaining gaps are specialist (SharedArrayBuffer/Atomics, full ICU Intl locale data, tail-call opt)
-> or intentionally omitted (Function constructor, with statement, decorator syntax).
+> or intentionally omitted (Function constructor, with statement).
+> Decorator syntax (TC39 Stage 3) is implemented for class declarations, methods, and fields.
 > The plugin system enables extending the runtime with domain-specific APIs
 > (storage, networking, filesystem) without modifying the core.
 > For scripting, teaching, and computational tasks it is production-ready.
