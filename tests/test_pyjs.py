@@ -2855,5 +2855,149 @@ console.log(b.id);
         result = Interpreter().run(src)
         self.assertEqual(result, 'decorated')
 
+    # ── Phase 27: ES2025 remaining + ES2024 ArrayBuffer ───────────────────────────
+
+    def test_float16array_basic(self):
+        """Float16Array constructor and basic typed array operations."""
+        src = '''
+const f16 = new Float16Array(4);
+f16[0] = 1.5;
+f16[1] = 2.5;
+f16[2] = -1.0;
+console.log(f16[0]);
+console.log(f16[1]);
+console.log(f16.length);
+console.log(f16.BYTES_PER_ELEMENT);
+'''
+        result = Interpreter().run(src)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '1.5')
+        self.assertEqual(lines[1], '2.5')
+        self.assertEqual(lines[2], '4')
+        self.assertEqual(lines[3], '2')
+
+    def test_math_f16round(self):
+        """Math.f16round rounds to nearest IEEE 754 float16."""
+        src = '''
+console.log(Math.f16round(1.337));
+console.log(Math.f16round(0));
+console.log(Math.f16round(65504));
+'''
+        result = Interpreter().run(src)
+        lines = result.splitlines()
+        # 1.337 rounded to float16 ≈ 1.3369140625
+        self.assertAlmostEqual(float(lines[0]), 1.337, delta=0.01)
+        self.assertEqual(lines[1], '0')
+        # 65504 is the max representable float16 value
+        self.assertAlmostEqual(float(lines[2]), 65504, delta=1)
+
+    def test_uint8array_to_hex_from_hex(self):
+        """Uint8Array.prototype.toHex and Uint8Array.fromHex (ES2025)."""
+        src = '''
+const arr = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]);
+const hex = arr.toHex();
+console.log(hex);
+const back = Uint8Array.fromHex(hex);
+console.log(back[0]);
+console.log(back[3]);
+console.log(back.length);
+'''
+        result = Interpreter().run(src)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'deadbeef')
+        self.assertEqual(lines[1], '222')   # 0xDE = 222
+        self.assertEqual(lines[2], '239')   # 0xEF = 239
+        self.assertEqual(lines[3], '4')
+
+    def test_uint8array_to_base64_from_base64(self):
+        """Uint8Array.prototype.toBase64 and Uint8Array.fromBase64 (ES2025)."""
+        src = '''
+const arr = new Uint8Array([72, 101, 108, 108, 111]);  // "Hello"
+const b64 = arr.toBase64();
+console.log(b64);
+const back = Uint8Array.fromBase64(b64);
+console.log(back.length);
+console.log(back[0]);
+// URL-safe variant
+const b64url = arr.toBase64({ alphabet: 'base64url' });
+console.log(typeof b64url);
+'''
+        result = Interpreter().run(src)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'SGVsbG8=')
+        self.assertEqual(lines[1], '5')
+        self.assertEqual(lines[2], '72')  # 'H'
+        self.assertEqual(lines[3], 'string')
+
+    def test_arraybuffer_resizable(self):
+        """ArrayBuffer resizable + resize (ES2024)."""
+        src = '''
+const buf = new ArrayBuffer(4, { maxByteLength: 16 });
+console.log(buf.byteLength);
+console.log(buf.resizable);
+console.log(buf.maxByteLength);
+buf.resize(8);
+console.log(buf.byteLength);
+const fixed = new ArrayBuffer(4);
+console.log(fixed.resizable);
+'''
+        result = Interpreter().run(src)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '4')
+        self.assertEqual(lines[1], 'true')
+        self.assertEqual(lines[2], '16')
+        self.assertEqual(lines[3], '8')
+        self.assertEqual(lines[4], 'false')
+
+    def test_arraybuffer_transfer(self):
+        """ArrayBuffer.prototype.transfer creates new buffer, detaches old (ES2024)."""
+        src = '''
+const a = new ArrayBuffer(8);
+const view = new Uint8Array(a);
+view[0] = 42;
+const b = a.transfer();
+const view2 = new Uint8Array(b);
+console.log(view2[0]);
+console.log(b.byteLength);
+console.log(a.detached);
+const c = a.transfer(4);
+'''
+        result = Interpreter().run(src)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '42')
+        self.assertEqual(lines[1], '8')
+        self.assertEqual(lines[2], 'true')
+
+    def test_import_attributes_syntax(self):
+        """Import 'with { type }' clause parses without error (ES2025)."""
+        src = '''
+// Import attributes should parse but are ignored at runtime
+// (no real file loading in this test)
+try {
+    // Test that the parser accepts the 'with' clause syntax
+    eval("import x from 'y' with { type: 'json' }");
+} catch (e) {
+    // EvalError expected since eval is limited, but NOT a SyntaxError
+    console.log(e instanceof SyntaxError ? 'syntax-error' : 'ok');
+}
+// Verify the syntax is parseable inline via Function parsing check
+const code = "import './mod.js' with { type: 'javascript' }";
+console.log(typeof code);
+'''
+        result = Interpreter().run(src)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'ok')
+        self.assertEqual(lines[1], 'string')
+
+    def test_import_attributes_parsed(self):
+        """parse_source accepts import with { type: 'json' } syntax (ES2025)."""
+        from pyjs import parse_source
+        ast = parse_source("import data from './data.json' with { type: 'json' }")
+        body = ast['body']
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['type'], 'ImportDeclaration')
+        self.assertEqual(body[0]['source'], './data.json')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -652,6 +652,7 @@ class Parser:
         # import './mod' (side-effect only)
         if self._check('STRING'):
             source = self._advance().value
+            self._parse_import_attributes()  # ES2025: optional 'with { ... }' clause
             self._semi()
             return N.ImportDecl([], source)
         specifiers = []
@@ -678,8 +679,23 @@ class Parser:
                     specifiers.extend(self._parse_import_specifiers())
         self._expect('FROM')
         source = self._expect('STRING').value
+        self._parse_import_attributes()  # ES2025: optional 'with { ... }' clause
         self._semi()
         return N.ImportDecl(specifiers, source)
+
+    def _parse_import_attributes(self):
+        """Parse and discard optional ES2025 import attributes: with { key: 'value' }"""
+        if not (self._check('IDENTIFIER') and self._cur().value in ('with', 'assert')):
+            return
+        self._advance()  # consume 'with' or 'assert'
+        self._expect('LBRACE')
+        while not self._check('RBRACE') and not self._check('EOF'):
+            self._consume_identifier_name()  # attribute key
+            self._expect('COLON')
+            self._expect('STRING')           # attribute value
+            if not self._optional('COMMA'):
+                break
+        self._expect('RBRACE')
 
     def _parse_import_specifiers(self):
         self._expect('LBRACE')
@@ -714,6 +730,7 @@ class Parser:
             self._advance()
             self._expect('FROM')
             source = self._expect('STRING').value
+            self._parse_import_attributes()  # ES2025: optional 'with { ... }' clause
             self._semi()
             return N.ExportList([], source)
         if self._check('LBRACE'):
@@ -733,6 +750,7 @@ class Parser:
             if self._check('FROM'):
                 self._advance()
                 source = self._expect('STRING').value
+                self._parse_import_attributes()  # ES2025: optional 'with { ... }' clause
             self._semi()
             return N.ExportList(specifiers, source)
         if self._check('VAR', 'LET', 'CONST'):

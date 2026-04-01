@@ -2032,6 +2032,59 @@ class Interpreter:
         buf = d.get('__bytes__', bytearray())
         if key == 'byteLength':
             return JsValue('number', float(len(buf)))
+        if key == 'resizable':
+            return JS_TRUE if d.get('__resizable__') else JS_FALSE
+        if key == 'maxByteLength':
+            if d.get('__resizable__'):
+                return JsValue('number', float(d.get('__max_byte_length__', len(buf))))
+            return JsValue('number', float(len(buf)))
+        if key == 'detached':
+            return JS_TRUE if d.get('__detached__') else JS_FALSE
+        if key == 'resize':
+            def _resize(this_val, args, interp, _d=d):
+                if _d.get('__detached__'):
+                    raise _JSError(self._make_js_error('TypeError', 'Cannot resize a detached ArrayBuffer'))
+                if not _d.get('__resizable__'):
+                    raise _JSError(self._make_js_error('TypeError', 'ArrayBuffer is not resizable'))
+                new_len = max(0, int(interp._to_num(args[0])) if args else 0)
+                max_bl = _d.get('__max_byte_length__', 0)
+                if new_len > max_bl:
+                    raise _JSError(self._make_js_error('RangeError', f'Invalid ArrayBuffer resize length {new_len}'))
+                cur = _d['__bytes__']
+                if new_len > len(cur):
+                    cur.extend(bytearray(new_len - len(cur)))
+                elif new_len < len(cur):
+                    del cur[new_len:]
+                return UNDEFINED
+            return self._make_intrinsic(_resize, 'ArrayBuffer.resize')
+        if key == 'transfer':
+            def _transfer(this_val, args, interp, _d=d, _bv=buf_val):
+                if _d.get('__detached__'):
+                    raise _JSError(self._make_js_error('TypeError', 'Cannot transfer a detached ArrayBuffer'))
+                new_len = int(interp._to_num(args[0])) if args and args[0].type == 'number' else len(_d['__bytes__'])
+                new_bytes = bytearray(_d['__bytes__'][:new_len])
+                if new_len > len(_d['__bytes__']):
+                    new_bytes.extend(bytearray(new_len - len(_d['__bytes__'])))
+                _d['__detached__'] = True
+                _d['__bytes__'] = bytearray()
+                new_d = {'__type__': py_to_js('ArrayBuffer'), '__bytes__': new_bytes}
+                if _d.get('__resizable__'):
+                    new_d['__resizable__'] = True
+                    new_d['__max_byte_length__'] = max(new_len, _d.get('__max_byte_length__', new_len))
+                return JsValue('object', new_d)
+            return self._make_intrinsic(_transfer, 'ArrayBuffer.transfer')
+        if key == 'transferToFixedLength':
+            def _transfer_fixed(this_val, args, interp, _d=d):
+                if _d.get('__detached__'):
+                    raise _JSError(self._make_js_error('TypeError', 'Cannot transfer a detached ArrayBuffer'))
+                new_len = int(interp._to_num(args[0])) if args and args[0].type == 'number' else len(_d['__bytes__'])
+                new_bytes = bytearray(_d['__bytes__'][:new_len])
+                if new_len > len(_d['__bytes__']):
+                    new_bytes.extend(bytearray(new_len - len(_d['__bytes__'])))
+                _d['__detached__'] = True
+                _d['__bytes__'] = bytearray()
+                return JsValue('object', {'__type__': py_to_js('ArrayBuffer'), '__bytes__': new_bytes})
+            return self._make_intrinsic(_transfer_fixed, 'ArrayBuffer.transferToFixedLength')
         if key == 'slice':
             def _slice(this_val, args, interp, _bv=buf_val):
                 _b = _bv.value.get('__bytes__', bytearray())
@@ -2371,6 +2424,28 @@ class Interpreter:
                 if idx < 0: idx += _len
                 return _r(idx) if 0 <= idx < _len else UNDEFINED
             return self._make_intrinsic(_at, 'TypedArray.at')
+
+        # ES2025: Uint8Array-specific base64 and hex instance methods
+        if ta_name == 'Uint8Array':
+            import base64 as _b64mod
+            raw_bytes = bytes(buf[byteoffset:byteoffset + length])
+            if name == 'toBase64':
+                def _to_base64(this_val, args, interp, _rb=raw_bytes):
+                    opts = args[0] if args and args[0].type == 'object' else None
+                    alphabet = interp._to_str(opts.value.get('alphabet', UNDEFINED)) if opts and opts.value.get('alphabet') else 'base64'
+                    omit_padding = interp._truthy(opts.value.get('omitPadding', JS_FALSE)) if opts else False
+                    if alphabet == 'base64url':
+                        encoded = _b64mod.urlsafe_b64encode(_rb).decode('ascii')
+                    else:
+                        encoded = _b64mod.b64encode(_rb).decode('ascii')
+                    if omit_padding:
+                        encoded = encoded.rstrip('=')
+                    return JsValue('string', encoded)
+                return self._make_intrinsic(_to_base64, 'Uint8Array.toBase64')
+            if name == 'toHex':
+                def _to_hex(this_val, args, interp, _rb=raw_bytes):
+                    return JsValue('string', _rb.hex())
+                return self._make_intrinsic(_to_hex, 'Uint8Array.toHex')
 
         return UNDEFINED
 
@@ -4489,7 +4564,7 @@ class Interpreter:
 
 def _ta_coerce(jsv, fmt, interp):
     """Coerce a JsValue to the appropriate Python type for struct.pack_into."""
-    if fmt in ('f', 'd'):
+    if fmt in ('e', 'f', 'd'):
         return interp._to_num(jsv)
     # integer formats
     n = interp._to_num(jsv)

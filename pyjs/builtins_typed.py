@@ -237,10 +237,20 @@ def register_typed_builtins(interp, g, intr):
         n = int(interp._to_num(args[0])) if args else 0
         if n < 0:
             raise _JSError(py_to_js('Invalid ArrayBuffer length'))
-        return JsValue('object', {
+        # ES2024: optional { maxByteLength } option for resizable ArrayBuffers
+        max_byte_length = None
+        if len(args) > 1 and args[1].type == 'object':
+            mbl = args[1].value.get('maxByteLength')
+            if isinstance(mbl, JsValue) and mbl.type == 'number':
+                max_byte_length = max(n, int(interp._to_num(mbl)))
+        d = {
             '__type__': py_to_js('ArrayBuffer'),
             '__bytes__': bytearray(n),
-        })
+        }
+        if max_byte_length is not None:
+            d['__resizable__'] = True
+            d['__max_byte_length__'] = max_byte_length
+        return JsValue('object', d)
     ab_ctor = interp._make_intrinsic(_ab_ctor, 'ArrayBuffer')
     ab_ctor.value['isView'] = interp._make_intrinsic(
         lambda tv, a, i: JS_TRUE if (
@@ -261,6 +271,7 @@ def register_typed_builtins(interp, g, intr):
         ('Uint16Array',       'H', 2),
         ('Int32Array',        'i', 4),
         ('Uint32Array',       'I', 4),
+        ('Float16Array',      'e', 2),
         ('Float32Array',      'f', 4),
         ('Float64Array',      'd', 8),
         ('BigInt64Array',     'q', 8),
@@ -370,6 +381,50 @@ def register_typed_builtins(interp, g, intr):
             lambda tv, a, i, _c=_ctor: _c(UNDEFINED, [JsValue('array', list(a))], i),
             f'{ta_name}.of',
         )
+        # ES2025: Uint8Array-specific base64 and hex static methods
+        if ta_name == 'Uint8Array':
+            import base64 as _base64_mod
+            def _from_base64(tv, args, intp):
+                s = intp._to_str(args[0]) if args else ''
+                opts = args[1] if len(args) > 1 and args[1].type == 'object' else None
+                alphabet = intp._to_str(opts.value.get('alphabet', UNDEFINED)) if opts and opts.value.get('alphabet') else 'base64'
+                try:
+                    if alphabet == 'base64url':
+                        raw = _base64_mod.urlsafe_b64decode(s + '==')
+                    else:
+                        raw = _base64_mod.b64decode(s + '==')
+                except Exception as e:
+                    raise _JSError(intp._make_js_error('SyntaxError', f'Invalid base64: {e}'))
+                ba = bytearray(raw)
+                return JsValue('object', {
+                    '__type__': py_to_js('TypedArray'),
+                    '__name__': 'Uint8Array',
+                    '__bytes__': ba,
+                    '__fmt__': 'B',
+                    '__itemsize__': 1,
+                    '__byteoffset__': 0,
+                    '__length__': len(ba),
+                })
+            def _from_hex(tv, args, intp):
+                s = intp._to_str(args[0]) if args else ''
+                s = s.strip()
+                if len(s) % 2 != 0:
+                    raise _JSError(intp._make_js_error('SyntaxError', 'Odd-length hex string'))
+                try:
+                    ba = bytearray.fromhex(s)
+                except ValueError as e:
+                    raise _JSError(intp._make_js_error('SyntaxError', f'Invalid hex: {e}'))
+                return JsValue('object', {
+                    '__type__': py_to_js('TypedArray'),
+                    '__name__': 'Uint8Array',
+                    '__bytes__': ba,
+                    '__fmt__': 'B',
+                    '__itemsize__': 1,
+                    '__byteoffset__': 0,
+                    '__length__': len(ba),
+                })
+            ta_ctor.value['fromBase64'] = interp._make_intrinsic(_from_base64, 'Uint8Array.fromBase64')
+            ta_ctor.value['fromHex'] = interp._make_intrinsic(_from_hex, 'Uint8Array.fromHex')
         return ta_ctor
 
     for _ta_name, _ta_fmt, _ta_itemsize in _TA_SPECS:
