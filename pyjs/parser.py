@@ -20,8 +20,9 @@ class N:
     VarDecl        = lambda kind,decls:     N._n("VariableDeclaration", kind=kind, declarations=decls)
     VarDeclarator  = lambda id,init=None,line=0: N._n("VariableDeclarator", id=id, init=init, line=line)
     FnDecl         = lambda name,params,body,async_=False,generator_=False: N._n("FunctionDeclaration", id=name, params=params, body=body, async_=async_, generator_=generator_)
-    ClassDecl      = lambda name,super_,body: N._n("ClassDeclaration", id=name, superClass=super_, body=body)
-    ClassField     = lambda key, value, static_=False: N._n("ClassField", key=key, value=value, static_=static_)
+    ClassDecl      = lambda name,super_,body,decorators=None: N._n("ClassDeclaration", id=name, superClass=super_, body=body, decorators=decorators or [])
+    ClassField     = lambda key, value, static_=False, decorators=None: N._n("ClassField", key=key, value=value, static_=static_, decorators=decorators or [])
+    Decorator      = lambda expr: N._n("Decorator", expression=expr)
     StaticBlock    = lambda body: N._n("StaticBlock", body=body)
     RetStmt        = lambda arg=None:       N._n("ReturnStatement", argument=arg)
     ThrowStmt      = lambda arg:            N._n("ThrowStatement", argument=arg)
@@ -238,6 +239,14 @@ class Parser:
         if t == 'ASYNC' and self._peek().type == 'FUNCTION':
             return self._fn_decl(async_=True)
         if t == 'FUNCTION':                   return self._fn_decl()
+        if t == 'AT':
+            decorators = []
+            while self._check('AT'):
+                self._advance()
+                decorators.append(self._parse_decorator_expr())
+            if self._check('CLASS'):
+                return self._class_decl(decorators=decorators)
+            raise SyntaxError("Decorators can only be applied to class declarations")
         if t == 'CLASS':                      return self._class_decl()
         if t == 'IMPORT':                     return self._import_decl()
         if t == 'EXPORT':                     return self._export_decl()
@@ -466,7 +475,108 @@ class Parser:
         self._expect('RPAREN')
         return params, self._block()
 
-    def _class_decl(self):
+    def _parse_decorator_expr(self):
+        """Parse @expr — supports @ident, @ident.prop, @ident.prop(args)"""
+        expr = N.Id(self._expect('IDENTIFIER').value)
+        while self._check('DOT'):
+            self._advance()
+            prop = self._consume_identifier_name()
+            expr = N.MemberExpr(expr, N.Id(prop), False)
+        if self._check('LPAREN'):
+            self._advance()
+            args = []
+            while not self._check('RPAREN') and not self._check('EOF'):
+                if self._check('ELLIPSIS'):
+                    self._advance(); args.append(N.SpreadExpr(self._assign()))
+                else:
+                    args.append(self._assign())
+                if not self._optional('COMMA'): break
+            self._expect('RPAREN')
+            expr = N.CallExpr(expr, args)
+        return N.Decorator(expr)
+
+    def _class_expr(self):
+        """Parse a class expression (anonymous or named), used when 'class' appears in expression position."""
+        self._advance()  # consume 'class'
+        name = None
+        if self._check('IDENTIFIER'):
+            name = self._advance().value
+        super_ = None
+        if self._check('EXTENDS'):
+            self._advance()
+            # super class can be any left-hand-side expression
+            super_expr = self._primary()
+            while self._check('DOT') or self._check('LBRACKET'):
+                if self._check('DOT'):
+                    self._advance()
+                    prop = self._consume_identifier_name()
+                    super_expr = N.MemberExpr(super_expr, N.Id(prop), False)
+                else:
+                    self._advance()
+                    prop = self._assign()
+                    self._expect('RBRACKET')
+                    super_expr = N.MemberExpr(super_expr, prop, True)
+            super_ = super_expr
+        self._expect('LBRACE')
+        members = []
+        while not self._check('RBRACE') and not self._check('EOF'):
+            while self._optional('SEMICOLON'):
+                pass
+            if self._check('RBRACE'): break
+            member_decorators = []
+            while self._check('AT'):
+                self._advance()
+                member_decorators.append(self._parse_decorator_expr())
+            static = bool(self._optional('STATIC'))
+            if static and self._check('LBRACE'):
+                body = self._block()
+                members.append(N.StaticBlock(body))
+                continue
+            is_async = bool(self._optional('ASYNC'))
+            kind = 'method'
+            if self._check('IDENTIFIER') and self._cur().value in ('get', 'set'):
+                next_tok = self._peek()
+                if next_tok.type in IDENTIFIER_NAME_TOKENS or next_tok.type in ('STRING', 'NUMBER', 'PRIVATE_NAME'):
+                    kind = self._advance().value
+            generator = self._optional('STAR') is not None
+            computed = False
+            computed_key_node = None
+            if self._check('PRIVATE_NAME'):
+                key = self._advance().value
+            elif self._check('STRING', 'NUMBER'):
+                key = self._advance().value
+            elif self._check('LBRACKET'):
+                self._advance()
+                computed_key_node = self._assign()
+                self._expect('RBRACKET')
+                key = '__computed__'
+                computed = True
+            else:
+                key = self._consume_identifier_name()
+            is_field = kind == 'method' and not generator and not is_async and not self._check('LPAREN') and not computed
+            if is_field:
+                value = None
+                if self._optional('ASSIGN'):
+                    value = self._assign()
+                self._optional('SEMICOLON')
+                members.append(N.ClassField(key, value, static, decorators=member_decorators))
+            else:
+                self._expect('LPAREN')
+                params = []
+                if not self._check('RPAREN'):
+                    while True:
+                        if self._check('ELLIPSIS'):
+                            self._advance(); params.append({'type':'RestElement','argument':self._binding_target()}); break
+                        params.append(self._binding_element())
+                        if not self._optional('COMMA'): break
+                self._expect('RPAREN')
+                body = self._block()
+                members.append({'key':key,'params':params,'body':body,'static':static,'kind':kind,'async':is_async,'generator':generator,'computed':computed,'computed_key':computed_key_node,'decorators':member_decorators})
+        self._expect('RBRACE')
+        # Treat as ClassDeclaration with optional name; runtime handles both
+        return N.ClassDecl(name or '<anonymous>', super_, members, decorators=[])
+
+    def _class_decl(self, decorators=None):
         if _log.isEnabledFor(TRACE):
             _log.log(TRACE, "node ClassDeclaration")
         self._advance()
@@ -481,6 +591,10 @@ class Parser:
             while self._optional('SEMICOLON'):
                 pass
             if self._check('RBRACE'): break
+            member_decorators = []
+            while self._check('AT'):
+                self._advance()
+                member_decorators.append(self._parse_decorator_expr())
             static = bool(self._optional('STATIC'))
             # static block: static { ... }
             if static and self._check('LBRACE'):
@@ -517,7 +631,7 @@ class Parser:
                 if self._optional('ASSIGN'):
                     value = self._assign()
                 self._optional('SEMICOLON')
-                members.append(N.ClassField(key, value, static))
+                members.append(N.ClassField(key, value, static, decorators=member_decorators))
             else:
                 self._expect('LPAREN')
                 params = []
@@ -529,9 +643,9 @@ class Parser:
                         if not self._optional('COMMA'): break
                 self._expect('RPAREN')
                 body = self._block()
-                members.append({'key':key,'params':params,'body':body,'static':static,'kind':kind,'async':is_async,'generator':generator,'computed':computed,'computed_key':computed_key_node})
+                members.append({'key':key,'params':params,'body':body,'static':static,'kind':kind,'async':is_async,'generator':generator,'computed':computed,'computed_key':computed_key_node,'decorators':member_decorators})
         self._expect('RBRACE')
-        return N.ClassDecl(name, super_, members)
+        return N.ClassDecl(name, super_, members, decorators=decorators or [])
 
     def _import_decl(self):
         self._expect('IMPORT')
@@ -999,6 +1113,10 @@ class Parser:
                 self._expect('RPAREN')
                 return {'type': 'DynamicImport', 'source': src}
             raise SyntaxError(f"Line {t.line}:{t.col} — unexpected token after import")
+
+        # class expression
+        if t.type == 'CLASS':
+            return self._class_expr()
 
         raise SyntaxError(f"Line {t.line}:{t.col} — unexpected token {t.type} {t.value!r}")
 

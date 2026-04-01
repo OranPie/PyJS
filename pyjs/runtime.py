@@ -2646,7 +2646,12 @@ class Interpreter:
     def _exec_class_declaration(self, node, env):
         cname = node["id"]
         super_name = node.get("superClass")
-        parent_class = env.get(super_name) if super_name else None
+        if isinstance(super_name, str):
+            parent_class = env.get(super_name) if super_name else None
+        elif isinstance(super_name, dict):
+            parent_class = self._eval(super_name, env)
+        else:
+            parent_class = None
         methods = node["body"]
         proto = JsValue("object", {})
         if isinstance(parent_class, JsValue):
@@ -2721,6 +2726,81 @@ class Interpreter:
             ctor.value[sf["key"]] = sf_val
         if instance_fields:
             ctor.value["__instance_fields__"] = instance_fields
+
+        # Apply member (method/field) decorators
+        proto = ctor.value.get("prototype")
+        class_initializers = []
+        for member in node["body"]:
+            member_decs = member.get("decorators", []) if isinstance(member, dict) else []
+            if not member_decs:
+                continue
+            mtype = member.get("type") if isinstance(member, dict) else None
+            if mtype == "ClassField":
+                key = member["key"]
+                is_static = member.get("static_", False)
+                for dec_node in reversed(member_decs):
+                    dec_fn = self._eval(dec_node["expression"], env)
+                    inits = []
+                    ctx = JsValue('object', {
+                        'kind': JsValue('string', 'field'),
+                        'name': JsValue('string', str(key)),
+                        'static': JS_TRUE if is_static else JS_FALSE,
+                        'addInitializer': self._make_intrinsic(
+                            lambda tv, a, i, _l=inits: _l.append(a[0] if a else UNDEFINED) or UNDEFINED,
+                            'addInitializer'),
+                    })
+                    self._call_js(dec_fn, [UNDEFINED, ctx], UNDEFINED)
+                    class_initializers.extend(inits)
+            else:
+                # method decorator
+                key = member.get("key", "")
+                is_static = member.get("static", False)
+                if is_static:
+                    method_val = ctor.value.get(key, UNDEFINED)
+                else:
+                    method_val = proto.value.get(key, UNDEFINED) if proto and proto.type == 'object' else UNDEFINED
+                for dec_node in reversed(member_decs):
+                    dec_fn = self._eval(dec_node["expression"], env)
+                    inits = []
+                    ctx = JsValue('object', {
+                        'kind': JsValue('string', 'method'),
+                        'name': JsValue('string', str(key)),
+                        'static': JS_TRUE if is_static else JS_FALSE,
+                        'addInitializer': self._make_intrinsic(
+                            lambda tv, a, i, _l=inits: _l.append(a[0] if a else UNDEFINED) or UNDEFINED,
+                            'addInitializer'),
+                    })
+                    result = self._call_js(dec_fn, [method_val, ctx], UNDEFINED)
+                    if result.type not in ('undefined', 'null'):
+                        method_val = result
+                        if is_static:
+                            ctor.value[key] = method_val
+                        elif proto and proto.type == 'object':
+                            proto.value[key] = method_val
+                    class_initializers.extend(inits)
+
+        # Apply class-level decorators (outermost last → applied in reverse)
+        class_decs = node.get("decorators", [])
+        for dec_node in reversed(class_decs):
+            dec_fn = self._eval(dec_node["expression"], env)
+            inits = []
+            ctx = JsValue('object', {
+                'kind': JsValue('string', 'class'),
+                'name': JsValue('string', cname),
+                'addInitializer': self._make_intrinsic(
+                    lambda tv, a, i, _l=inits: _l.append(a[0] if a else UNDEFINED) or UNDEFINED,
+                    'addInitializer'),
+            })
+            result = self._call_js(dec_fn, [ctor, ctx], UNDEFINED)
+            if result.type not in ('undefined', 'null'):
+                ctor = result
+            class_initializers.extend(inits)
+
+        # Run class-level initializers
+        for init_fn in class_initializers:
+            if init_fn.type in ('function', 'intrinsic'):
+                self._call_js(init_fn, [ctor], ctor)
+
         # Declare the class binding BEFORE running static blocks so static
         # initializers can reference the class by name (e.g. C.value = 100).
         env.declare(cname, ctor, 'let')
@@ -3365,6 +3445,16 @@ class Interpreter:
     def _eval_function_expression(self, node, env):
         return self._make_fn(node, env)
 
+    def _eval_class_expression(self, node, env):
+        """Evaluate a class in expression position (anonymous or named class expression)."""
+        child_env = Environment(env)
+        self._exec_class_declaration(node, child_env)
+        cname = node.get("id") or '<anonymous>'
+        try:
+            return child_env.get(cname)
+        except Exception:
+            return UNDEFINED
+
     def _eval_unary_expression(self, node, env):
         arg = self._eval(node["argument"], env)
         op = node["operator"]
@@ -3790,6 +3880,7 @@ class Interpreter:
             'ImportMeta': self._eval_import_meta,
             'YieldExpression': self._eval_yield_expression,
             'DynamicImport': self._eval_dynamic_import,
+            'ClassDeclaration': self._eval_class_expression,
         }
 
     def _eval(self, node, env=None):
@@ -3950,6 +4041,160 @@ class Interpreter:
 
         return iter_obj
 
+    def _drain_async_iter(self, gen_obj):
+        """Drain an async iterator to a Python list of JsValues."""
+        items = []
+        while True:
+            next_fn = gen_obj.value.get('next')
+            if next_fn is None:
+                break
+            promise = self._call_js(next_fn, [], gen_obj)
+            if not self._run_event_loop(promise):
+                break
+            if promise.type == 'promise' and promise.value.get('state') == 'rejected':
+                raise _JSError(promise.value['value'])
+            result = promise.value.get('value', UNDEFINED) if promise.type == 'promise' else promise
+            if result.type == 'object' and result.value.get('done', JS_FALSE).value is True:
+                break
+            val = result.value.get('value', UNDEFINED) if result.type == 'object' else result
+            items.append(val)
+        return items
+
+    def _make_async_list_iter(self, items):
+        """Create an async iterator object from a Python list of JsValues."""
+        idx = [0]
+        gen_obj = JsValue('object', {})
+        def _next(tv, a, intp):
+            if idx[0] >= len(items):
+                return self._resolved_promise(JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE}))
+            val = items[idx[0]]; idx[0] += 1
+            return self._resolved_promise(JsValue('object', {'value': val, 'done': JS_FALSE}))
+        gen_obj.value['next'] = self._make_intrinsic(_next, 'AsyncIterator.next')
+        sym_async_iter_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+        gen_obj.value[sym_async_iter_key] = self._make_intrinsic(lambda tv, a, i: gen_obj, '[Symbol.asyncIterator]')
+        self._add_async_iterator_helpers(gen_obj)
+        return gen_obj
+
+    def _add_async_iterator_helpers(self, gen_obj):
+        """Add async iterator helper methods to an async iterator object in-place."""
+
+        def _make_intr(fn, name):
+            return self._make_intrinsic(lambda tv, args, interp: fn(args, interp), name)
+
+        def _await_val(val):
+            if val.type == 'promise':
+                if not self._run_event_loop(val):
+                    raise _JSError(py_to_js('Promise did not settle'))
+                if val.value.get('state') == 'rejected':
+                    raise _JSError(val.value['value'])
+                return val.value.get('value', UNDEFINED)
+            return val
+
+        def _map(args, interp):
+            fn = args[0] if args else UNDEFINED
+            items = self._drain_async_iter(gen_obj)
+            mapped = [_await_val(self._call_js(fn, [el, py_to_js(i)], None)) for i, el in enumerate(items)]
+            return self._make_async_list_iter(mapped)
+
+        def _filter(args, interp):
+            fn = args[0] if args else UNDEFINED
+            items = self._drain_async_iter(gen_obj)
+            filtered = [el for i, el in enumerate(items)
+                        if self._truthy(_await_val(self._call_js(fn, [el, py_to_js(i)], None)))]
+            return self._make_async_list_iter(filtered)
+
+        def _take(args, interp):
+            n = int(self._to_num(args[0])) if args else 0
+            items = self._drain_async_iter(gen_obj)
+            return self._make_async_list_iter(items[:n])
+
+        def _drop(args, interp):
+            n = int(self._to_num(args[0])) if args else 0
+            items = self._drain_async_iter(gen_obj)
+            return self._make_async_list_iter(items[n:])
+
+        def _flat_map(args, interp):
+            fn = args[0] if args else UNDEFINED
+            items = self._drain_async_iter(gen_obj)
+            result = []
+            for i, el in enumerate(items):
+                mapped = _await_val(self._call_js(fn, [el, py_to_js(i)], None))
+                async_iter_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+                if mapped.type == 'object' and async_iter_key in mapped.value:
+                    result.extend(self._drain_async_iter(mapped))
+                else:
+                    sub_it = self._get_js_iterator(mapped)
+                    if sub_it is not None:
+                        while True:
+                            r = sub_it()
+                            if r.type == 'object' and r.value.get('done', JS_FALSE).value is True:
+                                break
+                            result.append(r.value.get('value', UNDEFINED) if r.type == 'object' else r)
+                    else:
+                        result.append(mapped)
+            return self._make_async_list_iter(result)
+
+        def _to_array(args, interp):
+            items = self._drain_async_iter(gen_obj)
+            return self._resolved_promise(JsValue('array', items))
+
+        def _for_each(args, interp):
+            fn = args[0] if args else UNDEFINED
+            for i, el in enumerate(self._drain_async_iter(gen_obj)):
+                _await_val(self._call_js(fn, [el, py_to_js(i)], None))
+            return self._resolved_promise(UNDEFINED)
+
+        def _some(args, interp):
+            fn = args[0] if args else UNDEFINED
+            for i, el in enumerate(self._drain_async_iter(gen_obj)):
+                if self._truthy(_await_val(self._call_js(fn, [el, py_to_js(i)], None))):
+                    return self._resolved_promise(JS_TRUE)
+            return self._resolved_promise(JS_FALSE)
+
+        def _every(args, interp):
+            fn = args[0] if args else UNDEFINED
+            for i, el in enumerate(self._drain_async_iter(gen_obj)):
+                if not self._truthy(_await_val(self._call_js(fn, [el, py_to_js(i)], None))):
+                    return self._resolved_promise(JS_FALSE)
+            return self._resolved_promise(JS_TRUE)
+
+        def _find(args, interp):
+            fn = args[0] if args else UNDEFINED
+            for i, el in enumerate(self._drain_async_iter(gen_obj)):
+                if self._truthy(_await_val(self._call_js(fn, [el, py_to_js(i)], None))):
+                    return self._resolved_promise(el)
+            return self._resolved_promise(UNDEFINED)
+
+        def _reduce(args, interp):
+            fn = args[0] if args else UNDEFINED
+            items = self._drain_async_iter(gen_obj)
+            if not items:
+                return self._resolved_promise(args[1] if len(args) > 1 else UNDEFINED)
+            acc = args[1] if len(args) > 1 else items[0]
+            start = 0 if len(args) > 1 else 1
+            for el in items[start:]:
+                acc = _await_val(self._call_js(fn, [acc, el], None))
+            return self._resolved_promise(acc)
+
+        gen_obj.value['map'] = _make_intr(_map, 'AsyncIterator.map')
+        gen_obj.value['filter'] = _make_intr(_filter, 'AsyncIterator.filter')
+        gen_obj.value['take'] = _make_intr(_take, 'AsyncIterator.take')
+        gen_obj.value['drop'] = _make_intr(_drop, 'AsyncIterator.drop')
+        gen_obj.value['flatMap'] = _make_intr(_flat_map, 'AsyncIterator.flatMap')
+        gen_obj.value['toArray'] = _make_intr(_to_array, 'AsyncIterator.toArray')
+        gen_obj.value['forEach'] = _make_intr(_for_each, 'AsyncIterator.forEach')
+        gen_obj.value['some'] = _make_intr(_some, 'AsyncIterator.some')
+        gen_obj.value['every'] = _make_intr(_every, 'AsyncIterator.every')
+        gen_obj.value['find'] = _make_intr(_find, 'AsyncIterator.find')
+        gen_obj.value['reduce'] = _make_intr(_reduce, 'AsyncIterator.reduce')
+
+        sym_async_iter_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+        if sym_async_iter_key not in gen_obj.value:
+            gen_obj.value[sym_async_iter_key] = self._make_intrinsic(
+                lambda tv, a, i: gen_obj, '[Symbol.asyncIterator]')
+
+        return gen_obj
+
     def _make_generator_obj(self, fn_val, args):
         gen = JsGenerator(fn_val, args, self)
         sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
@@ -3990,6 +4235,7 @@ class Interpreter:
             'throw':  self._make_intrinsic(lambda tv, a, i: gen.js_throw(a[0] if a else UNDEFINED), 'AsyncGenerator.throw'),
         })
         gen_obj.value[sym_async_iter_key] = self._make_intrinsic(lambda tv, a, i: gen_obj, '[Symbol.asyncIterator]')
+        self._add_async_iterator_helpers(gen_obj)
         return gen_obj
 
     def _call_js(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):

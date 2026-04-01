@@ -2739,5 +2739,121 @@ console.log(e === "\u{e9}");
         self.assertIn('ABC', result)
 
 
+    def test_async_iterator_map(self):
+        src = '''
+async function* nums() { yield 1; yield 2; yield 3; }
+async function main() {
+    const result = await nums().map(x => x * 2).toArray();
+    console.log(result.join(','));
+}
+main();
+'''
+        result = Interpreter().run(src)
+        self.assertEqual(result, '2,4,6')
+
+    def test_async_iterator_filter(self):
+        src = '''
+async function* nums() { yield 1; yield 2; yield 3; yield 4; }
+async function main() {
+    const result = await nums().filter(x => x % 2 === 0).toArray();
+    console.log(result.join(','));
+}
+main();
+'''
+        result = Interpreter().run(src)
+        self.assertEqual(result, '2,4')
+
+    def test_async_iterator_take(self):
+        src = '''
+async function* nums() { yield 10; yield 20; yield 30; yield 40; }
+async function main() {
+    const result = await nums().take(2).toArray();
+    console.log(result.join(','));
+}
+main();
+'''
+        result = Interpreter().run(src)
+        self.assertEqual(result, '10,20')
+
+    def test_class_decorator(self):
+        src = '''
+function addGreeting(cls) {
+    cls.prototype.greet = function() { return "Hello!"; };
+    return cls;
+}
+@addGreeting
+class Person {
+    constructor(name) { this.name = name; }
+}
+const p = new Person("Alice");
+console.log(p.greet());
+'''
+        result = Interpreter().run(src)
+        self.assertEqual(result, 'Hello!')
+
+    def test_method_decorator(self):
+        src = '''
+function readonly(fn, ctx) {
+    return function(...args) {
+        return "readonly: " + fn.apply(this, args);
+    };
+}
+class Greeter {
+    @readonly
+    greet() { return "hello"; }
+}
+const g = new Greeter();
+console.log(g.greet());
+'''
+        result = Interpreter().run(src)
+        self.assertEqual(result, 'readonly: hello')
+
+    def test_field_decorator(self):
+        src = '''
+let decorated = false;
+function mark(val, ctx) {
+    decorated = true;
+}
+class C {
+    @mark
+    x = 42;
+}
+console.log(decorated);
+'''
+        result = Interpreter().run(src)
+        self.assertEqual(result, 'true')
+
+    def test_decorator_with_args(self):
+        src = '''
+function prefix(str) {
+    return function(fn, ctx) {
+        return function(...args) { return str + fn.apply(this, args); };
+    };
+}
+class Greeter {
+    @prefix("Hi: ")
+    greet() { return "world"; }
+}
+const g = new Greeter();
+console.log(g.greet());
+'''
+        result = Interpreter().run(src)
+        self.assertEqual(result, 'Hi: world')
+
+    def test_class_decorator_replaces_class(self):
+        src = '''
+function addId(cls) {
+    return class extends cls {
+        get id() { return "decorated"; }
+    };
+}
+@addId
+class Base {}
+const b = new Base();
+console.log(b.id);
+'''
+        result = Interpreter().run(src)
+        self.assertEqual(result, 'decorated')
+
 if __name__ == '__main__':
     unittest.main()

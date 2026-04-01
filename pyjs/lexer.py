@@ -378,4 +378,6 @@ class Lexer:
                 else:
                     toks.append(self._mk('BIT_OR','|',sc,sl))
                 continue
+            if c == '@':
+                toks.append(self._mk('AT', '@', sc, sl)); continue
             toks.append(self._mk('UNKNOWN', c, sc, sl))
