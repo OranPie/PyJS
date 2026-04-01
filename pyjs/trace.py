@@ -103,6 +103,10 @@ class _LoggerNameFilter(logging.Filter):
 # Module-level depth tracker (shared across all loggers)
 _depth_filter = _DepthFilter()
 
+# Fast logging gate — True when DEBUG or finer logging is active.
+# Mutable list so import sites get a live reference.
+_any_enabled: list = [False]
+
 
 def get_depth() -> int:
     """Return current call depth for indentation."""
@@ -152,6 +156,8 @@ def configure(
     else:
         numeric = getattr(logging, level_upper, logging.WARNING)
 
+    _any_enabled[0] = (numeric <= logging.DEBUG)
+
     # Resolve filter
     if log_filter is None:
         log_filter = os.environ.get("PYJS_LOG_FILTER", "")
@@ -188,6 +194,7 @@ def reconfigure(
     root = logging.getLogger("pyjs")
     root.handlers.clear()
     _CONFIGURED = False
+    _any_enabled[0] = False
     configure(level, log_filter, verbose)
 
 

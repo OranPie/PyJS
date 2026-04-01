@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .core import JSTypeError
-from .trace import get_logger, TRACE
+from .trace import get_logger, TRACE, _any_enabled as _TRACE_ACTIVE
 from .values import JsValue, UNDEFINED
 
 _log = get_logger("scope")
@@ -30,29 +30,31 @@ class Environment:
         if parent is None:
             _log.info("scope create (global)")
         else:
-            _log.log(TRACE, "scope create (child)")
+            if _TRACE_ACTIVE[0]:
+                _log.log(TRACE, "scope create (child)")
 
     def declare(self, name, value, keyword='var'):
-        _log.debug("declare %s %s", keyword, name)
+        if _TRACE_ACTIVE[0]:
+            _log.debug("declare %s %s", keyword, name)
         if keyword == 'const':
             if name in self.bindings:
                 if self.bindings[name][1] is not _TDZ_SENTINEL:
                     raise JSTypeError(f"Identifier '{name}' has already been declared")
-            self.bindings[name] = ('const', value)
+            self.bindings[name] = ['const', value]
         elif keyword == 'let':
             if name in self.bindings:
                 if self.bindings[name][1] is not _TDZ_SENTINEL:
                     raise JSTypeError(f"Identifier '{name}' has already been declared")
-            self.bindings[name] = ('let', value)
+            self.bindings[name] = ['let', value]
         else:  # var — hoist to nearest function/program scope
             target = self
             while target.parent and not target._is_fn_env:
                 target = target.parent
-            target.bindings[name] = ('var', value)
+            target.bindings[name] = ['var', value]
 
     def declare_tdz(self, name, keyword='let'):
         """Declare a let/const binding in TDZ (uninitialized)."""
-        self.bindings[name] = (keyword, _TDZ_SENTINEL)
+        self.bindings[name] = [keyword, _TDZ_SENTINEL]
 
     def has(self, name):
         if name in self.bindings: return True
@@ -66,29 +68,36 @@ class Environment:
         return None
 
     def get(self, name):
-        if _log.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log.log(TRACE, "get %s", name)
-        e = self._find(name)
-        if not e:
-            raise ReferenceError(f"{name} is not defined")
-        val = e.bindings[name][1]
-        if val is _TDZ_SENTINEL:
-            raise ReferenceError(f"Cannot access '{name}' before initialization")
-        return val
+        e = self
+        while e is not None:
+            b = e.bindings.get(name)
+            if b is not None:
+                if b[1] is _TDZ_SENTINEL:
+                    raise ReferenceError(f"Cannot access '{name}' before initialization")
+                return b[1]
+            e = e.parent
+        raise ReferenceError(f"{name} is not defined")
 
     def set(self, name, value):
-        if _log.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log.log(TRACE, "set %s", name)
-        e = self._find(name)
-        if not e:
-            raise ReferenceError(f"{name} is not defined")
-        if e.bindings[name][0] == 'const' and e.bindings[name][1] is not _TDZ_SENTINEL:
-            raise JSTypeError(f"Assignment to constant variable '{name}'")
-        e.bindings[name] = (e.bindings[name][0], value)
+        e = self
+        while e is not None:
+            b = e.bindings.get(name)
+            if b is not None:
+                if b[0] == 'const' and b[1] is not _TDZ_SENTINEL:
+                    raise JSTypeError(f"Assignment to constant variable '{name}'")
+                b[1] = value
+                return
+            e = e.parent
+        raise ReferenceError(f"{name} is not defined")
 
     def set_own(self, name, value):
-        if name not in self.bindings:
+        b = self.bindings.get(name)
+        if b is None:
             raise ReferenceError(f"{name} is not defined")
-        if self.bindings[name][0] == 'const' and self.bindings[name][1] is not _TDZ_SENTINEL:
+        if b[0] == 'const' and b[1] is not _TDZ_SENTINEL:
             raise JSTypeError(f"Assignment to constant variable '{name}'")
-        self.bindings[name] = (self.bindings[name][0], value)
+        b[1] = value

@@ -22,7 +22,7 @@ from .core import JSTypeError, js_to_py, py_to_js
 from .plugin import PyJSPlugin, PluginContext
 from .lexer import Lexer
 from .parser import N, Parser
-from .trace import configure as _configure_trace, get_logger, push_depth, pop_depth, TRACE
+from .trace import configure as _configure_trace, get_logger, push_depth, pop_depth, TRACE, _any_enabled as _TRACE_ACTIVE
 from .values import (
     JsValue, JsProxy, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE,
     SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
@@ -636,51 +636,28 @@ class Interpreter:
         return err
 
     # --------------------------------------------------------- coercion helpers
-    _TRUTHY_MAP = {
-        'undefined': lambda v: False,
-        'null': lambda v: False,
-        'boolean': lambda v: v.value,
-        'number': lambda v: v.value != 0 and not (isinstance(v.value, float) and v.value != v.value),
-        'bigint': lambda v: v.value != 0,
-        'string': lambda v: len(v.value) > 0,
-    }
 
     def _truthy(self, v: JsValue) -> bool:
-        handler = self._TRUTHY_MAP.get(v.type)
-        if handler:
-            result = handler(v)
-            if _log_coerce.isEnabledFor(TRACE):
-                _log_coerce.log(TRACE, "truthy(%s) → %s", v.type, result)
-            return result
-        if _log_coerce.isEnabledFor(TRACE):
-            _log_coerce.log(TRACE, "truthy(%s) → True", v.type)
+        t = v.type
+        if t == 'boolean': return v.value
+        if t == 'number': return v.value != 0 and not (isinstance(v.value, float) and v.value != v.value)
+        if t == 'string': return len(v.value) > 0
+        if t == 'undefined' or t == 'null': return False
+        if t == 'bigint': return v.value != 0
         return True  # objects, arrays, functions are truthy
 
-    _TO_NUM_MAP = {
-        'number': lambda v: v.value,
-        'bigint': lambda v: float(v.value),
-        'boolean': lambda v: 1.0 if v.value else 0.0,
-        'null': lambda v: 0.0,
-        'undefined': lambda v: float('nan'),
-    }
-
     def _to_num(self, v: JsValue) -> float:
-        handler = self._TO_NUM_MAP.get(v.type)
-        if handler:
-            result = handler(v)
-            if _log_coerce.isEnabledFor(TRACE):
-                _log_coerce.log(TRACE, "toNumber(%s) → %s", v.type, result)
-            return result
-        if v.type == 'string':
+        t = v.type
+        if t == 'number': return v.value
+        if t == 'boolean': return 1.0 if v.value else 0.0
+        if t == 'null': return 0.0
+        if t == 'undefined': return float('nan')
+        if t == 'bigint': return float(v.value)
+        if t == 'string':
             try:
-                result = float(v.value.strip() or 0)
+                return float(v.value.strip() or 0)
             except (ValueError, TypeError, OverflowError):
-                result = float('nan')
-            if _log_coerce.isEnabledFor(TRACE):
-                _log_coerce.log(TRACE, "toNumber(string) → %s", result)
-            return result
-        if _log_coerce.isEnabledFor(TRACE):
-            _log_coerce.log(TRACE, "toNumber(%s) → NaN", v.type)
+                return float('nan')
         return float('nan')
 
     _TO_STR_SIMPLE = {
@@ -2497,8 +2474,36 @@ class Interpreter:
                         block_env.declare_tdz(name.get("name", name), s["kind"])
 
     @staticmethod
+    def _compute_block_scope_info(stmts):
+        """Compute and cache (tdz_entries, needs_env) for a block body.
+        tdz_entries: list of (name, keyword) for let/const declarations.
+        needs_env: True if block needs its own scope (has let/const/using/FunctionDecl).
+        """
+        from .environment import _TDZ_SENTINEL
+        tdz_entries = []
+        needs_env = False
+        for s in stmts:
+            if not isinstance(s, dict):
+                continue
+            stype = s.get("type")
+            if stype == "VariableDeclaration" and s.get("kind") in ("let", "const"):
+                needs_env = True
+                for d in s.get("declarations", []):
+                    name = d.get("id")
+                    if isinstance(name, str):
+                        tdz_entries.append((name, s["kind"]))
+                    elif isinstance(name, dict) and name.get("type") == "Identifier":
+                        tdz_entries.append((name.get("name", "?"), s["kind"]))
+            elif stype in ("FunctionDeclaration", "UsingDeclaration"):
+                needs_env = True
+        return (tdz_entries, needs_env)
+
+    @staticmethod
     def _collect_var_names(node):
         """Recursively collect all var-declared names in a subtree, skipping nested functions."""
+        cached = node.get('__vn__')
+        if cached is not None:
+            return cached
         names = []
         if not isinstance(node, dict):
             return names
@@ -2520,6 +2525,7 @@ class Interpreter:
                         names.extend(Interpreter._collect_var_names(item))
             elif isinstance(child, dict):
                 names.extend(Interpreter._collect_var_names(child))
+        node['__vn__'] = names
         return names
 
     @staticmethod
@@ -2549,7 +2555,7 @@ class Interpreter:
         for s in stmts:
             for name in Interpreter._collect_var_names(s):
                 if name not in fn_env.bindings:
-                    fn_env.bindings[name] = ('var', UNDEFINED)
+                    fn_env.bindings[name] = ['var', UNDEFINED]
 
     @staticmethod
     def _has_use_strict(stmts):
@@ -2581,9 +2587,10 @@ class Interpreter:
                 val = self._eval(d["init"], env)
             _id = d["id"]
             _vname = _id.get("name", "?") if isinstance(_id, dict) and _id.get("type") == "Identifier" else "<pattern>"
-            _log_scope.debug("declare %s %s", node["kind"], _vname)
-            if _log_scope.isEnabledFor(TRACE):
-                _log_scope.log(TRACE, "  %s = %s", _vname, self._to_str(val)[:60])
+            if _TRACE_ACTIVE[0]:
+                _log_scope.debug("declare %s %s", node["kind"], _vname)
+                if _log_scope.isEnabledFor(TRACE):
+                    _log_scope.log(TRACE, "  %s = %s", _vname, self._to_str(val)[:60])
             try:
                 self._bind_pattern(d["id"], val, env, node["kind"], True)
             except JSTypeError as e:
@@ -2814,9 +2821,28 @@ class Interpreter:
         return None
 
     def _exec_block_statement(self, node, env):
+        from .environment import _TDZ_SENTINEL
+        # Get or compute cached block scope info
+        scope_info = node.get('__scope_info__')
+        if scope_info is None:
+            scope_info = Interpreter._compute_block_scope_info(node["body"])
+            node['__scope_info__'] = scope_info
+        tdz_entries, needs_env = scope_info
+
+        if not needs_env:
+            # Fast path: no let/const/using/FunctionDecl — reuse parent env directly
+            for s in node["body"]:
+                r = self._exec(s, env)
+                if r is not None:
+                    return r
+            return None
+
+        # Slow path: needs its own scope
         block_env = Environment(env)
-        _log_scope.log(TRACE, "scope create (block)")
-        self._hoist_tdz(node["body"], block_env)
+        if _TRACE_ACTIVE[0]:
+            _log_scope.log(TRACE, "scope create (block)")
+        for name, keyword in tdz_entries:
+            block_env.bindings[name] = [keyword, _TDZ_SENTINEL]
         exc = None
         result = None
         try:
@@ -2899,7 +2925,8 @@ class Interpreter:
 
     def _exec_for_statement(self, node, env):
         loop_env = Environment(env)
-        _log_scope.log(TRACE, "scope create (for)")
+        if _TRACE_ACTIVE[0]:
+            _log_scope.log(TRACE, "scope create (for)")
         init = node.get("init")
         uses_lex = (init is not None and
                     init.get("type") == "VariableDeclaration" and
@@ -3127,7 +3154,8 @@ class Interpreter:
             if handler:
                 _log_error.debug("catch %s", self._to_str(e.value)[:80])
                 catch_env = Environment(env)
-                _log_scope.log(TRACE, "scope create (catch)")
+                if _TRACE_ACTIVE[0]:
+                    _log_scope.log(TRACE, "scope create (catch)")
                 param = handler.get("param")
                 if param:
                     if isinstance(param, dict) and param.get("type") in ("ObjectPattern", "ArrayPattern"):
@@ -3315,7 +3343,8 @@ class Interpreter:
 
     def _exec(self, node, env=None):
         if env is None: env = self.env
-        _log_exec.debug("exec %s", node["type"])
+        if _TRACE_ACTIVE[0] or (_log_exec.level and _log_exec.level <= 10):
+            _log_exec.debug("exec %s", node["type"])
         handler = self._EXEC_DISPATCH.get(node["type"])
         if handler:
             return handler(node, env)
@@ -3500,6 +3529,31 @@ class Interpreter:
                 if not self._truthy(l): return l
                 return self._eval(node["right"], env)
         r = self._eval(node["right"], env)
+        # Fast path: number op number (the overwhelmingly common case)
+        if l.type == 'number' and r.type == 'number':
+            lv, rv = l.value, r.value
+            if op == '+': return JsValue('number', lv + rv)
+            if op == '-': return JsValue('number', lv - rv)
+            if op == '*': return JsValue('number', lv * rv)
+            if op == '/':
+                if rv == 0:
+                    if lv == 0 or (isinstance(lv, float) and lv != lv):
+                        return JsValue('number', float('nan'))
+                    return JsValue('number', math.copysign(float('inf'), lv))
+                return JsValue('number', lv / rv)
+            if op == '%':
+                if rv == 0 or (isinstance(lv, float) and lv != lv):
+                    return JsValue('number', float('nan'))
+                return JsValue('number', math.fmod(lv, rv))
+            if op == '**': return JsValue('number', lv ** rv)
+            if op == '<':  return JS_TRUE if lv < rv else JS_FALSE
+            if op == '>':  return JS_TRUE if lv > rv else JS_FALSE
+            if op == '<=': return JS_TRUE if lv <= rv else JS_FALSE
+            if op == '>=': return JS_TRUE if lv >= rv else JS_FALSE
+            if op == '===': return JS_TRUE if lv == rv else JS_FALSE
+            if op == '!==': return JS_FALSE if lv == rv else JS_TRUE
+            if op == '==':  return JS_TRUE if lv == rv else JS_FALSE
+            if op == '!=':  return JS_FALSE if lv == rv else JS_TRUE
         if op == "+":
             if l.type == "bigint" and r.type == "bigint":
                 return JsValue("bigint", l.value + r.value)
@@ -3885,7 +3939,8 @@ class Interpreter:
 
     def _eval(self, node, env=None):
         if env is None: env = self.env
-        _log_eval.debug("eval %s", node["type"])
+        if _TRACE_ACTIVE[0] or (_log_eval.level and _log_eval.level <= 10):
+            _log_eval.debug("eval %s", node["type"])
         handler = self._EVAL_DISPATCH.get(node["type"])
         if handler:
             return handler(node, env)
