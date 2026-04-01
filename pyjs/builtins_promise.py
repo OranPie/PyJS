@@ -122,6 +122,7 @@ def register_promise_builtins(interp, g, intr):
     # -- Error constructors --
     _error_names = ('Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError', 'EvalError')
     def _make_error_ctor(err_name):
+        _fn_ref = [None]  # forward reference to the constructor intrinsic
         def _ctor(args, interp):
             msg = args[0] if args else UNDEFINED
             opts = args[1] if len(args) > 1 else UNDEFINED
@@ -141,14 +142,28 @@ def register_promise_builtins(interp, g, intr):
                 'name': py_to_js(err_name),
                 'stack': py_to_js(stack_str),
                 '__error_type__': py_to_js(err_name),
+                'constructor': _fn_ref[0] or UNDEFINED,
             })
             if opts and opts.type == 'object' and 'cause' in opts.value:
                 obj.value['cause'] = opts.value['cause']
             return obj
         fn = intr(_ctor, err_name)
+        _fn_ref[0] = fn  # complete the back-reference
         return fn
     for _ename in _error_names:
         g.declare(_ename, _make_error_ctor(_ename), 'var')
+
+    # -- Error.isError (ES2025 Stage 4) --
+    def _error_is_error(args, interp):
+        val = args[0] if args else UNDEFINED
+        if val.type != 'object' or not isinstance(val.value, dict):
+            return JS_FALSE
+        if '__error_type__' in val.value:
+            return JS_TRUE
+        return JS_FALSE
+    _error_ctor = g.get('Error')
+    if isinstance(_error_ctor, JsValue):
+        _error_ctor.value['isError'] = intr(_error_is_error, 'Error.isError')
 
     # -- AggregateError constructor --
     def _agg_error_ctor(args, interp):
@@ -162,6 +177,12 @@ def register_promise_builtins(interp, g, intr):
             '__error_type__': py_to_js('AggregateError'),
         })
     g.declare('AggregateError', intr(_agg_error_ctor, 'AggregateError'), 'var')
+
+    # -- eval throws EvalError (not supported) --
+    def _eval_fn(args, interp):
+        raise _JSError(interp._make_js_error('EvalError', 'eval is not supported'))
+    g.declare('eval', intr(_eval_fn, 'eval'), 'var')
+
     _log.info("registered promise builtins")
 
 

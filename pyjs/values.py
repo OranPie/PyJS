@@ -47,6 +47,8 @@ SYMBOL_REPLACE            = 8
 SYMBOL_SPLIT              = 9
 SYMBOL_SEARCH             = 10
 SYMBOL_IS_CONCAT_SPREADABLE = 11
+SYMBOL_DISPOSE            = 12
+SYMBOL_ASYNC_DISPOSE      = 13
 
 _symbol_id_counter = [11]  # incremented for each new Symbol()
 _symbol_registry   = {}    # for Symbol.for()

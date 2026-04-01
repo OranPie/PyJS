@@ -224,6 +224,22 @@ def register_core_builtins(interp, g, intr):
             return JsValue("number", -((-x) ** (1.0/3.0)))
         return JsValue("number", x ** (1.0/3.0))
     math_obj.value['cbrt'] = intr(_math_cbrt, 'cbrt')
+    def _math_sum_precise(args, interp):
+        if not args:
+            raise _JSError(interp._make_js_error('TypeError', 'Math.sumPrecise requires an iterable'))
+        iterable = args[0]
+        # Collect items using Array.from-like iteration
+        arr_ctor = interp.genv.get('Array') if hasattr(interp, 'genv') else None
+        if arr_ctor is not None:
+            arr = interp._call_js(arr_ctor.value.get('from', UNDEFINED), [iterable], UNDEFINED)
+            if arr.type == 'array':
+                nums = [interp._to_num(v) for v in arr.value]
+                return JsValue('number', math.fsum(nums))
+        if iterable.type == 'array':
+            nums = [interp._to_num(v) for v in iterable.value]
+            return JsValue('number', math.fsum(nums))
+        raise _JSError(interp._make_js_error('TypeError', 'Math.sumPrecise: argument must be iterable'))
+    math_obj.value['sumPrecise'] = intr(_math_sum_precise, 'sumPrecise')
     g.declare('Math', math_obj, 'var')
 
     # -- JSON --

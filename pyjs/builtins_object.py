@@ -159,7 +159,13 @@ def register_object_builtins(interp, g, intr):
         return JS_TRUE if interp._strict_eq(a, b) else JS_FALSE
 
     obj_ctor.value['is'] = intr(_obj_is, 'Object.is')
-    obj_ctor.value['getPrototypeOf'] = intr(lambda a, i: i._get_proto(a[0]) if a else UNDEFINED, 'Object.getPrototypeOf')
+
+    def _obj_get_prototype_of(args, interp):
+        if not args: return UNDEFINED
+        proto = interp._get_proto(args[0])
+        return proto if proto is not None else JS_NULL
+
+    obj_ctor.value['getPrototypeOf'] = intr(_obj_get_prototype_of, 'Object.getPrototypeOf')
 
     def _obj_set_prototype_of(args, interp):
         obj = args[0] if args else UNDEFINED
@@ -521,7 +527,17 @@ def register_object_builtins(interp, g, intr):
         flags = interp._to_str(args[1]) if len(args) > 1 else ''
         return _make_regexp(source, flags)
 
-    g.declare('RegExp', interp._make_intrinsic(lambda this_val, args, interp: _regexp_ctor(args, interp), 'RegExp'), 'var')
+    _regexp_ctor_fn = interp._make_intrinsic(lambda this_val, args, interp: _regexp_ctor(args, interp), 'RegExp')
+    # RegExp.escape (ES2025 Stage 4)
+    def _regexp_escape(args, interp):
+        if not args or args[0].type != 'string':
+            raise _JSError(interp._make_js_error('TypeError', 'RegExp.escape: argument must be a string'))
+        s = args[0].value
+        # Escape all regex metacharacters per the TC39 spec
+        escaped = re.sub(r'([\\^$.*+?()[\]{}|/\-])', r'\\\1', s)
+        return JsValue('string', escaped)
+    _regexp_ctor_fn.value['escape'] = intr(_regexp_escape, 'RegExp.escape')
+    g.declare('RegExp', _regexp_ctor_fn, 'var')
 
     def _make_date(value_ms=None):
         _ms = [float(value_ms if value_ms is not None else time.time() * 1000.0)]

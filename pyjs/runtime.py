@@ -28,7 +28,7 @@ from .values import (
     SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
     SYMBOL_TO_STRING_TAG, SYMBOL_ASYNC_ITERATOR, SYMBOL_SPECIES,
     SYMBOL_MATCH, SYMBOL_REPLACE, SYMBOL_SPLIT, SYMBOL_SEARCH,
-    SYMBOL_IS_CONCAT_SPREADABLE,
+    SYMBOL_IS_CONCAT_SPREADABLE, SYMBOL_DISPOSE, SYMBOL_ASYNC_DISPOSE,
     _symbol_id_counter, _symbol_registry,
     _js_regex_to_python,
 )
@@ -621,12 +621,19 @@ class Interpreter:
             stack_str = f"{name}: {msg}\n{frame_lines}"
         else:
             stack_str = f"{name}: {msg}"
-        return JsValue('object', {
+        err = JsValue('object', {
             'message': py_to_js(msg),
             'name': py_to_js(name),
             'stack': py_to_js(stack_str),
             '__error_type__': py_to_js(name),
         })
+        # Add constructor property pointing to the global Error constructor
+        try:
+            ctor = self.genv.get(name)
+            err.value['constructor'] = ctor
+        except Exception:
+            pass
+        return err
 
     # --------------------------------------------------------- coercion helpers
     _TRUTHY_MAP = {
@@ -909,8 +916,11 @@ class Interpreter:
     def _get_proto(self, obj: JsValue):
         if obj.type in ('object', 'function', 'intrinsic', 'class'):
             proto = obj.value.get('__proto__')
-            if isinstance(proto, JsValue) and proto.type == 'object':
-                return proto
+            if isinstance(proto, JsValue):
+                if proto.type == 'object':
+                    return proto
+                if proto.type == 'null':
+                    return JS_NULL  # explicit null prototype
         return None
 
     def _make_super_proxy(self, proto, this_val):
@@ -1164,6 +1174,28 @@ class Interpreter:
                     return JS_TRUE
                 return JS_FALSE
             return self._make_intrinsic(_has_own_property, 'Object.hasOwnProperty')
+        if key == 'propertyIsEnumerable':
+            obj_ref = obj
+            def _prop_is_enum(tv, call_args, interp, _obj=obj_ref):
+                prop_name = interp._to_key(call_args[0]) if call_args else ''
+                if not isinstance(_obj.value, dict) or prop_name not in _obj.value:
+                    return JS_FALSE
+                desc = interp._get_desc(_obj, prop_name)
+                if desc is not None and not desc.get('enumerable', True):
+                    return JS_FALSE
+                return JS_TRUE
+            return self._make_intrinsic(_prop_is_enum, 'Object.propertyIsEnumerable')
+        if key == 'isPrototypeOf':
+            obj_ref = obj
+            def _is_proto_of(tv, call_args, interp, _proto=obj_ref):
+                target = call_args[0] if call_args else UNDEFINED
+                cur = interp._get_proto(target)
+                while isinstance(cur, JsValue) and cur.type not in ('null', 'undefined'):
+                    if cur is _proto:
+                        return JS_TRUE
+                    cur = interp._get_proto(cur)
+                return JS_FALSE
+            return self._make_intrinsic(_is_proto_of, 'Object.isPrototypeOf')
         if key == 'valueOf':
             obj_ref = obj
             return self._make_intrinsic(lambda tv, a, i, o=obj_ref: o, 'Object.valueOf')
@@ -1200,8 +1232,36 @@ class Interpreter:
                 return i._make_intrinsic(_bound, 'bound function') if False else interp._make_intrinsic(_bound, 'bound function')
             return self._make_intrinsic(_fn_bind, 'Function.bind')
         if obj.type in ('function', 'intrinsic') and key == 'toString':
-            name = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
-            return self._make_intrinsic(lambda tv, a, i, n=name: JsValue('string', f'function {n}() {{ [native code] }}'), 'Function.toString')
+            def _fn_tostring(tv, a, i, _fn=obj):
+                if _fn.type == 'function' and isinstance(_fn.value, dict):
+                    node = _fn.value.get('node')
+                    fn_name = _fn.value.get('name', '')
+                    if node:
+                        params = node.get('params', [])
+                        param_names = []
+                        for p in params:
+                            if isinstance(p, dict):
+                                pt = p.get('type', '')
+                                if pt == 'Identifier':
+                                    param_names.append(p.get('name', ''))
+                                elif pt == 'RestElement':
+                                    inner = p.get('argument', {})
+                                    param_names.append('...' + inner.get('name', ''))
+                                elif pt == 'AssignmentPattern':
+                                    left = p.get('left', {})
+                                    param_names.append(left.get('name', ''))
+                                else:
+                                    param_names.append(str(p))
+                            else:
+                                param_names.append(str(p))
+                        params_str = ', '.join(param_names)
+                        is_async = node.get('async', False)
+                        is_gen = node.get('generator', False)
+                        prefix = ('async ' if is_async else '') + 'function' + ('*' if is_gen else '')
+                        return JsValue('string', f'{prefix} {fn_name}({params_str}) {{ [source] }}')
+                n = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
+                return JsValue('string', f'function {n}() {{ [native code] }}')
+            return self._make_intrinsic(_fn_tostring, 'Function.toString')
         plugin_key = ('object', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
@@ -1316,7 +1376,7 @@ class Interpreter:
                         pass
             # Check for setter in proto chain
             current = obj
-            while isinstance(current, JsValue):
+            while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
                 setter_key = f"__set__{key}"
                 if setter_key in current.value:
                     self._call_js(current.value[setter_key], [val], obj)
@@ -1890,7 +1950,12 @@ class Interpreter:
             if name == 'concat':
                 return JsValue("string", s + ''.join(interp._to_str(a) for a in args))
             if name == 'normalize':
-                return JsValue("string", s)
+                import unicodedata as _ud
+                form = interp._to_str(args[0]) if args and args[0].type != 'undefined' else 'NFC'
+                if form not in ('NFC', 'NFD', 'NFKC', 'NFKD'):
+                    raise _JSError(interp._make_js_error('RangeError',
+                        f"The normalization form should be one of NFC, NFD, NFKC, NFKD."))
+                return JsValue("string", _ud.normalize(form, s))
             if name == 'at':
                 i = int(args[0].value) if args else 0
                 if i < 0: i = len(s) + i
@@ -2525,6 +2590,53 @@ class Interpreter:
                 raise _JSError(py_to_js(str(e)))
         return None
 
+    def _exec_using_declaration(self, node, env):
+        """Execute `using x = expr` or `await using x = expr` (ES2024)."""
+        is_async = node.get('is_async', False)
+        dispose_sym_key = f'@@{SYMBOL_ASYNC_DISPOSE}@@' if is_async else f'@@{SYMBOL_DISPOSE}@@'
+        for d in node['declarations']:
+            val = UNDEFINED
+            if d['init']:
+                val = self._eval(d['init'], env)
+            name = d['id'].get('name', '?') if isinstance(d['id'], dict) else '?'
+            # Verify the value has a dispose method (unless null/undefined)
+            if val.type not in ('null', 'undefined'):
+                dispose_fn = None
+                if isinstance(val.value, dict):
+                    dispose_fn = val.value.get(dispose_sym_key)
+                if dispose_fn is None or (isinstance(dispose_fn, JsValue) and
+                                           dispose_fn.type == 'undefined'):
+                    raise _JSError(self._make_js_error('TypeError',
+                        f"The resource does not have a [{dispose_sym_key}] method"))
+            # Declare binding
+            self._bind_pattern(d['id'], val, env, 'const', True)
+            # Register for disposal on scope exit (using env's disposal stack)
+            if env._using_stack is None:
+                env._using_stack = []
+            env._using_stack.append((val, dispose_sym_key, is_async))
+        return None
+
+    def _run_using_stack(self, env):
+        """Run all `using` disposals registered in env's stack (LIFO). Called on scope exit."""
+        stack = getattr(env, '_using_stack', [])
+        first_err = None
+        for val, sym_key, is_async in reversed(stack):
+            if val.type in ('null', 'undefined'):
+                continue
+            dispose_fn = val.value.get(sym_key) if isinstance(val.value, dict) else None
+            if not dispose_fn or not isinstance(dispose_fn, JsValue):
+                continue
+            try:
+                result = self._call_js(dispose_fn, [], val)
+                if is_async and result.type == 'promise':
+                    # For await using: run event loop to settle the dispose promise
+                    self._run_event_loop(result)
+            except _JSError as e:
+                if first_err is None:
+                    first_err = e
+        if first_err is not None:
+            raise first_err
+
     def _exec_function_declaration(self, node, env):
         fn = self._make_fn(node, env)
         env.declare(node["id"], fn, 'var')
@@ -2609,24 +2721,48 @@ class Interpreter:
             ctor.value[sf["key"]] = sf_val
         if instance_fields:
             ctor.value["__instance_fields__"] = instance_fields
+        # Declare the class binding BEFORE running static blocks so static
+        # initializers can reference the class by name (e.g. C.value = 100).
+        env.declare(cname, ctor, 'let')
+        self._sync_global_binding(cname, ctor, env)
         for sb in static_blocks:
             sb_env = Environment(env)
             sb_env._is_fn_env = True
             sb_env._is_arrow = False
             sb_env._this = ctor
             self._exec(sb["body"], sb_env)
-        env.declare(cname, ctor, 'let')
-        self._sync_global_binding(cname, ctor, env)
         return None
 
     def _exec_block_statement(self, node, env):
         block_env = Environment(env)
         _log_scope.log(TRACE, "scope create (block)")
         self._hoist_tdz(node["body"], block_env)
-        for s in node["body"]:
-            r = self._exec(s, block_env)
-            if r is not None: return r
-        return None
+        exc = None
+        result = None
+        try:
+            for s in node["body"]:
+                r = self._exec(s, block_env)
+                if r is not None:
+                    result = r
+                    break
+        except _JSError as e:
+            exc = e
+        except _JSReturn as e:
+            exc = e
+        except _JSBreak as e:
+            exc = e
+        except _JSContinue as e:
+            exc = e
+        # Run `using` disposals if any were registered in this block
+        if block_env._using_stack:
+            try:
+                self._run_using_stack(block_env)
+            except _JSError as dispose_err:
+                if exc is None:
+                    exc = dispose_err
+        if exc is not None:
+            raise exc
+        return result
 
     def _exec_expression_statement(self, node, env):
         self._eval(node["expression"], env)
@@ -3073,6 +3209,7 @@ class Interpreter:
         self._EXEC_DISPATCH = {
             'Program': self._exec_program,
             'VariableDeclaration': self._exec_variable_declaration,
+            'UsingDeclaration': self._exec_using_declaration,
             'FunctionDeclaration': self._exec_function_declaration,
             'ClassDeclaration': self._exec_class_declaration,
             'BlockStatement': self._exec_block_statement,
@@ -3214,7 +3351,16 @@ class Interpreter:
                     obj[f"__set__{k}"] = self._eval(p["value"], env)
                 else:
                     obj[k] = self._eval(p["value"], env)
-        return JsValue("object", obj)
+        result = JsValue("object", obj)
+        # Set super_proto on method functions so `super` works in object literals
+        proto = obj.get('__proto__')
+        if proto is None:
+            # Default: Object.prototype (represented as no-proto sentinel)
+            proto = UNDEFINED
+        for v in obj.values():
+            if isinstance(v, JsValue) and v.type == 'function':
+                v.value['super_proto'] = proto
+        return result
 
     def _eval_function_expression(self, node, env):
         return self._make_fn(node, env)

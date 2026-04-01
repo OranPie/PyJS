@@ -136,7 +136,43 @@ class Lexer:
             if self._ch() == '\\':
                 self._nxt()
                 esc = self._ch()
-                buf.append(self.ESCAPE_MAP.get(esc, esc)); self._nxt()
+                if esc == 'u':
+                    self._nxt()
+                    if self._ch() == '{':
+                        # \u{HHHH} variable-length Unicode escape
+                        self._nxt()
+                        hex_buf = []
+                        while not self._end() and self._ch() != '}':
+                            hex_buf.append(self._nxt())
+                        if not self._end():
+                            self._nxt()  # skip '}'
+                        try:
+                            buf.append(chr(int(''.join(hex_buf), 16)))
+                        except ValueError:
+                            buf.append('u{' + ''.join(hex_buf) + '}')
+                    else:
+                        # \uXXXX fixed 4-hex Unicode escape
+                        hex_chars = []
+                        for _ in range(4):
+                            if not self._end():
+                                hex_chars.append(self._nxt())
+                        try:
+                            buf.append(chr(int(''.join(hex_chars), 16)))
+                        except ValueError:
+                            buf.append('u' + ''.join(hex_chars))
+                elif esc == 'x':
+                    # \xHH hex escape
+                    self._nxt()
+                    hex_chars = []
+                    for _ in range(2):
+                        if not self._end():
+                            hex_chars.append(self._nxt())
+                    try:
+                        buf.append(chr(int(''.join(hex_chars), 16)))
+                    except ValueError:
+                        buf.append('x' + ''.join(hex_chars))
+                else:
+                    buf.append(self.ESCAPE_MAP.get(esc, esc)); self._nxt()
             else:
                 buf.append(self._nxt())
         if not self._end():

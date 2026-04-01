@@ -66,6 +66,7 @@ class N:
     ExportDecl     = lambda decl: N._n("ExportNamedDeclaration", declaration=decl, specifiers=[], source=None)
     ExportList     = lambda specifiers,source: N._n("ExportNamedDeclaration", declaration=None, specifiers=specifiers, source=source)
     ExportDefault  = lambda decl: N._n("ExportDefaultDeclaration", declaration=decl)
+    UsingDecl      = lambda is_async, decls: N._n("UsingDeclaration", is_async=is_async, declarations=decls)
 
 # convenience aliases
 CallExpr = lambda callee, args, line=0, optional=False: N._n("CallExpression", callee=callee, arguments=args, line=line, optional=optional)
@@ -248,6 +249,13 @@ class Parser:
             self._expect('COLON')
             body = self._stmt()
             return {'type': 'LabeledStatement', 'label': label, 'body': body}
+        # `using` contextual keyword: `using x = expr` or `await using x = expr`
+        if t == 'IDENTIFIER' and self._cur().value == 'using' and \
+                self._peek().type == 'IDENTIFIER':
+            return self._using_decl(is_async=False)
+        if t == 'AWAIT' and self._peek().type == 'IDENTIFIER' and \
+                self._peek().value == 'using' and self._peek(2).type == 'IDENTIFIER':
+            return self._using_decl(is_async=True)
         return self._expr_stmt()
 
     def _var_decl(self):
@@ -264,6 +272,23 @@ class Parser:
                 break
         self._semi()
         return N.VarDecl(kind, decls)
+
+    def _using_decl(self, is_async=False):
+        if is_async:
+            self._advance()  # skip 'await'
+        self._advance()      # skip 'using'
+        decls = []
+        while True:
+            name = self._binding_target()
+            init = None
+            if self._check('ASSIGN'):
+                self._advance()
+                init = self._assign()
+            decls.append(N.VarDeclarator(name, init, self._cur().line))
+            if not self._optional('COMMA'):
+                break
+        self._semi()
+        return N.UsingDecl(is_async, decls)
 
     def _if(self):
         self._advance()

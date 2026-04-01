@@ -23,7 +23,7 @@ from .values import (
     SYMBOL_ITERATOR, SYMBOL_TO_PRIMITIVE, SYMBOL_HAS_INSTANCE,
     SYMBOL_TO_STRING_TAG, SYMBOL_ASYNC_ITERATOR, SYMBOL_SPECIES,
     SYMBOL_MATCH, SYMBOL_REPLACE, SYMBOL_SPLIT, SYMBOL_SEARCH,
-    SYMBOL_IS_CONCAT_SPREADABLE,
+    SYMBOL_IS_CONCAT_SPREADABLE, SYMBOL_DISPOSE, SYMBOL_ASYNC_DISPOSE,
     _symbol_id_counter, _symbol_registry,
     _js_regex_to_python,
 )
@@ -93,6 +93,8 @@ def register_advanced_builtins(interp, g, intr):
     sym_ctor.value['split']        = JsValue('symbol', {'id': SYMBOL_SPLIT,          'desc': 'Symbol.split'})
     sym_ctor.value['search']       = JsValue('symbol', {'id': SYMBOL_SEARCH,         'desc': 'Symbol.search'})
     sym_ctor.value['isConcatSpreadable'] = JsValue('symbol', {'id': SYMBOL_IS_CONCAT_SPREADABLE, 'desc': 'Symbol.isConcatSpreadable'})
+    sym_ctor.value['dispose']      = JsValue('symbol', {'id': SYMBOL_DISPOSE,       'desc': 'Symbol.dispose'})
+    sym_ctor.value['asyncDispose'] = JsValue('symbol', {'id': SYMBOL_ASYNC_DISPOSE, 'desc': 'Symbol.asyncDispose'})
 
     def _sym_for(args, interp):
         if not args:
@@ -1059,6 +1061,38 @@ def register_advanced_builtins(interp, g, intr):
     host_sys.value['versionInfo'] = py_to_js(list(sys.version_info[:5]))
     host_sys.value['path'] = py_to_js(list(sys.path))
     g.declare('sys', host_sys, 'var')
+
+    # -- Iterator global (ES2025) --
+    iterator_ctor = JsValue('object', {})
+    def _iterator_from(args, interp):
+        src = args[0] if args else UNDEFINED
+        if src.type == 'undefined':
+            raise _JSError(interp._make_js_error('TypeError', 'Iterator.from: argument must be iterable'))
+        # If already an iterator with .next, wrap it
+        next_fn = interp._get_prop(src, 'next')
+        if next_fn.type != 'undefined':
+            return src
+        # Try Symbol.iterator protocol
+        iter_sym_key = f'@@{SYMBOL_ITERATOR}@@'
+        sym_fn = src.value.get(iter_sym_key) if isinstance(src.value, dict) else None
+        if sym_fn is None and src.type == 'array':
+            items = list(src.value)
+            idx = [0]
+            def _next(tv, a, i, _items=items, _idx=idx):
+                if _idx[0] >= len(_items):
+                    return JsValue('object', {'done': JS_TRUE, 'value': UNDEFINED})
+                val = _items[_idx[0]]
+                _idx[0] += 1
+                return JsValue('object', {'done': JS_FALSE, 'value': val})
+            it = JsValue('object', {'next': interp._make_intrinsic(_next, 'IteratorFrom.next')})
+            return it
+        if sym_fn and isinstance(sym_fn, JsValue):
+            it = interp._call_js(sym_fn, [], src)
+            return it
+        raise _JSError(interp._make_js_error('TypeError', 'Iterator.from: argument is not iterable'))
+    iterator_ctor.value['from'] = intr(_iterator_from, 'Iterator.from')
+    g.declare('Iterator', iterator_ctor, 'var')
+
     _log.info("registered advanced builtins (Proxy, Reflect, Map, Set, ...)")
 
 

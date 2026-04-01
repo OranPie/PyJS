@@ -14,7 +14,7 @@ _TDZ_SENTINEL = object()
 
 
 class Environment:
-    __slots__ = ('parent', 'bindings', '_this', '_fn_args', '_is_arrow', '_is_fn_env', '_generator', '_fn_val', '_strict')
+    __slots__ = ('parent', 'bindings', '_this', '_fn_args', '_is_arrow', '_is_fn_env', '_generator', '_fn_val', '_strict', '_using_stack')
 
     def __init__(self, parent: Optional['Environment'] = None):
         self.parent = parent
@@ -26,6 +26,7 @@ class Environment:
         self._generator = None
         self._fn_val = None
         self._strict: bool = parent._strict if parent else False
+        self._using_stack = None  # list of (val, sym_key, is_async) for `using` declarations
         if parent is None:
             _log.info("scope create (global)")
         else:

@@ -2445,6 +2445,299 @@ console.log(orig[0] + '|' + copy[0] + '|' + copy.length);
         result = interp.run('1 + 2')
         self.assertIsNotNone(result)
 
+    # ------------------------------------------------------------------
+    # Phase 22 — Bug fix tests
+    # ------------------------------------------------------------------
+
+    def test_object_create_null_proto(self):
+        """Object.getPrototypeOf(Object.create(null)) === null (no Python crash)."""
+        result = Interpreter().run(
+            'const o = Object.create(null);'
+            'console.log(Object.getPrototypeOf(o) === null);'
+        )
+        self.assertIn('true', result)
+
+    def test_class_static_block_assigns_prop(self):
+        """class static {} block can reference the class name to assign properties."""
+        result = Interpreter().run('''
+class C {
+  static value = 0;
+  static { C.value = 42; }
+}
+console.log(C.value);
+''')
+        self.assertIn('42', result)
+
+    def test_error_constructor_name(self):
+        """e.constructor.name returns the error type name for caught errors."""
+        result = Interpreter().run('''
+try { null.x; } catch(e) { console.log(e.constructor.name); }
+''')
+        self.assertIn('TypeError', result)
+
+    def test_error_constructor_name_rangeerror(self):
+        """e.constructor.name works for RangeError."""
+        result = Interpreter().run('''
+try { throw new RangeError("out of bounds"); } catch(e) { console.log(e.constructor.name); }
+''')
+        self.assertIn('RangeError', result)
+
+    def test_super_in_object_literal(self):
+        """super.method() works in object-literal shorthand methods."""
+        result = Interpreter().run('''
+const base = { greet() { return "Hello"; } };
+const child = {
+  __proto__: base,
+  greet() { return super.greet() + " World"; }
+};
+console.log(child.greet());
+''')
+        self.assertIn('Hello World', result)
+
+    def test_function_tostring_source(self):
+        """Function.prototype.toString includes function name and params."""
+        result = Interpreter().run('''
+function add(a, b) { return a + b; }
+const s = add.toString();
+console.log(s.includes("add"));
+console.log(s.includes("a") && s.includes("b"));
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'true')
+
+    def test_eval_throws_eval_error(self):
+        """eval() throws EvalError with a useful message."""
+        result = Interpreter().run('''
+try { eval("1"); } catch(e) {
+  console.log(e.constructor.name);
+  console.log(e.message.includes("eval"));
+}
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'EvalError')
+        self.assertEqual(lines[1], 'true')
+
+    def test_structuredclone_circular_throws(self):
+        """structuredClone throws on circular references."""
+        result = Interpreter().run('''
+try {
+  const a = {};
+  a.self = a;
+  structuredClone(a);
+  console.log("no error");
+} catch(e) {
+  console.log("caught");
+}
+''')
+        self.assertIn('caught', result)
+
+    # ------------------------------------------------------------------
+    # Phase 23 — Missing core built-ins
+    # ------------------------------------------------------------------
+
+    def test_property_is_enumerable(self):
+        """Object.prototype.propertyIsEnumerable respects enumerable descriptor."""
+        result = Interpreter().run('''
+const o = {a: 1};
+Object.defineProperty(o, 'b', {value: 2, enumerable: false});
+console.log(o.propertyIsEnumerable('a'));
+console.log(o.propertyIsEnumerable('b'));
+console.log(o.propertyIsEnumerable('c'));
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'false')
+        self.assertEqual(lines[2], 'false')
+
+    def test_is_prototype_of(self):
+        """Object.prototype.isPrototypeOf traverses the prototype chain."""
+        result = Interpreter().run('''
+const proto = {type: "animal"};
+const obj = Object.create(proto);
+console.log(proto.isPrototypeOf(obj));
+const other = {};
+console.log(other.isPrototypeOf(obj));
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'false')
+
+    def test_string_normalize_nfc_nfd(self):
+        """String.prototype.normalize performs real Unicode normalization."""
+        result = Interpreter().run(r'''
+const e_precomposed = "\u00e9";
+const e_decomposed = "\u0065\u0301";
+console.log(e_precomposed.normalize("NFD").length);
+console.log(e_decomposed.normalize("NFC").length);
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '2')   # NFD of é → e + combining accent
+        self.assertEqual(lines[1], '1')   # NFC of decomposed → é
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '2')   # NFD of é → e + combining accent
+        self.assertEqual(lines[1], '1')   # NFC of decomposed → é
+
+    def test_iterator_from_wraps_array(self):
+        """Iterator.from(array) returns an iterator with a next() method."""
+        result = Interpreter().run('''
+const it = Iterator.from([10, 20]);
+const r1 = it.next();
+const r2 = it.next();
+const r3 = it.next();
+console.log(r1.value);
+console.log(r2.value);
+console.log(r3.done);
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '10')
+        self.assertEqual(lines[1], '20')
+        self.assertEqual(lines[2], 'true')
+
+    def test_math_sum_precise(self):
+        """Math.sumPrecise uses compensated summation for accuracy."""
+        result = Interpreter().run(
+            'console.log(Math.sumPrecise([0.1, 0.2, 0.3]));'
+        )
+        val = float(result.strip().split('\n')[0])
+        self.assertAlmostEqual(val, 0.6, places=10)
+
+    def test_regexp_escape_basic(self):
+        """RegExp.escape escapes metacharacters in strings."""
+        result = Interpreter().run(r'''
+console.log(RegExp.escape("hello.world"));
+console.log(RegExp.escape("a+b*c?"));
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], r'hello\.world')
+        self.assertIn(r'\+', lines[1])
+        self.assertIn(r'\*', lines[1])
+
+    def test_error_is_error_true(self):
+        """Error.isError returns true for Error instances."""
+        result = Interpreter().run('''
+const e = new TypeError("oops");
+console.log(Error.isError(e));
+''')
+        self.assertIn('true', result)
+
+    def test_error_is_error_false(self):
+        """Error.isError returns false for non-Error values."""
+        result = Interpreter().run('''
+console.log(Error.isError(42));
+console.log(Error.isError("err"));
+console.log(Error.isError({message: "fake"}));
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'false')
+        self.assertEqual(lines[1], 'false')
+        self.assertEqual(lines[2], 'false')
+
+    # ------------------------------------------------------------------
+    # Phase 24 — ES2024 `using` / `await using` declarations
+    # ------------------------------------------------------------------
+
+    def test_using_basic_dispose(self):
+        """`using` calls Symbol.dispose on block exit (LIFO order)."""
+        result = Interpreter().run('''
+const disposed = [];
+function makeResource(name) {
+  return { [Symbol.dispose]() { disposed.push(name); } };
+}
+{
+  using r1 = makeResource("A");
+  using r2 = makeResource("B");
+}
+console.log(disposed.join(","));
+''')
+        self.assertIn('B,A', result)
+
+    def test_using_disposes_on_return(self):
+        """`using` disposes when function returns early."""
+        result = Interpreter().run('''
+const log = [];
+function makeResource(n) { return { [Symbol.dispose]() { log.push(n); } }; }
+function test() {
+  using r = makeResource("R");
+  return "done";
+}
+console.log(test());
+console.log(log[0]);
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'done')
+        self.assertEqual(lines[1], 'R')
+
+    def test_using_disposes_on_throw(self):
+        """`using` disposes even when an exception is thrown."""
+        result = Interpreter().run('''
+const log = [];
+function makeResource(n) { return { [Symbol.dispose]() { log.push("disposed"); } }; }
+try {
+  using r = makeResource("R");
+  throw new Error("oops");
+} catch(e) {
+  console.log(e.message);
+}
+console.log(log[0]);
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'oops')
+        self.assertEqual(lines[1], 'disposed')
+
+    def test_using_null_is_ignored(self):
+        """`using` with null/undefined does not call dispose."""
+        result = Interpreter().run('''
+let called = false;
+{
+  using r = null;
+}
+console.log(called);
+''')
+        self.assertIn('false', result)
+
+    def test_using_requires_dispose(self):
+        """`using` throws TypeError if object lacks Symbol.dispose."""
+        result = Interpreter().run('''
+try {
+  using r = {noDispose: true};
+  console.log("no error");
+} catch(e) {
+  console.log(e.constructor.name);
+}
+''')
+        self.assertIn('TypeError', result)
+
+    # ------------------------------------------------------------------
+    # Phase 25 — ES2025 new globals
+    # ------------------------------------------------------------------
+
+    def test_symbol_dispose_exists(self):
+        """Symbol.dispose and Symbol.asyncDispose are well-known symbols."""
+        result = Interpreter().run('''
+console.log(typeof Symbol.dispose);
+console.log(typeof Symbol.asyncDispose);
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'symbol')
+        self.assertEqual(lines[1], 'symbol')
+
+    def test_unicode_escape_in_string(self):
+        r"""String literals support \uXXXX and \u{HHHH} Unicode escapes."""
+        result = Interpreter().run(r'''
+const e = "\u00e9";
+console.log(e.length);
+console.log(e === "\u{e9}");
+''')
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '1')
+        self.assertEqual(lines[1], 'true')
+
+    def test_hex_escape_in_string(self):
+        r"""String literals support \xHH hex escapes."""
+        result = Interpreter().run(r'console.log("\x41\x42\x43");')
+        self.assertIn('ABC', result)
+
 
 if __name__ == '__main__':
     unittest.main()
