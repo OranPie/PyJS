@@ -514,7 +514,239 @@ No constructor parameters.
 
 ---
 
-## Best Practices
+### ProcessPlugin — `process`
+
+Provides a Node.js-compatible `process` global with environment variables,
+arguments, platform info, working directory, and exit control.
+
+```python
+from pyjs import Interpreter
+from pyjs.plugins import ProcessPlugin
+
+interp = Interpreter()
+interp.register_plugin(ProcessPlugin(argv=['script.js', '--verbose']))
+interp.run('''
+    console.log(process.platform);       // "linux" / "darwin" / "win32"
+    console.log(process.version);        // Python version string
+    console.log(typeof process.env);     // "object"
+    console.log(process.argv[0]);        // "script.js"
+    console.log(process.cwd());          // current working directory
+    // process.exit(0);                  // exits the interpreter
+''')
+```
+
+**Constructor:** `ProcessPlugin(argv=None)` — pass a custom `argv` list (defaults to `sys.argv`).
+
+**Properties / methods:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `process.env` | object | Environment variables (read/write) |
+| `process.argv` | array | Command-line argument list |
+| `process.platform` | string | OS name (`"linux"`, `"darwin"`, `"win32"`) |
+| `process.version` | string | Python version string |
+| `process.pid` | number | Current process ID |
+| `process.cwd()` | function | Returns current working directory |
+| `process.chdir(path)` | function | Changes working directory |
+| `process.exit(code)` | function | Exits interpreter (raises `SystemExit`) |
+
+---
+
+### PathPlugin — `path`
+
+Provides a Node.js-compatible `path` module for cross-platform path manipulation.
+
+```python
+from pyjs import Interpreter
+from pyjs.plugins import PathPlugin
+
+interp = Interpreter()
+interp.register_plugin(PathPlugin())
+interp.run('''
+    console.log(path.join("a", "b", "c.js"));   // "a/b/c.js"
+    console.log(path.dirname("/foo/bar.js"));    // "/foo"
+    console.log(path.basename("/foo/bar.js"));   // "bar.js"
+    console.log(path.extname("file.txt"));       // ".txt"
+    console.log(path.isAbsolute("/etc"));        // true
+
+    const p = path.parse("/home/user/file.js");
+    console.log(p.root);   // "/"
+    console.log(p.dir);    // "/home/user"
+    console.log(p.name);   // "file"
+    console.log(p.ext);    // ".js"
+''')
+```
+
+No constructor parameters.
+
+**Methods:** `join`, `resolve`, `dirname`, `basename`, `extname`, `parse`, `format`, `normalize`, `isAbsolute`, `relative`, `sep` (property).
+
+---
+
+### AssertPlugin — `assert`
+
+Provides a Node.js-compatible `assert` module for test assertions.
+
+```python
+from pyjs import Interpreter
+from pyjs.plugins import AssertPlugin
+
+interp = Interpreter()
+interp.register_plugin(AssertPlugin())
+interp.run('''
+    assert(1 === 1);                         // passes silently
+    assert.ok(true, "must be truthy");       // passes
+    assert.strictEqual(1, 1);               // passes
+    assert.deepEqual([1,2], [1,2]);         // passes
+
+    assert.throws(() => { throw new Error("oops"); });  // passes
+
+    try {
+        assert.strictEqual(1, 2, "not equal");
+    } catch (e) {
+        console.log(e.message);  // "not equal"
+    }
+''')
+```
+
+No constructor parameters.
+
+**Methods:**
+
+| Method | Description |
+|--------|-------------|
+| `assert(val, msg?)` | Throws `AssertionError` if falsy |
+| `assert.ok(val, msg?)` | Alias for `assert(val)` |
+| `assert.equal(a, b, msg?)` | Loose equality (`==`) |
+| `assert.strictEqual(a, b, msg?)` | Strict equality (`===`) |
+| `assert.notStrictEqual(a, b, msg?)` | Strict inequality |
+| `assert.deepEqual(a, b, msg?)` | Deep structural equality |
+| `assert.throws(fn, msg?)` | Asserts that `fn` throws |
+| `assert.doesNotThrow(fn, msg?)` | Asserts that `fn` does not throw |
+
+---
+
+### UtilPlugin — `util`
+
+Provides Node.js-compatible `util` module functions for formatting and inspection.
+
+```python
+from pyjs import Interpreter
+from pyjs.plugins import UtilPlugin
+
+interp = Interpreter()
+interp.register_plugin(UtilPlugin())
+interp.run('''
+    console.log(util.format("Hello %s, you are %d", "Alice", 30));
+    // "Hello Alice, you are 30"
+
+    console.log(util.inspect({ a: 1, b: [2, 3] }));
+    // "{ a: 1, b: [ 2, 3 ] }"
+
+    console.log(util.isDeepStrictEqual([1,2], [1,2]));  // true
+    console.log(util.isDeepStrictEqual([1,2], [1,3]));  // false
+
+    console.log(util.types.isArray([]));        // true
+    console.log(util.types.isMap(new Map()));   // true
+    console.log(util.types.isPromise(Promise.resolve()));  // true
+''')
+```
+
+No constructor parameters.
+
+**Functions:**
+
+| Function | Description |
+|----------|-------------|
+| `util.format(fmt, ...args)` | `printf`-style formatting (`%s`, `%d`, `%i`, `%f`, `%j`, `%o`, `%O`) |
+| `util.inspect(val, opts?)` | Pretty-print any JS value |
+| `util.isDeepStrictEqual(a, b)` | Deep strict equality check |
+| `util.types.isArray(v)` | Type predicates (isMap, isSet, isPromise, isRegExp, isDate, isFunction, isBuffer, isUint8Array, etc.) |
+
+---
+
+### CryptoSubtlePlugin — `crypto`
+
+Provides Node.js-compatible cryptographic primitives using Python's `hashlib` and `hmac` modules.
+
+```python
+from pyjs import Interpreter
+from pyjs.plugins import CryptoSubtlePlugin
+
+interp = Interpreter()
+interp.register_plugin(CryptoSubtlePlugin())
+interp.run('''
+    const hash = crypto.createHash("sha256");
+    hash.update("hello world");
+    console.log(hash.digest("hex"));
+    // "b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576b8f6b68a08827ba7"
+
+    const hmac = crypto.createHmac("sha256", "secret");
+    hmac.update("data");
+    console.log(hmac.digest("hex"));  // HMAC-SHA256
+
+    const buf1 = crypto.randomBytes(16);
+    console.log(buf1.length);  // 16
+
+    // Timing-safe comparison
+    const a = crypto.randomBytes(32);
+    const b = crypto.randomBytes(32);
+    console.log(crypto.timingSafeEqual(a, a));  // true
+''')
+```
+
+No constructor parameters.
+
+**API:**
+
+| Function | Description |
+|----------|-------------|
+| `crypto.randomBytes(size)` | Returns a `Uint8Array` of random bytes |
+| `crypto.createHash(algorithm)` | Returns a `Hash` object with `.update(data)` and `.digest(encoding)` |
+| `crypto.createHmac(algorithm, key)` | Returns an `Hmac` object with `.update(data)` and `.digest(encoding)` |
+| `crypto.timingSafeEqual(a, b)` | Constant-time comparison of two `Uint8Array` values |
+
+Supported algorithms: `"sha256"`, `"sha512"`, `"sha1"`, `"md5"` (and any algorithm supported by Python's `hashlib`).
+Supported digest encodings: `"hex"`, `"base64"`, `"binary"`.
+
+---
+
+### ChildProcessPlugin — `childProcess`
+
+Provides synchronous and asynchronous child process execution.
+
+```python
+from pyjs import Interpreter
+from pyjs.plugins import ChildProcessPlugin
+
+interp = Interpreter()
+interp.register_plugin(ChildProcessPlugin())
+interp.run('''
+    // Synchronous execution
+    const result = childProcess.execSync("echo hello");
+    console.log(result.stdout.trim());  // "hello"
+
+    const r2 = childProcess.spawnSync("python3", ["-c", "print(1+1)"]);
+    console.log(r2.stdout.trim());  // "2"
+
+    // Asynchronous execution (returns a Promise)
+    childProcess.exec("echo async").then(r => {
+        console.log(r.stdout.trim());  // "async"
+    });
+''')
+```
+
+No constructor parameters.
+
+**Methods:**
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `childProcess.execSync(cmd, opts?)` | `{stdout, stderr, status}` | Run a shell command, block until done |
+| `childProcess.spawnSync(cmd, args?, opts?)` | `{stdout, stderr, status}` | Spawn a process with args, block until done |
+| `childProcess.exec(cmd, opts?)` | `Promise<{stdout, stderr, status}>` | Run a shell command asynchronously |
+
+---
 
 1. **Use `PluginContext` helpers, not raw interpreter access.**
    `ctx.add_global()` handles intrinsic wrapping, `globalThis` sync, and

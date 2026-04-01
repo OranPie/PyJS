@@ -1,6 +1,6 @@
 # PyJS — Architecture Overview
 
-PyJS is a **pure-Python ECMAScript interpreter** covering ~91% of the
+PyJS is a **pure-Python ECMAScript interpreter** covering ~96% of the
 ES2015–ES2025 specification.  It has zero external dependencies — everything
 runs on the Python standard library.
 
@@ -55,14 +55,24 @@ pyjs/__init__.py          (public API — re-exports everything)
   ├── generators.py       (generator/async-generator threading)
   ├── modules.py          (module loader — creates Interpreter instances)
   ├── plugin.py           → values.py, core.py, runtime.py (TYPE_CHECKING)
-  └── trace.py            (logging configuration)
+  ├── trace.py            (logging configuration)
+  ├── cli.py              (CLI entry point, argparse)
+  ├── completer.py        (REPL tab completion)
+  ├── colors.py           (ANSI color utilities)
+  └── inspect_val.py      (JS value pretty-printing)
 
 pyjs/plugins/
   ├── storage.py          → plugin.py, values.py, core.py
   ├── fetch.py            → plugin.py, values.py, core.py
   ├── events.py           → plugin.py, values.py, core.py
   ├── fs.py               → plugin.py, values.py, core.py, exceptions.py
-  └── console_ext.py      → plugin.py, values.py, core.py
+  ├── console_ext.py      → plugin.py, values.py, core.py
+  ├── process.py          → plugin.py, values.py, core.py
+  ├── path_plugin.py      → plugin.py, values.py, core.py
+  ├── assert_plugin.py    → plugin.py, values.py, core.py
+  ├── util_plugin.py      → plugin.py, values.py, core.py
+  ├── crypto_plugin.py    → plugin.py, values.py, core.py
+  └── child_process.py    → plugin.py, values.py, core.py
 ```
 
 ---
@@ -71,31 +81,30 @@ pyjs/plugins/
 
 | File | Lines | Role |
 |------|------:|------|
-| `pyjs/runtime.py` | 3 686 | Tree-walking interpreter, method dispatch, event loop |
-| `pyjs/parser.py` | 1 143 | Recursive-descent parser, AST node constructors (`N.*`) |
-| `pyjs/builtins_advanced.py` | 1 058 | Array, String, Math, JSON, Date, RegExp built-ins |
-| `pyjs/builtins_object.py` | 669 | Object.*, console.*, global utility functions |
-| `pyjs/builtins_typed.py` | 563 | TypedArray constructors, ArrayBuffer, DataView |
-| `pyjs/lexer.py` | 339 | Tokenizer — keywords, numbers, strings, regex, templates |
-| `pyjs/builtins_core.py` | 328 | parseInt, parseFloat, isNaN, URI encoding, etc. |
-| `pyjs/builtins_promise.py` | 152 | Promise constructor, all/race/allSettled/any/withResolvers |
-| `pyjs/plugins/console_ext.py` | 193 | console.table/assert/trace/dir |
-| `pyjs/plugins/fs.py` | 178 | Sandboxed filesystem (readFileSync, etc.) |
-| `pyjs/plugin.py` | 161 | PluginContext + PyJSPlugin base class |
-| `pyjs/generators.py` | 144 | JsGenerator / JsAsyncGenerator (thread-based) |
-| `pyjs/plugins/fetch.py` | 114 | HTTP fetch() via urllib |
-| `pyjs/plugins/events.py` | 102 | EventEmitter constructor |
-| `pyjs/plugins/storage.py` | 91 | localStorage / sessionStorage |
-| `pyjs/environment.py` | 81 | Lexical scope chain (Environment class) |
-| `pyjs/__init__.py` | 75 | Public API: evaluate(), parse_source(), repl(), etc. |
-| `pyjs/trace.py` | 63 | Logging/tracing configuration |
-| `pyjs/core.py` | 59 | py_to_js / js_to_py converters, JSTypeError |
-| `pyjs/values.py` | 52 | JsValue, JsProxy, singletons, well-known symbols |
-| `pyjs/modules.py` | 48 | ModuleLoader: resolve, cache, cycle detection |
-| `pyjs/exceptions.py` | 27 | _JSBreak, _JSContinue, _JSReturn, _JSError |
-| `tests/test_pyjs.py` | 2 092 | 155 tests covering all phases |
+| `pyjs/runtime.py` | 4 449 | Tree-walking interpreter, method dispatch, event loop |
+| `pyjs/parser.py` | 1 293 | Recursive-descent parser, AST node constructors (`N.*`) |
+| `pyjs/builtins_advanced.py` | 1 098 | Array, String, Math, JSON, Date, RegExp, Symbol, Map, Set built-ins |
+| `pyjs/completer.py` | 421 | REPL tab-completion engine |
+| `pyjs/__init__.py` | 450 | Public API: `evaluate()`, `evaluate_file()`, `parse_source()`, `repl()` |
+| `pyjs/builtins_object.py` | 724 | Object.*, console.*, global utility functions |
+| `pyjs/builtins_typed.py` | 567 | TypedArray constructors, ArrayBuffer, DataView |
+| `pyjs/cli.py` | 439 | CLI entry point (`pyjs` command) |
+| `pyjs/lexer.py` | 383 | Tokenizer — keywords, numbers, strings, regex, templates, `\uXXXX` |
+| `pyjs/builtins_core.py` | 357 | parseInt, parseFloat, isNaN, URI encoding, Math.sumPrecise |
+| `pyjs/colors.py` | 256 | ANSI color utilities for REPL output |
+| `pyjs/inspect_val.py` | 249 | JS value pretty-printing for REPL |
+| `pyjs/builtins_promise.py` | 188 | Promise, Error constructors, eval, structuredClone |
+| `pyjs/trace.py` | 198 | Logging/tracing configuration |
+| `pyjs/plugin.py` | 170 | PluginContext + PyJSPlugin base class |
+| `pyjs/generators.py` | 153 | JsGenerator / JsAsyncGenerator (thread-based) |
+| `pyjs/core.py` | 126 | `JsValue`, `py_to_js`/`js_to_py`, `JSTypeError` |
+| `pyjs/environment.py` | 94 | Lexical scope chain with TDZ and `_using_stack` |
+| `pyjs/values.py` | 59 | JsValue class, JsProxy, singletons, well-known symbols |
+| `pyjs/modules.py` | 56 | ModuleLoader: path resolution, caching, cycle detection |
+| `pyjs/exceptions.py` | 27 | `_JSBreak`, `_JSContinue`, `_JSReturn`, `_JSError` |
+| `tests/test_pyjs.py` | 2 859 | 223 tests covering all phases |
 
-**Total:** ~11 500 source lines (including tests and plugins).
+**Total:** ~13 400 source lines (including tests and plugins).
 
 ---
 
@@ -129,6 +138,7 @@ Key node types:
 | **Expressions** | `Literal`, `Identifier`, `BinaryExpression`, `LogicalExpression`, `UnaryExpression`, `UpdateExpression`, `AssignmentExpression`, `ConditionalExpression`, `MemberExpression`, `CallExpression`, `NewExpression`, `ArrayExpression`, `ObjectExpression`, `FunctionExpression`, `ArrowFunctionExpression`, `TemplateLiteral`, `SpreadElement`, `AwaitExpression`, `YieldExpression`, `ThisExpression`, `SequenceExpression` |
 | **Class** | `ClassBody`, `ClassField`, `StaticBlock` |
 | **Modules** | `ImportDeclaration`, `ExportNamedDeclaration`, `ExportDefaultDeclaration` |
+| **ES2024+** | `UsingDeclaration` (`using`/`await using`), `Decorator` (`@expr` on classes/methods/fields) |
 
 ---
 
@@ -192,6 +202,8 @@ SYMBOL_REPLACE            = 8
 SYMBOL_SPLIT              = 9
 SYMBOL_SEARCH             = 10
 SYMBOL_IS_CONCAT_SPREADABLE = 11
+SYMBOL_DISPOSE            = 12   # ES2024 — used by `using` declarations
+SYMBOL_ASYNC_DISPOSE      = 13   # ES2024 — used by `await using` declarations
 ```
 
 ---
@@ -301,11 +313,11 @@ register_typed_builtins(self)      # ArrayBuffer, TypedArray constructors, DataV
 
 | Module | Lines | What It Registers |
 |--------|------:|-------------------|
-| `builtins_core.py` | 328 | `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `encodeURI`, `decodeURI`, `encodeURIComponent`, `decodeURIComponent`, `atob`, `btoa`, `structuredClone`, `queueMicrotask` |
-| `builtins_object.py` | 669 | `Object.*` (keys, values, entries, assign, create, freeze, seal, defineProperty, …), `console.*` (log, warn, error, time, group, …), `globalThis` sync |
-| `builtins_advanced.py` | 1 058 | `Array.from/of/isArray`, `String.fromCharCode/fromCodePoint/raw`, `Math.*`, `JSON.*`, `Date`, `RegExp`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `FinalizationRegistry`, `Intl.*` |
-| `builtins_promise.py` | 152 | `Promise` constructor, `.resolve()`, `.reject()`, `.all()`, `.race()`, `.allSettled()`, `.any()`, `.withResolvers()`, `.try()` |
-| `builtins_typed.py` | 563 | `ArrayBuffer`, `DataView`, all 11 TypedArray constructors with full method sets |
+| `builtins_core.py` | 357 | `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `encodeURI`, `decodeURI`, `encodeURIComponent`, `decodeURIComponent`, `atob`, `btoa`, `structuredClone`, `queueMicrotask`, `Math.sumPrecise` |
+| `builtins_object.py` | 724 | `Object.*` (keys, values, entries, assign, create, freeze, seal, defineProperty, …), `console.*` (log, warn, error, time, group, …), `globalThis` sync, `RegExp.escape` |
+| `builtins_advanced.py` | 1 098 | `Array.from/of/isArray`, `String.fromCharCode/fromCodePoint/raw`, `Math.*`, `JSON.*`, `Date`, `RegExp`, `Symbol` (incl. `dispose`/`asyncDispose`), `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `FinalizationRegistry`, `Intl.*`, `Iterator.from`, async iterator helpers |
+| `builtins_promise.py` | 188 | `Promise` constructor, `.resolve()`, `.reject()`, `.all()`, `.race()`, `.allSettled()`, `.any()`, `.withResolvers()`, `.try()`; all `Error` subclasses; `Error.isError()`; `eval()` (throws EvalError) |
+| `builtins_typed.py` | 567 | `ArrayBuffer`, `DataView`, all 11 TypedArray constructors with full method sets |
 
 ### Method Dispatch
 
@@ -409,6 +421,12 @@ Five first-party plugins ship with PyJS:
 | `EventEmitterPlugin` | `EventEmitter` constructor |
 | `FileSystemPlugin` | `fs.*` methods |
 | `ConsoleExtPlugin` | `console.table/assert/trace/dir` |
+| `ProcessPlugin` | `process` (`env`, `argv`, `cwd()`, `exit()`, `platform`) |
+| `PathPlugin` | `path` (`join`, `resolve`, `dirname`, `basename`, `extname`, `parse`, `isAbsolute`, `normalize`) |
+| `AssertPlugin` | `assert` (`ok`, `equal`, `strictEqual`, `deepEqual`, `throws`, `doesNotThrow`) |
+| `UtilPlugin` | `util` (`format`, `inspect`, `isDeepStrictEqual`, `types.*`) |
+| `CryptoSubtlePlugin` | `crypto` (`randomBytes`, `createHash`, `createHmac`, `timingSafeEqual`) |
+| `ChildProcessPlugin` | `childProcess` (`execSync`, `spawnSync`, `exec`) |
 
 For full details, see **[plugins.md](plugins.md)**.
 
