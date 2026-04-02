@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **310 tests passing** | ~14 300 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–38 added 248 tests)*
+*Updated: 2026-04-03 | **315 tests passing** | ~14 300 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–39 added 253 tests)*
 
 ---
 
@@ -134,7 +134,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 **Number** — isNaN, isFinite, isInteger, isSafeInteger (**strict type-check, no coercion** *(Phase 31)*), parseFloat, parseInt (**trailing non-digit chars, `0xFF` hex prefix** *(Phase 31)*), toFixed, toString(base), EPSILON, MAX/MIN\_SAFE\_INTEGER, MAX/MIN\_VALUE, POSITIVE/NEGATIVE\_INFINITY
 
-**Math** — full set including hypot, cbrt, fround, **f16round** *(Phase 27)*, clz32, imul, all trig + constants, **`Math.sumPrecise`** *(Phase 23)*
+**Math** — full set including hypot, cbrt, **`fround`** *(float32 round-trip correct, Phase 39)*, **f16round** *(Phase 27)*, clz32, imul, all trig + constants, **`Math.sumPrecise`** *(Phase 23)*
 
 **Promise** — constructor, resolve, reject, then, catch, finally, all, race, allSettled, any, withResolvers, **try** *(Phase 13)*
 
@@ -227,6 +227,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **36** | Regex/string improvements: **named capture groups** `.groups` returned by `String.match` ✓; **`String.replace/replaceAll` passes named groups** object as last arg to function ✓; **`String.prototype.search`** handles RegExp (named groups, flags) ✓; **`indices.groups`** on regex `d`-flag results ✓; **`Number.toString(base)`** supports fractional numbers ✓; **`BigInt.prototype.toString/valueOf/toLocaleString`** ✓; **`Reflect.ownKeys`** returns symbols as proper `symbol` JsValues ✓; **`Object.getOwnPropertySymbols`** likewise ✓; **arrow function destructuring params** `([a,b]) =>` / `({x}) =>` ✓ | 12 | **296** |
 | **37** | Constructor `.prototype` objects + prototype chain: **14 shared prototype objects** created (`_array_proto`, `_object_proto`, `_function_proto`, etc.); `Array/Map/Set/String/Number/Boolean/RegExp/Symbol/WeakMap/WeakSet/Promise.prototype` all wired up; `Array.prototype === Object.getPrototypeOf([])` ✓; user can extend `Array.prototype.sum = fn` and use on all arrays ✓; `Map.prototype.toObject = fn` ✓; `Set.prototype.toArray = fn` ✓; `Object.create(null)` null-proto correctly reported by `getPrototypeOf` ✓; `Object.prototype.toString` on `_object_proto` (non-enumerable) ✓; `Function.prototype.toString` takes priority over chain ✓; `Symbol.toStringTag` getter walked via prototype chain by `Object.prototype.toString` ✓ | 5 | **301** |
 | **38** | Correctness fixes: **destructuring assignment to `MemberExpression` LHS** (`[obj.a, obj.b] = [1, 2]`; `[this.x] = arr` in setters) ✓; **`in` operator walks prototype chain** for getters (`"area" in rect` → `true`) + checks `length` in arrays ✓; **`String.prototype.toString`/`valueOf`** callable (was `undefined`) ✓; **`String.fromCharCode`** added ✓; **`finally` re-throws** errors/breaks/continues when no catch clause present ✓; **`new Date("YYYY-MM-DD")`** string parsing ✓; **`Array.values()`/`keys()`/`entries()`** iterators now have iterator helpers (`map`, `filter`, `take`, …) ✓ | 9 | **310** |
+| **39** | Correctness fixes: **static field initializers can reference own class name** (`class C { static y = C.x + 1; }` now works — class declared in env before field init runs) ✓; **`Math.fround`** now performs correct float32 round-trip via `struct.pack('f')` (was returning original value unchanged) ✓; **invalid regex patterns** (e.g. variable-width lookbehind unsupported by Python `re`) converted to JS `SyntaxError` instead of crashing with an uncaught `re.error` ✓ | 5 | **315** |
 
 ---
 

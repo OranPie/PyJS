@@ -195,6 +195,12 @@ class Interpreter:
         if 'u' in flag_text or 'v' in flag_text: py_flags |= re.UNICODE
         py_source = _js_regex_to_python(source)
         is_global_or_sticky = 'g' in flag_text or 'y' in flag_text
+        # Eagerly validate the pattern so variable-width lookbehind and other
+        # Python-unsupported constructs raise JS SyntaxError at definition time.
+        try:
+            re.compile(py_source, py_flags)
+        except re.error as exc:
+            raise _JSError(self._make_js_error('SyntaxError', f'Invalid regular expression: {exc}'))
 
         def _make_intr(fn, name):
             return self._make_intrinsic(lambda tv, args, interp: fn(tv, args, interp), name)
@@ -3297,6 +3303,10 @@ class Interpreter:
         ctor.value.update(static_methods)
         if isinstance(parent_class, JsValue):
             ctor.value["__proto__"] = parent_class
+        # Declare the class binding BEFORE evaluating static field initializers so that
+        # self-referential patterns like `static y = ClassName.x + 1` work correctly.
+        env.declare(cname, ctor, 'let')
+        self._sync_global_binding(cname, ctor, env)
         for sf in static_fields:
             sf_key = sf["key"]
             if sf.get("computed") and sf.get("computed_key"):
@@ -3384,9 +3394,12 @@ class Interpreter:
             if init_fn.type in ('function', 'intrinsic'):
                 self._call_js(init_fn, [ctor], ctor)
 
-        # Declare the class binding BEFORE running static blocks so static
-        # initializers can reference the class by name (e.g. C.value = 100).
-        env.declare(cname, ctor, 'let')
+        # Update the class binding (may have been replaced by class decorator)
+        # and declare before running static blocks so they can reference the class.
+        try:
+            env.set(cname, ctor)
+        except Exception:
+            env.declare(cname, ctor, 'let')
         self._sync_global_binding(cname, ctor, env)
         for sb in static_blocks:
             sb_env = Environment(env)

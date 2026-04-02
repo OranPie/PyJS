@@ -238,7 +238,7 @@ def register_core_builtins(interp, g, intr):
     math_obj.value['trunc'] = intr(lambda a,i: JsValue("number", math.trunc(i._to_num(a[0]))), 'trunc')
     math_obj.value['imul']  = intr(lambda a,i: JsValue("number", (int(i._to_num(a[0]))*int(i._to_num(a[1])))&0xFFFFFFFF), 'imul')
     math_obj.value['clz32'] = intr(lambda a,i: JsValue("number", (32-(int(i._to_num(a[0]))&0xFFFFFFFF).bit_length()) if int(i._to_num(a[0]))&0xFFFFFFFF else 32), 'clz32')
-    math_obj.value['fround']= intr(lambda a,i: JsValue("number", float(struct.pack('f',i._to_num(a[0])))), 'fround') if False else intr(lambda a,i: JsValue("number", i._to_num(a[0])), 'fround')
+    math_obj.value['fround']= intr(lambda a,i: JsValue("number", struct.unpack('f', struct.pack('f', i._to_num(a[0]) if a else 0.0))[0]), 'fround')
     math_obj.value['f16round'] = intr(lambda a, i: JsValue("number", struct.unpack('e', struct.pack('e', i._to_num(a[0]) if a else 0.0))[0]), 'f16round')
     math_obj.value['hypot'] = intr(lambda a, i: JsValue("number", math.hypot(*[i._to_num(x) for x in a])), 'hypot')
     def _math_cbrt(args, interp):

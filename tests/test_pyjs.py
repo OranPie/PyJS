@@ -4356,5 +4356,72 @@ console.log(person.fullName);
         self.assertEqual(lines[2], 'Jane Smith')
 
 
+    # ── Phase 39 tests ──────────────────────────────────────────────────────────
+
+    def test_static_field_self_reference(self):
+        """Static field initializers can reference the class by name."""
+        source = '''
+class Config {
+  static DEFAULT_TIMEOUT = 5000;
+  static DEFAULT_VALUE = Config.DEFAULT_TIMEOUT * 2;
+}
+console.log(Config.DEFAULT_VALUE);
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), '10000')
+
+    def test_static_field_chained_self_reference(self):
+        """Static fields can reference earlier static fields via class name."""
+        source = '''
+class Seq {
+  static first = 1;
+  static second = Seq.first + 1;
+  static third = Seq.second + 1;
+}
+console.log(Seq.first, Seq.second, Seq.third);
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), '1 2 3')
+
+    def test_static_field_new_self_in_initializer(self):
+        """Static field can construct new instance of own class."""
+        source = '''
+class Singleton {
+  static instance = new Singleton(42);
+  constructor(v) { this.value = v; }
+}
+console.log(Singleton.instance.value);
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), '42')
+
+    def test_math_fround_precision(self):
+        """Math.fround should convert to float32 and back."""
+        source = '''
+console.log(Math.fround(1.337) !== 1.337 ? "ok" : "wrong");
+console.log(Math.fround(0));
+console.log(Math.fround(1.5));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'ok')
+        self.assertEqual(lines[1], '0')
+        self.assertEqual(lines[2], '1.5')
+
+    def test_regex_invalid_lookbehind_throws_syntax_error(self):
+        """Variable-width lookbehind that Python cannot compile raises SyntaxError."""
+        source = '''
+try {
+  const re = /(?<=\\d+)def/;
+  "test123def".match(re);
+  console.log("no error");
+} catch(e) {
+  console.log(e.constructor.name);
+}
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), 'SyntaxError')
+
+
 if __name__ == '__main__':
     unittest.main()
