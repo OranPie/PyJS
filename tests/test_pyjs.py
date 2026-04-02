@@ -3362,5 +3362,20 @@ console.log(Reflect.isExtensible(obj));
         self.assertEqual(lines[1], "false")
 
 
+    def test_array_from_async_async_generator(self):
+        """Array.fromAsync works with async generators (Symbol.asyncIterator)"""
+        source = '''
+async function* gen() { yield 1; yield 2; yield 3; }
+const result = await Array.fromAsync(gen());
+console.log(result.join(","));
+const mapped = await Array.fromAsync(gen(), x => x * 10);
+console.log(mapped.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "1,2,3")
+        self.assertEqual(lines[1], "10,20,30")
+
+
 if __name__ == '__main__':
     unittest.main()

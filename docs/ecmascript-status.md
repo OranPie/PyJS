@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **254 tests passing** | ~13 200 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–30 added 192 tests)*
+*Updated: 2026-04-03 | **255 tests passing** | ~13 200 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–30 added 193 tests)*
 
 ---
 
@@ -124,7 +124,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 ### Standard Library
 
-**Array** — push/pop/shift/unshift, splice, slice, concat, reverse, sort, indexOf, lastIndexOf, includes, join, flat, flatMap, fill, copyWithin, at, find, findIndex, findLast, findLastIndex, every, some, forEach, map, filter, reduce, reduceRight, toSorted, toReversed, toSpliced, with, `Array.from`, `Array.of`, `Array.isArray`
+**Array** — push/pop/shift/unshift, splice, slice, concat, reverse, sort, indexOf, lastIndexOf, includes, join, flat, flatMap, fill, copyWithin, at, find, findIndex, findLast, findLastIndex, every, some, forEach, map, filter, reduce, reduceRight, toSorted, toReversed, toSpliced, with, `Array.from`, `Array.of`, `Array.isArray`, **`Array.fromAsync`** (array-like, sync iterables, async generators) *(Phase 30)*
 
 **String** — charAt, charCodeAt, codePointAt, at, indexOf, lastIndexOf, includes, startsWith, endsWith, slice, substring, toLowerCase, toUpperCase, trim, trimStart, trimEnd, padStart, padEnd, repeat, replace, replaceAll, split, match, matchAll, search, concat, normalize, `String.fromCharCode`, `String.fromCodePoint`, `String.raw`
 
@@ -217,7 +217,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **27** | ES2024/ES2025 built-ins: `Float16Array` + `Math.f16round`; `ArrayBuffer` `resizable`/`maxByteLength`/`resize`/`transfer`/`transferToFixedLength`/`detached`; `Uint8Array.toBase64`/`fromBase64`/`toHex`/`fromHex`; import attributes (`with { type: 'json' }`) | 8 | **231** |
 | **28** | Bug fixes: `super()` in class constructors (all chains); class/constructor methods non-enumerable per spec; `Symbol.hasInstance` in `instanceof`; template literal escape sequences (`\n`, `\t`, `\\`, etc.) + `String.raw` raw text; `DataView.getFloat16`/`setFloat16` | 7 | **238** |
 | **29** | ES gap fixes: `for-of`/`for-in` with destructuring patterns in loop head; `Function.prototype` auto-created for all plain functions; `Iterator.from()` helpers properly attached; `get [Symbol.toStringTag]()` class getter honoured by `Object.prototype.toString`; `Date instanceof Date` + `structuredClone(date) instanceof Date` | 8 | **246** |
-| **30** | Bug fixes: `Error.prototype.toString()` (`"Error: msg"` format); `class E extends Error` subclassing (super() sets props on derived instance); `*gen(){}` and `async method(){}` and `async *gen(){}` shorthand methods in object literals; `get [Symbol.x](){}` computed accessor in object literals; RegExp `lastIndex` advanced for global/sticky regexps after `exec()`/`test()`; `Reflect.setPrototypeOf`/`isExtensible`/`preventExtensions` fully implemented | 8 | **254** |
+| **30** | Bug fixes: `Error.prototype.toString()` (`"Error: msg"` format); `class E extends Error` subclassing (super() sets props on derived instance); `*gen(){}` and `async method(){}` and `async *gen(){}` shorthand methods in object literals; `get [Symbol.x](){}` computed accessor in object literals; RegExp `lastIndex` advanced for global/sticky regexps after `exec()`/`test()`; `Reflect.setPrototypeOf`/`isExtensible`/`preventExtensions` fully implemented; `Array.fromAsync` now handles async generators (Symbol.asyncIterator) | 9 | **255** |
 
 ---
 
