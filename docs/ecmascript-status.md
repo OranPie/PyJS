@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **301 tests passing** | ~14 200 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–37 added 239 tests)*
+*Updated: 2026-04-03 | **310 tests passing** | ~14 300 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–38 added 248 tests)*
 
 ---
 
@@ -55,15 +55,15 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 ### Syntax & Control Flow
 - Variable declarations: `var`, `let`, `const` with correct scoping; per-iteration `let` closure capture
-- All operators: arithmetic, bitwise, logical, comparison, ternary, comma, `typeof`, `instanceof`, `in`, `delete`, `void`, `**`
-- Destructuring — array and object, nested, defaults, rest patterns
+- All operators: arithmetic, bitwise, logical, comparison, ternary, comma, `typeof`, `instanceof`, `in` (**prototype chain + getters + array `length`** ✓ *Phase 38*), `delete`, `void`, `**`
+- Destructuring — array and object, nested, defaults, rest patterns; **`MemberExpression` LHS targets** (`[obj.a, this.x] = [...]`) ✓ *Phase 38*
 - Spread/rest in arrays, objects, function calls, parameters
 - Arrow functions with correct lexical `this`; **arrow destructuring parameters** `([a,b]) =>`, `({x}) =>` ✓ *(Phase 36)*
 - Template literals (basic + tagged; **escape sequences `\n`/`\t`/`\\` fully processed, `String.raw` raw text correct** *(Phase 28)*)
 - Optional chaining `?.` and nullish coalescing `??`
 - Logical assignment `&&=`, `||=`, `??=`
 - `for…of`, `for…in`, `for…await…of`, labeled `break`/`continue`
-- `try/catch/finally`, optional catch binding `catch {}`
+- `try/catch/finally`, optional catch binding `catch {}`; **`finally` correctly re-throws** errors/breaks/returns when no catch present ✓ *Phase 38*
 - `switch` with fall-through and `break`
 - Comma operator (SequenceExpression)
 - BigInt literals `42n` + arithmetic
@@ -128,7 +128,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 **Array** — push/pop/shift/unshift, splice, slice, concat, reverse, sort, indexOf, lastIndexOf, **includes (SameValueZero for NaN *(Phase 33)*)**, join, flat, flatMap, fill, copyWithin, at, find, findIndex, findLast, findLastIndex, every, some, forEach, map, filter, reduce, reduceRight, toSorted, toReversed, toSpliced, with, **`keys`/`values`/`entries`** *(Phase 31)*, `Array.from`, `Array.of`, **`Array.isArray`**, **`new Array(n)`/`Array(n)` constructor** *(Phase 33)*, **`Array.fromAsync`** (array-like, sync iterables, async generators) *(Phase 30)*
 
-**String** — charAt, charCodeAt, codePointAt, at, indexOf, lastIndexOf, includes, startsWith, endsWith, slice, substring, toLowerCase, toUpperCase, trim, trimStart, trimEnd, padStart, padEnd, repeat, replace (**`$&`/`$$`/`$\``/`$'` substitution + function replacement** *(Phase 31)*), replaceAll (**function replacement** *(Phase 31)*), split, match, matchAll, search, concat, normalize, **localeCompare** *(Phase 32)*, `String.fromCharCode`, `String.fromCodePoint`, `String.raw`
+**String** — charAt, charCodeAt, codePointAt, at, indexOf, lastIndexOf, includes, startsWith, endsWith, slice, substring, toLowerCase, toUpperCase, trim, trimStart, trimEnd, padStart, padEnd, repeat, replace (**`$&`/`$$`/`$\``/`$'` substitution + function replacement** *(Phase 31)*), replaceAll (**function replacement** *(Phase 31)*), split, match, matchAll, search, concat, normalize, **localeCompare** *(Phase 32)*, `String.fromCharCode` ✓ *(Phase 38)*, `String.fromCodePoint`, `String.raw`; **`toString`/`valueOf`** callable on string values ✓ *(Phase 38)*
 
 **Object** — keys, values, entries, assign, create (with proto chain **+ second-arg descriptors** *(Phase 33)*), freeze, seal, isFrozen, isSealed, is, hasOwn, fromEntries, groupBy, defineProperty, **defineProperties** *(Phase 33)*, getOwnPropertyDescriptor, getOwnPropertyDescriptors, getOwnPropertyNames, getOwnPropertySymbols, getPrototypeOf, setPrototypeOf, preventExtensions, isExtensible, `Object.prototype.toString` (with `Symbol.toStringTag`), `Object.prototype.hasOwnProperty`, **`propertyIsEnumerable`**, **`isPrototypeOf`** *(Phase 23)*; **`typeof Object` → `"function"`; `new Object()` callable** *(Phase 33)*
 
@@ -160,7 +160,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 **JSON** — stringify (replacer, space), parse (reviver)
 
-**Date** — constructor, now(), parse(), UTC(), getTime(), toISOString(), toJSON(), toString(), valueOf(), getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds, setFullYear/Month/Date/Hours/Minutes/Seconds/Milliseconds, toLocaleDateString, toLocaleTimeString, toLocaleString
+**Date** — constructor (**string parsing `new Date("YYYY-MM-DD")` / `new Date("...TXX:XXZ")`** ✓ *Phase 38*), now(), parse(), UTC(), getTime(), toISOString(), toJSON(), toString(), valueOf(), getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds, setFullYear/Month/Date/Hours/Minutes/Seconds/Milliseconds, toLocaleDateString, toLocaleTimeString, toLocaleString
 
 **console** — log (**Node.js-style object/array/Map/Set formatting** *(Phase 33)*), error, warn, info, debug, table, dir, assert, count, countReset, time, timeEnd, timeLog, group, groupCollapsed, groupEnd, trace
 
@@ -226,6 +226,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **35** | Correctness fixes: **`hasOwnProperty.call(obj,k)`** now uses `this` correctly (not captured receiver); **`propertyIsEnumerable.call`** and **`valueOf.call`** likewise fixed; **`Object.prototype.toString`** upgraded to full dispatch (Symbol/BigInt types); **`Object.keys/values/entries`** respects Proxy `ownKeys` trap; **`JSON.stringify(undefined)`** returns `undefined` (not `"null"`); **`JSON.stringify([1,undefined,3])`** → `[1,null,3]`; **`using` declaration** Symbol.dispose lookup now searches prototype chain; JSON number threshold `1e15` → `1e21` | 4 | **284** |
 | **36** | Regex/string improvements: **named capture groups** `.groups` returned by `String.match` ✓; **`String.replace/replaceAll` passes named groups** object as last arg to function ✓; **`String.prototype.search`** handles RegExp (named groups, flags) ✓; **`indices.groups`** on regex `d`-flag results ✓; **`Number.toString(base)`** supports fractional numbers ✓; **`BigInt.prototype.toString/valueOf/toLocaleString`** ✓; **`Reflect.ownKeys`** returns symbols as proper `symbol` JsValues ✓; **`Object.getOwnPropertySymbols`** likewise ✓; **arrow function destructuring params** `([a,b]) =>` / `({x}) =>` ✓ | 12 | **296** |
 | **37** | Constructor `.prototype` objects + prototype chain: **14 shared prototype objects** created (`_array_proto`, `_object_proto`, `_function_proto`, etc.); `Array/Map/Set/String/Number/Boolean/RegExp/Symbol/WeakMap/WeakSet/Promise.prototype` all wired up; `Array.prototype === Object.getPrototypeOf([])` ✓; user can extend `Array.prototype.sum = fn` and use on all arrays ✓; `Map.prototype.toObject = fn` ✓; `Set.prototype.toArray = fn` ✓; `Object.create(null)` null-proto correctly reported by `getPrototypeOf` ✓; `Object.prototype.toString` on `_object_proto` (non-enumerable) ✓; `Function.prototype.toString` takes priority over chain ✓; `Symbol.toStringTag` getter walked via prototype chain by `Object.prototype.toString` ✓ | 5 | **301** |
+| **38** | Correctness fixes: **destructuring assignment to `MemberExpression` LHS** (`[obj.a, obj.b] = [1, 2]`; `[this.x] = arr` in setters) ✓; **`in` operator walks prototype chain** for getters (`"area" in rect` → `true`) + checks `length` in arrays ✓; **`String.prototype.toString`/`valueOf`** callable (was `undefined`) ✓; **`String.fromCharCode`** added ✓; **`finally` re-throws** errors/breaks/continues when no catch clause present ✓; **`new Date("YYYY-MM-DD")`** string parsing ✓; **`Array.values()`/`keys()`/`entries()`** iterators now have iterator helpers (`map`, `filter`, `take`, …) ✓ | 9 | **310** |
 
 ---
 

@@ -44,7 +44,20 @@ def register_object_builtins(interp, g, intr):
         keys = [k for k in d.keys() if not k.startswith('__') and not (k.startswith('@@') and k.endswith('@@'))]
         if obj is not None:
             keys = [k for k in keys if interp._is_enumerable(obj, k)]
-        return keys
+        # Spec: integer indices first in ascending numeric order, then string keys in insertion order
+        int_keys = []
+        str_keys = []
+        for k in keys:
+            try:
+                n = int(k)
+                if n >= 0 and str(n) == k:
+                    int_keys.append((n, k))
+                    continue
+            except (ValueError, TypeError):
+                pass
+            str_keys.append(k)
+        int_keys.sort()
+        return [k for _, k in int_keys] + str_keys
 
     def _obj_keys_impl(_, args, interp):
         if not args: return py_to_js([])
@@ -595,6 +608,10 @@ def register_object_builtins(interp, g, intr):
         lambda this_val, args, interp: JsValue('string', ''.join(chr(int(interp._to_num(a))) for a in args)),
         'String.fromCodePoint',
     )
+    string_ctor.value['fromCharCode'] = interp._make_intrinsic(
+        lambda this_val, args, interp: JsValue('string', ''.join(chr(int(interp._to_num(a)) & 0xFFFF) for a in args)),
+        'String.fromCharCode',
+    )
 
     def _make_regexp(source, flags=''):
         flag_text = ''.join(sorted(set(flags)))
@@ -807,6 +824,19 @@ def register_object_builtins(interp, g, intr):
             from datetime import datetime as _dt2
             dt = _dt2(year, month, day, hours, minutes, seconds, ms_part * 1000, tzinfo=timezone.utc)
             return _make_date(dt.timestamp() * 1000)
+        if args and args[0].type == 'string':
+            # Parse date string via Date.parse logic
+            s = args[0].value
+            from datetime import datetime as _dt_parse
+            for fmt in ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S.%f',
+                        '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d', '%b %d, %Y', '%d %b %Y',
+                        '%Y/%m/%d', '%m/%d/%Y'):
+                try:
+                    dt = _dt_parse.strptime(s.strip(), fmt)
+                    return _make_date(dt.replace(tzinfo=timezone.utc).timestamp() * 1000.0)
+                except ValueError:
+                    continue
+            return _make_date(float('nan'))
         return _make_date(interp._to_num(args[0]) if args else None)
 
     date_ctor = interp._make_intrinsic(_date_ctor_fn, 'Date')

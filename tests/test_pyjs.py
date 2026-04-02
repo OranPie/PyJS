@@ -4188,6 +4188,173 @@ console.log(n.x);
         self.assertEqual(lines[0], 'true')
         self.assertEqual(lines[1], '1')
 
+    # ---- Phase 38 tests ----
+
+    def test_member_expression_destructuring_target(self):
+        """Destructuring assignment with MemberExpression LHS targets."""
+        source = '''
+const obj = { a: 0, b: 0 };
+[obj.a, obj.b] = [1, 2];
+console.log(obj.a, obj.b);
+const target = { x: 0 };
+({ x: target.x } = { x: 99 });
+console.log(target.x);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '1 2')
+        self.assertEqual(lines[1], '99')
+
+    def test_in_operator_prototype_chain(self):
+        """The 'in' operator checks the full prototype chain including getters."""
+        source = '''
+class Rectangle {
+  constructor(w, h) { this.width = w; this.height = h; }
+  get area() { return this.width * this.height; }
+}
+const r = new Rectangle(3, 4);
+console.log("width" in r);
+console.log("area" in r);
+console.log("missing" in r);
+const arr = [1, 2, 3];
+console.log("length" in arr);
+console.log("0" in arr);
+console.log("3" in arr);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'true')
+        self.assertEqual(lines[2], 'false')
+        self.assertEqual(lines[3], 'true')
+        self.assertEqual(lines[4], 'true')
+        self.assertEqual(lines[5], 'false')
+
+    def test_string_tostring_valueof(self):
+        """String.prototype.toString and valueOf are callable."""
+        source = '''
+const s = "hello";
+console.log(s.toString());
+console.log(s.valueOf());
+const n = 42;
+console.log(n.toString());
+console.log(n.toString(16));
+function tag(strings, ...values) {
+  return strings.join("") + values.map(v => v.toString().toUpperCase()).join("");
+}
+const name = "world";
+console.log(tag`hi ${name}`);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'hello')
+        self.assertEqual(lines[1], 'hello')
+        self.assertEqual(lines[2], '42')
+        self.assertEqual(lines[3], '2a')
+        self.assertEqual(lines[4], 'hi WORLD')
+
+    def test_string_from_charcode(self):
+        """String.fromCharCode creates strings from char codes."""
+        source = '''
+console.log(String.fromCharCode(65, 66, 67));
+console.log(String.fromCodePoint(128516));
+console.log(String.fromCharCode(72, 101, 108, 108, 111));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'ABC')
+        self.assertEqual(lines[1], '\U0001f604')
+        self.assertEqual(lines[2], 'Hello')
+
+    def test_finally_rethrows_error(self):
+        """finally block runs then error propagates when there is no catch."""
+        source = '''
+const log = [];
+function withFinally() {
+  try {
+    throw new Error("test");
+  } finally {
+    log.push("finally");
+  }
+}
+try {
+  withFinally();
+} catch(e) {
+  log.push("caught:" + e.message);
+}
+console.log(log.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), 'finally,caught:test')
+
+    def test_finally_with_return(self):
+        """finally runs before return value is delivered."""
+        source = '''
+const log = [];
+function f() {
+  try { return "retval"; }
+  finally { log.push("finally"); }
+}
+const r = f();
+log.push("r=" + r);
+console.log(log.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), 'finally,r=retval')
+
+    def test_date_string_parsing(self):
+        """new Date('YYYY-MM-DD') correctly parses date strings."""
+        source = '''
+const d = new Date("2024-03-15");
+console.log(d.getFullYear());
+console.log(d.getMonth());
+console.log(d.getDate());
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '2024')
+        self.assertEqual(lines[1], '2')
+        self.assertEqual(lines[2], '15')
+
+    def test_array_values_iterator_helpers(self):
+        """Array.values() iterator supports ES2025 iterator helpers."""
+        source = '''
+const mapped = [1,2,3,4,5].values().map(x => x * 2).toArray();
+console.log(mapped.join(","));
+const filtered = [1,2,3,4,5].values().filter(x => x % 2 === 0).toArray();
+console.log(filtered.join(","));
+const taken = [1,2,3,4,5].values().take(3).toArray();
+console.log(taken.join(","));
+const sum = [1,2,3,4,5].values().reduce((a,b) => a+b, 0);
+console.log(sum);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '2,4,6,8,10')
+        self.assertEqual(lines[1], '2,4')
+        self.assertEqual(lines[2], '1,2,3')
+        self.assertEqual(lines[3], '15')
+
+    def test_setter_destructuring_assignment(self):
+        """Setter can use destructuring assignment on this properties."""
+        source = '''
+const person = {
+  firstName: "John",
+  lastName: "Doe",
+  get fullName() { return this.firstName + " " + this.lastName; },
+  set fullName(val) { [this.firstName, this.lastName] = val.split(" "); }
+};
+person.fullName = "Jane Smith";
+console.log(person.firstName);
+console.log(person.lastName);
+console.log(person.fullName);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'Jane')
+        self.assertEqual(lines[1], 'Smith')
+        self.assertEqual(lines[2], 'Jane Smith')
+
 
 if __name__ == '__main__':
     unittest.main()

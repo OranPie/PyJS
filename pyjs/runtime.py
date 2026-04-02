@@ -63,7 +63,7 @@ _log_proxy = get_logger("proxy")
 
 class Interpreter:
     ARRAY_METHODS = frozenset({'push', 'pop', 'shift', 'unshift', 'indexOf', 'includes', 'join', 'slice', 'splice', 'concat', 'reverse', 'sort', 'forEach', 'map', 'filter', 'reduce', 'find', 'flat', 'flatMap', 'every', 'some', 'fill', 'copyWithin', 'toString', 'at', 'findIndex', 'findLast', 'findLastIndex', 'reduceRight', 'lastIndexOf', 'toSorted', 'toReversed', 'toSpliced', 'with', 'keys', 'values', 'entries'})
-    STRING_METHODS = frozenset({'charAt', 'charCodeAt', 'indexOf', 'includes', 'slice', 'substring', 'toLowerCase', 'toUpperCase', 'trim', 'split', 'replace', 'replaceAll', 'startsWith', 'endsWith', 'padStart', 'padEnd', 'repeat', 'match', 'search', 'concat', 'lastIndexOf', 'normalize', 'at', 'matchAll', 'trimStart', 'trimLeft', 'trimEnd', 'trimRight', 'codePointAt', 'isWellFormed', 'toWellFormed', 'localeCompare'})
+    STRING_METHODS = frozenset({'charAt', 'charCodeAt', 'indexOf', 'includes', 'slice', 'substring', 'toLowerCase', 'toUpperCase', 'trim', 'split', 'replace', 'replaceAll', 'startsWith', 'endsWith', 'padStart', 'padEnd', 'repeat', 'match', 'search', 'concat', 'lastIndexOf', 'normalize', 'at', 'matchAll', 'trimStart', 'trimLeft', 'trimEnd', 'trimRight', 'codePointAt', 'isWellFormed', 'toWellFormed', 'localeCompare', 'toString', 'valueOf'})
     NUMBER_METHODS = frozenset({'toFixed', 'toPrecision', 'toString', 'toLocaleString', 'valueOf', 'toExponential'})
     PROMISE_METHODS = frozenset({'then', 'catch', 'finally'})
     EVENT_LOOP_LIMIT = 10000
@@ -729,8 +729,14 @@ class Interpreter:
         if t == 'undefined': return float('nan')
         if t == 'bigint': return float(v.value)
         if t == 'string':
+            s = v.value.strip()
+            if not s:
+                return 0.0
             try:
-                return float(v.value.strip() or 0)
+                # Handle 0x, 0o, 0b prefixes
+                if len(s) > 2 and s[0] == '0' and s[1] in 'xXoObB':
+                    return float(int(s, 0))
+                return float(s)
             except (ValueError, TypeError, OverflowError):
                 return float('nan')
         if t in ('object', 'function', 'intrinsic', 'class', 'array'):
@@ -1124,6 +1130,14 @@ class Interpreter:
         if pattern.get('type') == 'RestElement':
             self._bind_pattern(pattern['argument'], value, env, keyword, declare)
             return
+        if pattern.get('type') == 'MemberExpression':
+            obj = self._eval(pattern['object'], env)
+            if pattern.get('computed'):
+                key = self._to_key(self._eval(pattern['property'], env))
+            else:
+                key = pattern['property']['name']
+            self._set_prop(obj, key, value)
+            return
         if pattern.get('type') == 'ArrayPattern':
             if self._is_nullish(value):
                 raise _JSError(py_to_js('Cannot destructure null or undefined'))
@@ -1157,13 +1171,14 @@ class Interpreter:
                 key = str(key)
                 used_keys.add(key)
                 if source.type == 'object':
-                    prop_value = source.value.get(key, UNDEFINED)
+                    prop_value = self._get_prop(source, key) if key not in source.value else source.value.get(key, UNDEFINED)
                 elif source.type == 'array':
                     try:
                         idx = int(key)
                         prop_value = source.value[idx] if 0 <= idx < len(source.value) else UNDEFINED
                     except (ValueError, TypeError):
-                        prop_value = UNDEFINED
+                        # For non-integer keys on arrays (like 'groups', 'index'), use _get_prop
+                        prop_value = self._get_prop(source, key)
                 elif source.type == 'string':
                     try:
                         idx = int(key)
@@ -1773,13 +1788,15 @@ class Interpreter:
                 return py_to_js([])
             if name == 'reduce':
                 cb = args[0] if args else None
-                idx = 0
-                acc = args[1] if len(args)>1 else (a[0] if a else None)
-                if acc is None and not a:
+                if len(args) > 1:
+                    acc = args[1]
+                    start_idx = 0
+                elif a:
+                    acc = a[0]
+                    start_idx = 1
+                else:
                     raise _JSError(py_to_js('Reduce of empty array with no initial value'))
-                if acc is None:
-                    acc = a[0]; idx = 1
-                for i in range(idx, len(a)):
+                for i in range(start_idx, len(a)):
                     acc = interp._call_js(cb, [acc, a[i], JsValue("number",i), arr], None)
                 return acc
             if name == 'find':
@@ -1946,6 +1963,7 @@ class Interpreter:
                     return _next
                 iter_obj.value['next'] = interp._make_intrinsic(_make_iter_next(), f'Array.{name}.next')
                 iter_obj.value[sym_iter_key] = interp._make_intrinsic(lambda tv, a, ni, o=iter_obj: o, f'Array.{name}[Symbol.iterator]')
+                interp._add_iterator_helpers(iter_obj)
                 return iter_obj
             # Check plugin-registered methods
             plugin_key = ('array', name)
@@ -2375,6 +2393,8 @@ class Interpreter:
             plugin_key = ('string', name)
             if interp._plugin_methods and plugin_key in interp._plugin_methods:
                 return interp._plugin_methods[plugin_key](this_val, args, interp)
+            if name == 'toString' or name == 'valueOf':
+                return sval
             return UNDEFINED
         return JsValue("intrinsic", {"fn": fn, "name": f"String.{name}"})
 
@@ -3548,13 +3568,26 @@ class Interpreter:
         if right.type == "object":
             cur = right
             while isinstance(cur, JsValue) and cur.type == 'object':
+                # Collect own enumerable keys for this level
+                level_int_keys = []
+                level_str_keys = []
                 for k in cur.value.keys():
-                    if k not in seen and not k.startswith('__') and not k.startswith('@@'):
-                        if self._is_enumerable(cur, k):
-                            seen.add(k)
-                            keys.append(k)
-                        else:
-                            seen.add(k)
+                    if k in seen or k.startswith('__') or k.startswith('@@'):
+                        continue
+                    seen.add(k)
+                    if not self._is_enumerable(cur, k):
+                        continue
+                    try:
+                        n = int(k)
+                        if n >= 0 and str(n) == k:
+                            level_int_keys.append((n, k))
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+                    level_str_keys.append(k)
+                level_int_keys.sort()
+                keys.extend(k for _, k in level_int_keys)
+                keys.extend(level_str_keys)
                 cur = self._get_proto(cur)
         elif right.type == "array": keys = [str(i) for i in range(len(right.value))]
         elif right.type == "string": keys = [str(i) for i in range(len(right.value))]
@@ -3698,6 +3731,7 @@ class Interpreter:
         return None
 
     def _exec_try_statement(self, node, env):
+        _pending_exc = None
         try:
             self._exec(node["block"], env)
         except _JSError as e:
@@ -3714,8 +3748,10 @@ class Interpreter:
                     else:
                         catch_env.declare(param, e.value, 'let')
                 self._exec(handler["body"], catch_env)
-        except (_JSReturn, _JSBreak, _JSContinue):
-            raise
+            else:
+                _pending_exc = e
+        except (_JSReturn, _JSBreak, _JSContinue) as e:
+            _pending_exc = e
         except Exception as e:
             handler = node.get("handler")
             if handler:
@@ -3730,10 +3766,12 @@ class Interpreter:
                         catch_env.declare(param, err_val, 'let')
                 self._exec(handler["body"], catch_env)
             else:
-                raise
+                _pending_exc = e
         finally:
             if node.get("finalizer"):
                 self._exec(node["finalizer"], env)
+        if _pending_exc is not None:
+            raise _pending_exc
         return None
 
     def _exec_break_statement(self, node, env):
@@ -4215,17 +4253,39 @@ class Interpreter:
                 if trap:
                     return self._call_js(trap, [proxy.target, py_to_js(key)], UNDEFINED)
                 target = proxy.target
-            if target.type == "object":
+            if target.type in ("object", "function", "intrinsic", "class"):
                 cur = target
-                while cur and cur.type == 'object':
-                    if key in cur.value:
+                while isinstance(cur, JsValue) and cur.type in ('object', 'function', 'intrinsic', 'class'):
+                    if key in cur.value or f"__get__{key}" in cur.value or f"__set__{key}" in cur.value:
                         return JS_TRUE
                     cur = self._get_proto(cur)
                 return JS_FALSE
             if target.type == "array":
-                try: return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
-                except (ValueError, TypeError): return JS_FALSE
-            if target.type == "string": return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
+                if key == "length":
+                    return JS_TRUE
+                try:
+                    idx = int(key)
+                    if 0 <= idx < len(target.value):
+                        return JS_TRUE
+                except (ValueError, TypeError):
+                    pass
+                # Check extras (e.g. 'groups' on regex match) and array prototype chain
+                if target.extras and key in target.extras:
+                    return JS_TRUE
+                # Walk array prototype for inherited properties (like push, pop, etc.)
+                cur = self._get_proto(target)
+                while isinstance(cur, JsValue) and cur.type in ('object', 'function', 'intrinsic', 'class'):
+                    if key in cur.value or f"__get__{key}" in cur.value:
+                        return JS_TRUE
+                    cur = self._get_proto(cur)
+                return JS_FALSE
+            if target.type == "string":
+                if key == "length":
+                    return JS_TRUE
+                try:
+                    return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
+                except (ValueError, TypeError):
+                    return JS_FALSE
             return JS_FALSE
         # bitwise
         li, ri = int(self._to_num(l)), int(self._to_num(r))
@@ -4873,8 +4933,8 @@ class Interpreter:
 
         return gen_obj
 
-    def _make_generator_obj(self, fn_val, args):
-        gen = JsGenerator(fn_val, args, self)
+    def _make_generator_obj(self, fn_val, args, this_val=None):
+        gen = JsGenerator(fn_val, args, self, this_val)
         sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
         def _gen_next(tv, a, i):
             _val = a[0] if a else UNDEFINED
@@ -4902,8 +4962,8 @@ class Interpreter:
         self._add_iterator_helpers(gen_obj)
         return gen_obj
 
-    def _make_async_generator_obj(self, fn_val, args):
-        gen = JsAsyncGenerator(fn_val, args, self)
+    def _make_async_generator_obj(self, fn_val, args, this_val=None):
+        gen = JsAsyncGenerator(fn_val, args, self, this_val)
         sym_async_iter_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
         gen_obj = JsValue('object', {
             '__kind__': JsValue('string', 'AsyncGenerator'),
@@ -4970,8 +5030,8 @@ class Interpreter:
             # Generator function — return generator object immediately without running body
             if node.get("generator_"):
                 if node.get("async_"):
-                    return self._make_async_generator_obj(fn_val, args)
-                return self._make_generator_obj(fn_val, args)
+                    return self._make_async_generator_obj(fn_val, args, this_val)
+                return self._make_generator_obj(fn_val, args, this_val)
             env = info["env"]
             call_env = Environment(env)
             _fn_name = info.get("name") or node.get("id") or "<anonymous>"

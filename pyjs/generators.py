@@ -16,10 +16,11 @@ _log = get_logger("async")
 class JsGenerator:
     """JS generator object backed by a Python thread."""
 
-    def __init__(self, fn_val, args, interp):
+    def __init__(self, fn_val, args, interp, this_val=None):
         self._fn_val = fn_val
         self._args = args
         self._interp = interp
+        self._this_val = this_val
         self._done = False
         self._to_gen   = _queue_mod.Queue()
         self._from_gen = _queue_mod.Queue()
@@ -41,7 +42,7 @@ class JsGenerator:
             return
 
         call_env = Environment(env)
-        call_env._this     = UNDEFINED
+        call_env._this     = self._this_val if self._this_val is not None else UNDEFINED
         call_env._fn_args  = list(self._args)
         call_env._is_fn_env = True
         call_env._generator = self

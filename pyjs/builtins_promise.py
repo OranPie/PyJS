@@ -149,7 +149,6 @@ def register_promise_builtins(interp, g, intr):
                 target.value['name'] = py_to_js(err_name)
             target.value['stack'] = py_to_js(stack_str)
             target.value['__error_type__'] = py_to_js(err_name)
-            target.value['constructor'] = _fn_ref[0] or UNDEFINED
             if _proto_ref[0] is not None:
                 target.value.setdefault('__proto__', _proto_ref[0])
             if opts and opts.type == 'object' and 'cause' in opts.value:
@@ -175,6 +174,9 @@ def register_promise_builtins(interp, g, intr):
         error_proto.value['message'] = py_to_js('')
         fn.value['prototype'] = error_proto
         _proto_ref[0] = error_proto
+        # Set constructor on prototype (instances inherit it via proto chain)
+        error_proto.value['constructor'] = fn
+        _fn_ref[0] = fn
         return fn
     for _ename in _error_names:
         g.declare(_ename, _make_error_ctor(_ename), 'var')
