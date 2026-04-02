@@ -161,6 +161,7 @@ def register_advanced_builtins(interp, g, intr):
         wm.value['get']    = intr(_wm_get,    'WeakMap.get')
         wm.value['has']    = intr(_wm_has,    'WeakMap.has')
         wm.value['delete'] = intr(_wm_delete, 'WeakMap.delete')
+        wm.value['__kind__'] = py_to_js('WeakMap')
         return wm
 
     def _make_weakset():
@@ -188,6 +189,7 @@ def register_advanced_builtins(interp, g, intr):
         ws.value['add']    = intr(_ws_add,    'WeakSet.add')
         ws.value['has']    = intr(_ws_has,    'WeakSet.has')
         ws.value['delete'] = intr(_ws_delete, 'WeakSet.delete')
+        ws.value['__kind__'] = py_to_js('WeakSet')
         return ws
 
     g.declare('WeakMap', interp._make_intrinsic(lambda this_val, args, interp: _make_weakmap(), 'WeakMap'), 'var')

@@ -63,7 +63,7 @@ _log_proxy = get_logger("proxy")
 
 class Interpreter:
     ARRAY_METHODS = frozenset({'push', 'pop', 'shift', 'unshift', 'indexOf', 'includes', 'join', 'slice', 'splice', 'concat', 'reverse', 'sort', 'forEach', 'map', 'filter', 'reduce', 'find', 'flat', 'flatMap', 'every', 'some', 'fill', 'copyWithin', 'toString', 'at', 'findIndex', 'findLast', 'findLastIndex', 'reduceRight', 'lastIndexOf', 'toSorted', 'toReversed', 'toSpliced', 'with', 'keys', 'values', 'entries'})
-    STRING_METHODS = frozenset({'charAt', 'charCodeAt', 'indexOf', 'includes', 'slice', 'substring', 'toLowerCase', 'toUpperCase', 'trim', 'split', 'replace', 'replaceAll', 'startsWith', 'endsWith', 'padStart', 'padEnd', 'repeat', 'match', 'search', 'concat', 'lastIndexOf', 'normalize', 'at', 'matchAll', 'trimStart', 'trimLeft', 'trimEnd', 'trimRight', 'codePointAt', 'isWellFormed', 'toWellFormed'})
+    STRING_METHODS = frozenset({'charAt', 'charCodeAt', 'indexOf', 'includes', 'slice', 'substring', 'toLowerCase', 'toUpperCase', 'trim', 'split', 'replace', 'replaceAll', 'startsWith', 'endsWith', 'padStart', 'padEnd', 'repeat', 'match', 'search', 'concat', 'lastIndexOf', 'normalize', 'at', 'matchAll', 'trimStart', 'trimLeft', 'trimEnd', 'trimRight', 'codePointAt', 'isWellFormed', 'toWellFormed', 'localeCompare'})
     NUMBER_METHODS = frozenset({'toFixed', 'toPrecision', 'toString', 'toLocaleString', 'valueOf', 'toExponential'})
     PROMISE_METHODS = frozenset({'then', 'catch', 'finally'})
     EVENT_LOOP_LIMIT = 10000
@@ -686,6 +686,9 @@ class Interpreter:
                 return float(v.value.strip() or 0)
             except (ValueError, TypeError, OverflowError):
                 return float('nan')
+        if t in ('object', 'function', 'intrinsic', 'class', 'array'):
+            prim = self._to_primitive(v, 'number')
+            return self._to_num(prim)
         return float('nan')
 
     _TO_STR_SIMPLE = {
@@ -740,6 +743,10 @@ class Interpreter:
                 tag = v.value.get(tag_key)
                 if tag and isinstance(tag, JsValue) and tag.type == 'string':
                     return f'[object {tag.value}]'
+                # Check Symbol.toPrimitive / toString via prototype
+                prim = self._to_primitive(v, 'string')
+                if prim.type not in ('object', 'function', 'intrinsic', 'class', 'array'):
+                    return self._to_str(prim)
             if v.type in ('function', 'intrinsic', 'class'):
                 return f'function {v.value.get("name","")}() {{ [native code] }}'
             return '[object Object]'
@@ -749,9 +756,9 @@ class Interpreter:
         """Convert a JS value to a primitive."""
         if val.type in ('undefined','null','boolean','number','string','bigint','symbol'):
             return val
-        # Check Symbol.toPrimitive
+        # Check Symbol.toPrimitive via full prototype chain
         sym_key = f"@@{SYMBOL_TO_PRIMITIVE}@@"
-        tp_fn = val.value.get(sym_key) if isinstance(val.value, dict) else None
+        tp_fn = self._get_prop(val, sym_key) if val.type in ('object','function','intrinsic','class','array') else None
         if tp_fn and tp_fn.type not in ('undefined','null'):
             result = self._call_js(tp_fn, [py_to_js(hint)], val)
             if result.type not in ('object','array'):
@@ -1348,6 +1355,22 @@ class Interpreter:
                 return
             self._set_prop(proxy.target, key, val)
             return
+        if obj.type == 'object' and '__super_target__' in obj.value:
+            target = obj.value.get('__super_target__')
+            this_val = obj.value.get('__super_this__', target)
+            if isinstance(target, JsValue):
+                # Walk target proto chain for setter
+                current = target
+                while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
+                    setter_key = f"__set__{key}"
+                    if setter_key in current.value:
+                        self._call_js(current.value[setter_key], [val], this_val)
+                        return
+                    current = self._get_proto(current)
+                # No setter found — set directly on __super_this__
+                if isinstance(this_val, JsValue) and this_val.type in ('object', 'function', 'intrinsic', 'class'):
+                    this_val.value[key] = val
+            return
         if obj.type == 'array':
             try:
                 idx = int(key)
@@ -1496,11 +1519,15 @@ class Interpreter:
             if name == 'reverse':
                 a.reverse(); return arr
             if name == 'sort':
-                def sort_key(x):
-                    if x.type == 'number': return (0, x.value)
-                    if x.type == 'string': return (1, x.value)
-                    return (2, interp._to_str(x))
-                a.sort(key=sort_key); return arr
+                cb = args[0] if args else None
+                if cb and interp._is_callable(cb):
+                    def _sort_cmp(x, y):
+                        r = interp._to_num(interp._call_js(cb, [x, y], None))
+                        return -1 if r < 0 else (1 if r > 0 else 0)
+                    a.sort(key=functools.cmp_to_key(_sort_cmp))
+                else:
+                    a.sort(key=lambda x: interp._to_str(x))
+                return arr
             if name == 'forEach':
                 cb = args[0] if args else None
                 if cb:
@@ -2067,6 +2094,11 @@ class Interpreter:
                         return JS_FALSE
                     i += 1
                 return JS_TRUE
+            if name == 'localeCompare':
+                other = self._to_str(args[0]) if args else ''
+                if s < other: return JsValue('number', -1.0)
+                if s > other: return JsValue('number', 1.0)
+                return JsValue('number', 0.0)
             if name == 'toWellFormed':
                 result = []
                 i = 0
@@ -2633,15 +2665,27 @@ class Interpreter:
         if a.type == 'string' and b.type == 'number': return self._eq(JsValue("number", self._to_num(a)), b)
         if a.type == 'boolean': return self._eq(JsValue("number", 1 if a.value else 0), b)
         if b.type == 'boolean': return self._eq(a, JsValue("number", 1 if b.value else 0))
-        if (a.type == 'string' or a.type == 'number') and b.type == 'object': return self._eq(a, JsValue("number", self._to_num(b)))
-        if a.type == 'object' and (b.type == 'string' or b.type == 'number'): return self._eq(JsValue("number", self._to_num(a)), b)
+        _obj_types = ('object', 'array', 'function', 'intrinsic', 'class')
+        if (a.type == 'string' or a.type == 'number') and b.type in _obj_types:
+            return self._eq(a, self._to_primitive(b))
+        if a.type in _obj_types and (b.type == 'string' or b.type == 'number'):
+            return self._eq(self._to_primitive(a), b)
         return False
 
     def _cmp(self, op, a: JsValue, b: JsValue):
-        if op == '<':  return self._to_num(a) <  self._to_num(b)
-        if op == '>':  return self._to_num(a) >  self._to_num(b)
-        if op == '<=': return self._to_num(a) <= self._to_num(b)
-        if op == '>=': return self._to_num(a) >= self._to_num(b)
+        # ES spec: apply ToPrimitive with 'number' hint, then if both strings compare lexically
+        ap = self._to_primitive(a, 'number')
+        bp = self._to_primitive(b, 'number')
+        if ap.type == 'string' and bp.type == 'string':
+            lv, rv = ap.value, bp.value
+        elif ap.type == 'bigint' and bp.type == 'bigint':
+            lv, rv = ap.value, bp.value
+        else:
+            lv, rv = self._to_num(ap), self._to_num(bp)
+        if op == '<':  return lv <  rv
+        if op == '>':  return lv >  rv
+        if op == '<=': return lv <= rv
+        if op == '>=': return lv >= rv
         return False
 
     # --------------------------------------------------------- execution
@@ -3801,6 +3845,23 @@ class Interpreter:
                     result = self._call_js(_hi_fn, [l], r)
                     return JS_TRUE if self._truthy(result) else JS_FALSE
             _error_ctor_names = {'Error','TypeError','RangeError','SyntaxError','ReferenceError','URIError','EvalError','AggregateError'}
+            # Check built-in globals stored as objects (Array, Object, Function, Promise, Map, Set, etc.)
+            if r.type == 'object' and isinstance(r.value, dict):
+                _g = self.genv
+                _kind_ctors = {'Map', 'Set', 'WeakMap', 'WeakSet'}
+                for _gname in ('Array','Object','Function','Promise','RegExp','Map','Set','WeakMap','WeakSet'):
+                    if _g.has(_gname) and _g.get(_gname) is r:
+                        if _gname == 'Array': return JS_TRUE if l.type == 'array' else JS_FALSE
+                        if _gname == 'Object': return JS_TRUE if l.type in ('object','array','function','intrinsic','class','promise','regexp') else JS_FALSE
+                        if _gname == 'Function': return JS_TRUE if l.type in ('function','intrinsic','class') else JS_FALSE
+                        if _gname == 'Promise': return JS_TRUE if l.type == 'promise' else JS_FALSE
+                        if _gname == 'RegExp': return JS_TRUE if l.type == 'regexp' else JS_FALSE
+                        if _gname in _kind_ctors:
+                            if l.type == 'object' and isinstance(l.value, dict):
+                                kind_v = l.value.get('__kind__')
+                                kind_s = kind_v.value if isinstance(kind_v, JsValue) else kind_v
+                                return JS_TRUE if kind_s == _gname else JS_FALSE
+                            return JS_FALSE
             if r.type in ("function","intrinsic","class"):
                 ctor_name = r.value.get("name") if isinstance(r.value, dict) else None
                 if isinstance(ctor_name, str) and ctor_name in _error_ctor_names:
@@ -3810,8 +3871,23 @@ class Interpreter:
                             if ctor_name == 'Error' or err_type.value == ctor_name:
                                 return JS_TRUE
                     return JS_FALSE
+                # Built-in function/intrinsic constructors
+                _func_builtin_map = {
+                    'Map': None, 'Set': None, 'WeakMap': None, 'WeakSet': None,
+                    'RegExp': None, 'Promise': ('promise',),
+                    'Function': ('function','intrinsic','class'),
+                }
+                if isinstance(ctor_name, str) and ctor_name in _func_builtin_map:
+                    allowed = _func_builtin_map[ctor_name]
+                    if allowed is None:
+                        if l.type == 'object' and isinstance(l.value, dict):
+                            kind_v = l.value.get('__kind__')
+                            kind_s = kind_v.value if isinstance(kind_v, JsValue) else kind_v
+                            return JS_TRUE if kind_s == ctor_name else JS_FALSE
+                        return JS_FALSE
+                    return JS_TRUE if l.type in allowed else JS_FALSE
                 proto = r.value.get("prototype")
-                if proto and l.type == "object":
+                if proto and l.type in ("object", "array", "function", "intrinsic", "class"):
                     lp = self._get_proto(l)
                     while lp:
                         if lp is proto: return JS_TRUE

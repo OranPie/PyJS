@@ -3492,5 +3492,134 @@ console.log(new Dog("Rex").description);
         self.assertEqual(result.strip(), "Animal: Rex (Dog)")
 
 
+    # ----- Phase 32 tests -----
+
+    def test_symbol_to_primitive(self):
+        """Symbol.toPrimitive on class instances works for numeric/string/default hints"""
+        source = '''
+class Num {
+    constructor(v) { this.v = v; }
+    [Symbol.toPrimitive](hint) {
+        if (hint === "number") return this.v;
+        if (hint === "string") return "Num(" + this.v + ")";
+        return this.v;
+    }
+}
+const n = new Num(7);
+console.log(+n);
+console.log(`${n}`);
+console.log(n + 3);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "7")
+        self.assertEqual(lines[1], "Num(7)")
+        self.assertEqual(lines[2], "10")
+
+    def test_string_comparison_operators(self):
+        """String < > <= >= use lexicographic comparison"""
+        source = '''
+console.log("abc" < "abd");
+console.log("Z" < "a");
+console.log("b" > "a");
+console.log("a" <= "a");
+console.log("b" <= "a");
+console.log("10" < "9");
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "true")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "true")
+        self.assertEqual(lines[4], "false")
+        self.assertEqual(lines[5], "true")
+
+    def test_sort_with_comparator(self):
+        """Array.prototype.sort uses comparator function when provided"""
+        source = '''
+const arr = [3, 1, 4, 1, 5, 9, 2];
+arr.sort((a, b) => b - a);
+console.log(arr.join(","));
+const words = ["banana", "apple", "cherry"];
+words.sort();
+console.log(words.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "9,5,4,3,2,1,1")
+        self.assertEqual(lines[1], "apple,banana,cherry")
+
+    def test_abstract_equality_coercion(self):
+        """Abstract equality (==) coerces arrays/objects to primitives"""
+        source = '''
+console.log([] == false);
+console.log([] == 0);
+console.log(["1"] == 1);
+console.log(null == undefined);
+console.log(null == 0);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "true")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "true")
+        self.assertEqual(lines[4], "false")
+
+    def test_instanceof_builtin(self):
+        """instanceof works for built-in constructors: Array, Object, Map, Set, RegExp"""
+        source = '''
+console.log([] instanceof Array);
+console.log({} instanceof Object);
+console.log([] instanceof Object);
+console.log(new Map() instanceof Map);
+console.log(new Set() instanceof Set);
+console.log(/x/ instanceof RegExp);
+console.log(new WeakMap() instanceof WeakMap);
+console.log([] instanceof Map);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "true")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "true")
+        self.assertEqual(lines[4], "true")
+        self.assertEqual(lines[5], "true")
+        self.assertEqual(lines[6], "true")
+        self.assertEqual(lines[7], "false")
+
+    def test_super_setter(self):
+        """super.prop = v in derived class calls ancestor setter with correct this"""
+        source = '''
+class Base {
+    set x(v) { this._x = v * 2; }
+    get x() { return this._x; }
+}
+class Child extends Base {
+    setViaSuper(v) { super.x = v; }
+}
+const c = new Child();
+c.setViaSuper(7);
+console.log(c.x);
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), "14")
+
+    def test_string_locale_compare(self):
+        """String.prototype.localeCompare returns -1, 0, 1"""
+        source = '''
+console.log("a".localeCompare("b"));
+console.log("b".localeCompare("a"));
+console.log("a".localeCompare("a"));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "-1")
+        self.assertEqual(lines[1], "1")
+        self.assertEqual(lines[2], "0")
+
+
 if __name__ == '__main__':
     unittest.main()

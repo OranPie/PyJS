@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **262 tests passing** | ~13 200 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–31 added 200 tests)*
+*Updated: 2026-04-03 | **269 tests passing** | ~13 200 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–32 added 207 tests)*
 
 ---
 
@@ -35,7 +35,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 | Version | Estimate | Key gaps |
 |---|---|---|
-| **ES2015** | ~98 % | Full Proxy/Reflect ✓; WeakMap/WeakSet ✓; private fields ✓; `super()` in class constructors ✓; `super.getter` in derived classes ✓ *(Phase 31)*; `super` in obj literals ✓; generator/async methods in object literals ✓; computed class fields `[expr] = val` ✓ *(Phase 31)*; remaining: `with` (deprecated), tail-call opt |
+| **ES2015** | ~99 % | Full Proxy/Reflect ✓; WeakMap/WeakSet ✓; private fields ✓; `super()` in constructors ✓; `super.getter`/`super.setter` ✓ *(Phase 31–32)*; `super` in obj literals ✓; computed class fields `[expr]` ✓; string comparison operators `<`/`>`/`<=`/`>=` ✓ *(Phase 32)*; `instanceof` for all built-in constructors ✓ *(Phase 32)*; remaining: `with` (deprecated), tail-call opt |
 | **ES2016** | ~95 % | Array.includes ✓, `**` ✓ |
 | **ES2017** | ~90 % | async/await ✓, SharedArrayBuffer/Atomics absent |
 | **ES2018** | ~88 % | for-await-of ✓, regex `s`/`d` flags ✓; full `dotAll`/`unicode` edge cases |
@@ -47,7 +47,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **ES2024** | ~95 % | Promise.withResolvers ✓, `using`/`await using` ✓, Set ES2025 ops ✓, Object.groupBy ✓, **ArrayBuffer resize/transfer** ✓ |
 | **ES2025** | ~88 % | Iterator.from ✓, Math.sumPrecise ✓, RegExp.escape ✓, Error.isError ✓, Symbol.dispose ✓, **Float16Array** ✓, **Uint8Array.toBase64/fromBase64/toHex/fromHex** ✓, **import attributes** ✓ |
 
-**Overall: ~98 % of ES2015–ES2025 surface area implemented.**
+**Overall: ~98–99 % of ES2015–ES2025 surface area implemented.**
 
 ---
 
@@ -127,7 +127,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 **Array** — push/pop/shift/unshift, splice, slice, concat, reverse, sort, indexOf, lastIndexOf, includes, join, flat, flatMap, fill, copyWithin, at, find, findIndex, findLast, findLastIndex, every, some, forEach, map, filter, reduce, reduceRight, toSorted, toReversed, toSpliced, with, **`keys`/`values`/`entries`** *(Phase 31)*, `Array.from`, `Array.of`, `Array.isArray`, **`Array.fromAsync`** (array-like, sync iterables, async generators) *(Phase 30)*
 
-**String** — charAt, charCodeAt, codePointAt, at, indexOf, lastIndexOf, includes, startsWith, endsWith, slice, substring, toLowerCase, toUpperCase, trim, trimStart, trimEnd, padStart, padEnd, repeat, replace (**`$&`/`$$`/`$\``/`$'` substitution sequences + function replacement** *(Phase 31)*), replaceAll (**function replacement** *(Phase 31)*), split, match, matchAll, search, concat, normalize, `String.fromCharCode`, `String.fromCodePoint`, `String.raw`
+**String** — charAt, charCodeAt, codePointAt, at, indexOf, lastIndexOf, includes, startsWith, endsWith, slice, substring, toLowerCase, toUpperCase, trim, trimStart, trimEnd, padStart, padEnd, repeat, replace (**`$&`/`$$`/`$\``/`$'` substitution + function replacement** *(Phase 31)*), replaceAll (**function replacement** *(Phase 31)*), split, match, matchAll, search, concat, normalize, **localeCompare** *(Phase 32)*, `String.fromCharCode`, `String.fromCodePoint`, `String.raw`
 
 **Object** — keys, values, entries, assign, create (with proto chain), freeze, seal, isFrozen, isSealed, is, hasOwn, fromEntries, groupBy, defineProperty, defineProperties, getOwnPropertyDescriptor, getOwnPropertyDescriptors, getOwnPropertyNames, getOwnPropertySymbols, getPrototypeOf, setPrototypeOf, preventExtensions, isExtensible, `Object.prototype.toString` (with `Symbol.toStringTag`), `Object.prototype.hasOwnProperty`, **`propertyIsEnumerable`**, **`isPrototypeOf`** *(Phase 23)*
 
@@ -220,6 +220,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **29** | ES gap fixes: `for-of`/`for-in` with destructuring patterns in loop head; `Function.prototype` auto-created for all plain functions; `Iterator.from()` helpers properly attached; `get [Symbol.toStringTag]()` class getter honoured by `Object.prototype.toString`; `Date instanceof Date` + `structuredClone(date) instanceof Date` | 8 | **246** |
 | **30** | Bug fixes: `Error.prototype.toString()` (`"Error: msg"` format); `class E extends Error` subclassing (super() sets props on derived instance); `*gen(){}` and `async method(){}` and `async *gen(){}` shorthand methods in object literals; `get [Symbol.x](){}` computed accessor in object literals; RegExp `lastIndex` advanced for global/sticky regexps after `exec()`/`test()`; `Reflect.setPrototypeOf`/`isExtensible`/`preventExtensions` fully implemented; `Array.fromAsync` now handles async generators (Symbol.asyncIterator) | 9 | **255** |
 | **31** | Bug fixes: `Array.prototype.keys()`/`values()`/`entries()` implemented; computed class fields `[expr]=val` (static + instance); `String.prototype.replace` with `$&`/`$$`/`$\``/`$'` substitution sequences and function replacement; `String.prototype.replaceAll` function replacement; `parseInt` rewrite (trailing chars, `0xFF` hex, explicit base); `Number.isNaN`/`isFinite`/`isInteger` strict type-check (no coercion); `super.getter` in derived classes passes correct `this` | 7 | **262** |
+| **32** | Bug fixes: `Symbol.toPrimitive` now looked up via prototype chain (not just own props); `_to_num`/`_to_str` call `_to_primitive` for objects; string comparison operators `<`/`>`/`<=`/`>=` now lexicographic for strings; `Array.prototype.sort` comparator function now applied; abstract equality `==` handles array/function types (ToPrimitive coercion); `instanceof` works for all built-ins (Array, Object, Map, Set, RegExp, WeakMap, WeakSet, Promise, Function); `super.prop = v` setter fixed; `String.prototype.localeCompare` added | 7 | **269** |
 
 ---
 
