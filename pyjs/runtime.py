@@ -1263,6 +1263,12 @@ class Interpreter:
                 interp._add_iterator_helpers(iterator)
                 return iterator
             return self._make_intrinsic(_arr_iter_factory, '[Symbol.iterator]')
+        # Subclass prototype overrides take priority over built-in ARRAY_METHODS
+        sub_proto = obj.extras.get("__proto__") if obj.extras else None
+        if isinstance(sub_proto, JsValue) and sub_proto.type == "object":
+            v = self._get_prop_object_like(sub_proto, key, receiver=obj)
+            if v is not UNDEFINED:
+                return v
         if key in self.ARRAY_METHODS:
             return self._arr_method(obj, key)
         try:
@@ -1365,6 +1371,9 @@ class Interpreter:
                 return self._call_js(size_fn, [], obj) if size_fn else JsValue('number', 0)
         if obj.type in ('function', 'intrinsic') and key == 'name':
             raw_name = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
+            # If `name` was overridden with a static method (a JsValue), return it directly
+            if isinstance(raw_name, JsValue):
+                return raw_name
             return JsValue('string', raw_name if isinstance(raw_name, str) else '')
         if obj.type == 'function' and key == 'length':
             node = obj.value.get('node', {}) if isinstance(obj.value, dict) else {}
@@ -1410,6 +1419,12 @@ class Interpreter:
             return self._make_intrinsic(_fn_tostring, 'Function.toString')
         current = obj
         while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
+            # Array.prototype: dispatch built-in methods to the receiver (supports `super.push` etc.)
+            if isinstance(current.value, dict) and current.value.get('__is_array_proto__') is JS_TRUE:
+                if key in self.ARRAY_METHODS:
+                    return self._arr_method(receiver, key)
+                if key == 'length':
+                    return JsValue('number', float(len(receiver.value)) if isinstance(getattr(receiver, 'value', None), list) else 0)
             getter_key = f"__get__{key}"
             if getter_key in current.value:
                 return self._call_js(current.value[getter_key], [], receiver)
@@ -4479,15 +4494,40 @@ class Interpreter:
                 return self._call_js(trap, [proxy.target, JsValue('array', args), callee], UNDEFINED)
             callee = proxy.target
         if callee.type in ("function","intrinsic","class"):
-            new_obj = JsValue("object", {})
+            # Check if this class (or any ancestor) extends the built-in Array.
+            # Walk the superClass chain; if Array is found, create an array-typed object.
+            _is_array_subclass = False
+            _sc = callee.value.get("superClass") if isinstance(callee.value, dict) else None
+            while isinstance(_sc, JsValue):
+                _sc_name = _sc.value.get("name") if isinstance(_sc.value, dict) else None
+                if _sc_name == "Array" and _sc.type in ("intrinsic", "function"):
+                    _is_array_subclass = True
+                    break
+                _sc = _sc.value.get("superClass") if isinstance(_sc.value, dict) else None
+            if _is_array_subclass:
+                new_obj = JsValue("array", [])
+                if new_obj.extras is None:
+                    new_obj.extras = {}
+            else:
+                new_obj = JsValue("object", {})
             proto = callee.value.get("prototype")
             if proto and proto.type == "object":
-                new_obj.value["__proto__"] = proto
+                if _is_array_subclass:
+                    if new_obj.extras is None:
+                        new_obj.extras = {}
+                    new_obj.extras["__proto__"] = proto
+                else:
+                    new_obj.value["__proto__"] = proto
             # Tag with constructor/class name for DevTools-style rendering
             ctor_name = callee.value.get("name", "") if isinstance(callee.value, dict) else ""
             if ctor_name and ctor_name not in ("Object", "Array", "Function"):
                 from .values import JsValue as _JV
-                new_obj.value["__class_name__"] = _JV("string", ctor_name)
+                if _is_array_subclass:
+                    if new_obj.extras is None:
+                        new_obj.extras = {}
+                    new_obj.extras["__class_name__"] = _JV("string", ctor_name)
+                else:
+                    new_obj.value["__class_name__"] = _JV("string", ctor_name)
             instance_fields = callee.value.get("__instance_fields__", []) if isinstance(callee.value, dict) else []
             if instance_fields:
                 field_env = Environment(env)

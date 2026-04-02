@@ -1122,7 +1122,10 @@ class Parser:
             args = []
             if not self._check('RPAREN'):
                 while True:
-                    args.append(self._assign())
+                    if self._check('ELLIPSIS'):
+                        self._advance(); args.append(N.SpreadExpr(self._assign()))
+                    else:
+                        args.append(self._assign())
                     if not self._optional('COMMA'): break
             self._expect('RPAREN')
             return N.NewExpr(callee, args)

@@ -337,10 +337,20 @@ def register_core_builtins(interp, g, intr):
                     raise _JSError(interp._make_js_error('TypeError', 'Converting circular structure to JSON'))
                 _seen.add(vid)
                 try:
-                    keys = [k for k in v.value.keys()
-                            if not k.startswith('__') and not (k.startswith('@@') and k.endswith('@@'))]
+                    def _is_int_index(k):
+                        try:
+                            n = int(k)
+                            return n >= 0 and str(n) == k
+                        except (ValueError, TypeError):
+                            return False
+                    raw_keys = [k for k in v.value.keys()
+                                if not k.startswith('__') and not (k.startswith('@@') and k.endswith('@@'))]
                     if allowed_keys is not None and not interp._is_callable(replacer):
-                        keys = [k for k in allowed_keys if k in v.value]
+                        raw_keys = [k for k in allowed_keys if k in v.value]
+                    # Per spec: integer indices first (numeric order), then string keys (insertion order)
+                    int_keys = sorted((k for k in raw_keys if _is_int_index(k)), key=int)
+                    str_keys = [k for k in raw_keys if not _is_int_index(k)]
+                    keys = int_keys + str_keys
                     result = {}
                     for k in keys:
                         pv = _convert(k, v.value[k])

@@ -4514,5 +4514,87 @@ console.log(ts.call(new ArrayBuffer(8)));
         self.assertEqual(lines[2], '[object ArrayBuffer]')
 
 
+    # ── Phase 42 tests ──────────────────────────────────────────────────────────
+
+    def test_static_name_method_override(self):
+        """A static method named 'name' overrides the built-in class name property."""
+        source = '''
+class Foo {
+  static name() { return "custom name"; }
+}
+console.log(typeof Foo.name);
+console.log(Foo.name());
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'function')
+        self.assertEqual(lines[1], 'custom name')
+
+    def test_new_expression_spread_args(self):
+        """new Class(...args) should work with spread arguments."""
+        source = '''
+class Point { constructor(x, y) { this.x = x; this.y = y; } }
+const args = [3, 4];
+const p = new Point(...args);
+console.log(p.x, p.y);
+const rest = [20, 30];
+const p2 = new Point(10, ...rest.slice(0, 1));
+console.log(p2.x, p2.y);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '3 4')
+        self.assertEqual(lines[1], '10 20')
+
+
+    def test_json_stringify_integer_key_ordering(self):
+        """JSON.stringify must output integer index keys first, numerically sorted."""
+        source = '''
+const obj = {};
+obj["2"] = "b"; obj["1"] = "a"; obj["c"] = 3; obj["0"] = "zero";
+console.log(JSON.stringify(obj));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, '{"0":"zero","1":"a","2":"b","c":3}')
+
+    def test_class_extends_array_basic(self):
+        """class X extends Array creates an array-typed instance with array methods."""
+        source = '''
+class MyArr extends Array {}
+const a = new MyArr();
+a.push(1, 2, 3);
+console.log(a.length);
+console.log(a.join(","));
+console.log(Array.isArray(a));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '3')
+        self.assertEqual(lines[1], '1,2,3')
+        self.assertEqual(lines[2], 'true')
+
+    def test_class_extends_array_override_method(self):
+        """Subclass of Array can override built-in methods like push and call super."""
+        source = '''
+class Stack extends Array {
+  push(...items) {
+    super.push(...items);
+    return this;
+  }
+  peek() { return this[this.length - 1]; }
+}
+const s = new Stack();
+s.push(1).push(2).push(3);
+console.log(s.length);
+console.log(s.peek());
+console.log(s.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '3')
+        self.assertEqual(lines[1], '3')
+        self.assertEqual(lines[2], '1,2,3')
+
+
 if __name__ == '__main__':
     unittest.main()

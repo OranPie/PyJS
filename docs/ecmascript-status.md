@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **320 tests passing** | ~14 300 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–41 added 258 tests)*
+*Updated: 2026-04-03 | **325 tests passing** | ~14 400 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–42 added 263 tests)*
 
 ---
 
@@ -42,7 +42,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **ES2019** | ~92 % | flat/flatMap ✓, fromEntries ✓, trimStart/End ✓ |
 | **ES2020** | ~92 % | BigInt ✓, `??` ✓, `?.` ✓, Promise.allSettled/any ✓, WeakRef ✓; **`BigInt.prototype.toString(radix)`** ✓ *(Phase 36)* |
 | **ES2021** | ~90 % | `&&=`/`\|\|=`/`??=` ✓, String.replaceAll ✓, FinalizationRegistry ✓; **`String.replace/replaceAll` passes named groups to function** ✓ *(Phase 36)* |
-| **ES2022** | ~90 % | Class static blocks ✓ (class-name-in-scope fixed), private fields ✓, Error.cause ✓, TypedArrays ✓ |
+| **ES2022** | ~92 % | Class static blocks ✓ (class-name-in-scope fixed), private fields ✓, `#name in obj` brand check ✓, Error.cause ✓, TypedArrays ✓ |
 | **ES2023** | ~88 % | findLast ✓, toSorted/toReversed/toSpliced/with ✓ |
 | **ES2024** | ~95 % | Promise.withResolvers ✓, `using`/`await using` ✓, Set ES2025 ops ✓, Object.groupBy ✓, **ArrayBuffer resize/transfer** ✓ |
 | **ES2025** | ~90 % | Iterator.from ✓, Math.sumPrecise ✓, RegExp.escape ✓, Error.isError ✓, Symbol.dispose ✓, **Float16Array** ✓, **Uint8Array.toBase64/fromBase64/toHex/fromHex** ✓, **import attributes** ✓ |
@@ -230,6 +230,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **39** | Correctness fixes: **static field initializers can reference own class name** (`class C { static y = C.x + 1; }` now works — class declared in env before field init runs) ✓; **`Math.fround`** now performs correct float32 round-trip via `struct.pack('f')` (was returning original value unchanged) ✓; **invalid regex patterns** (e.g. variable-width lookbehind unsupported by Python `re`) converted to JS `SyntaxError` instead of crashing with an uncaught `re.error` ✓ | 5 | **315** |
 | **40** | ES2022 + correctness fixes: **`#name in obj` private field brand check** — new `PrivateIdentifier`/`private_in` AST node type; parser recognizes `PRIVATE_NAME IN` in relational expressions; runtime checks `#name` directly in `target.value` ✓; **`"push" in arr`** now returns `true` — `in` operator checks `ARRAY_METHODS` frozenset for array targets ✓; **`"split" in str`** likewise returns `true` via `STRING_METHODS` check ✓ | 3 | **318** |
 | **41** | `Object.prototype.toString` completeness: **Promise** → `[object Promise]` ✓; **RegExp** → `[object RegExp]` ✓; **Function/intrinsic/class** → `[object Function]` ✓; **Symbol/BigInt/Number/String/Boolean** via type dispatch ✓; **TypedArrays** use `__name__` (plain Python str) → `[object Uint8Array]`, `[object Float32Array]`, etc. ✓; **ArrayBuffer** detected via `__type__ == 'ArrayBuffer'` ✓ | 2 | **320** |
+| **42** | Correctness fixes: **`class extends Array`** — subclass instances are array-typed, `super.push/pop` etc. dispatch to built-in array methods, subclass overrides take priority ✓; **`new Class(...spreadArgs)`** — spread arguments in `new` expressions now parsed and evaluated ✓; **static method named `name` overrides** class name property correctly ✓; **`JSON.stringify` integer key ordering** — integer-index keys now sorted numerically first per spec ✓ | 5 | **325** |
 
 ---
 
@@ -265,12 +266,14 @@ See **[docs/plugins.md](plugins.md)** for the full plugin authoring guide.
 ## Verdict
 
 > **PyJS is a ~98–99% ES2015–ES2025 interpreter.**
-> All major language features are implemented and tested across 301 tests.
+> All major language features are implemented and tested across 325 tests.
 > Remaining gaps are specialist (SharedArrayBuffer/Atomics, full ICU Intl locale data, tail-call opt)
 > or intentionally omitted (Function constructor, with statement).
 > Decorator syntax (TC39 Stage 3) is implemented for class declarations, methods, and fields.
 > Constructor `.prototype` objects are fully wired up — `Array.prototype`, `Map.prototype`, etc.
 > are extensible just as in real JavaScript.
+> **`class extends Array`** is fully supported — subclasses are real array-typed instances
+> with built-in array methods and correct `super` dispatch.
 > The plugin system enables extending the runtime with domain-specific APIs
 > (storage, networking, filesystem) without modifying the core.
 > For scripting, teaching, and computational tasks it is production-ready.
