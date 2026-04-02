@@ -119,7 +119,7 @@ def register_core_builtins(interp, g, intr):
     import sys as _sys
     console = JsValue("object", {})
     def _log(args, interp):
-        parts = [interp._to_str(a) for a in args]
+        parts = [interp._js_inspect(a) if a.type not in ('string',) else a.value for a in args]
         line = ' '.join(parts)
         indent = '  ' * interp._console_indent
         interp.output.append(indent + line)

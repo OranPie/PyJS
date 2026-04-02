@@ -801,6 +801,80 @@ class Interpreter:
             return 'object'
         return 'undefined'
 
+    def _js_inspect(self, v: JsValue, depth: int = 2, seen: set = None) -> str:
+        """Format a JS value for console.log output (Node.js-style)."""
+        if seen is None:
+            seen = set()
+        if v.type == 'undefined': return 'undefined'
+        if v.type == 'null': return 'null'
+        if v.type == 'boolean': return 'true' if v.value else 'false'
+        if v.type == 'number':
+            n = v.value
+            import math as _math
+            if _math.isnan(n): return 'NaN'
+            if _math.isinf(n): return 'Infinity' if n > 0 else '-Infinity'
+            if n == int(n) and abs(n) < 1e15: return str(int(n))
+            return str(n)
+        if v.type == 'string': return repr(v.value)
+        if v.type == 'bigint': return f'{v.value}n'
+        if v.type == 'symbol':
+            desc = v.value.get('description','')
+            return f"Symbol({desc.value if isinstance(desc, JsValue) else desc})"
+        if v.type in ('function', 'intrinsic', 'class'):
+            fn_name = ''
+            if isinstance(v.value, dict):
+                fn_name = v.value.get('name') or ''
+            return f'[Function: {fn_name}]' if fn_name else '[Function (anonymous)]'
+        if v.type == 'promise':
+            return 'Promise { <pending> }'
+        if v.type == 'regexp':
+            return str(v.value) if v.value else '/(?:)/'
+        if v.type == 'proxy':
+            return self._js_inspect(v.value.target, depth, seen)
+        if v.type == 'array':
+            vid = id(v)
+            if vid in seen: return '[Circular *]'
+            if depth < 0: return '[Array]'
+            seen2 = seen | {vid}
+            items = [self._js_inspect(e, depth - 1, seen2) for e in v.value]
+            return '[ ' + ', '.join(items) + ' ]' if items else '[]'
+        if v.type in ('object',):
+            if not isinstance(v.value, dict): return '[object Object]'
+            vid = id(v)
+            if vid in seen: return '[Circular *]'
+            err_type = v.value.get('__error_type__')
+            if isinstance(err_type, JsValue):
+                msg = v.value.get('message')
+                msg_str = msg.value if isinstance(msg, JsValue) else ''
+                return f"{err_type.value}: {msg_str}"
+            kind = v.value.get('__kind__')
+            if isinstance(kind, JsValue):
+                if kind.value == 'Generator': return '[object Generator]'
+                if kind.value == 'Map':
+                    store = v.value.get('__store__', [])
+                    if depth < 0: return 'Map {}'
+                    seen2 = seen | {vid}
+                    parts = [f"{self._js_inspect(e[0],depth-1,seen2)} => {self._js_inspect(e[1],depth-1,seen2)}" for e in store if isinstance(e, (list, tuple)) and len(e) == 2]
+                    return f"Map({len(parts)})" + ' { ' + ', '.join(parts) + ' }' if parts else f"Map(0) {{}}"
+                if kind.value == 'Set':
+                    store = v.value.get('__store__', [])
+                    if depth < 0: return 'Set {}'
+                    seen2 = seen | {vid}
+                    parts = [self._js_inspect(e, depth-1, seen2) for e in store]
+                    return f"Set({len(parts)})" + ' { ' + ', '.join(parts) + ' }' if parts else f"Set(0) {{}}"
+                if kind.value in ('WeakMap', 'WeakSet'): return f"{kind.value} {{ <items unknown> }}"
+            if depth < 0: return '[Object]'
+            seen2 = seen | {vid}
+            parts = []
+            for k, val in v.value.items():
+                if k.startswith('__') or (k.startswith('@@') and k.endswith('@@')): continue
+                if not isinstance(val, JsValue): continue
+                parts.append(f'{k}: {self._js_inspect(val, depth-1, seen2)}')
+            cn = v.value.get('__class_name__')
+            prefix = (cn.value + ' ') if isinstance(cn, JsValue) and cn.type == 'string' else ''
+            return prefix + ('{ ' + ', '.join(parts) + ' }' if parts else '{}')
+        return self._to_str(v)
+
     def _is_nullish(self, v: JsValue) -> bool:
         return v.type in ('null', 'undefined')
 
@@ -1479,7 +1553,9 @@ class Interpreter:
                 start = int(self._to_num(args[1])) if len(args) > 1 else 0
                 if start < 0:
                     start = max(len(a) + start, 0)
+                target_nan = target.type == 'number' and math.isnan(target.value)
                 for x in a[start:]:
+                    if target_nan and x.type == 'number' and math.isnan(x.value): return JS_TRUE
                     if interp._strict_eq(x, target): return JS_TRUE
                 return JS_FALSE
             if name == 'join':
@@ -2814,6 +2890,13 @@ class Interpreter:
             val = UNDEFINED
             if d["init"]:
                 val = self._eval(d["init"], env)
+                # ES2015 function name inference: infer name from variable binding
+                _id = d["id"]
+                if (_id and isinstance(_id, dict) and _id.get("type") == "Identifier"
+                        and val.type in ('function', 'intrinsic', 'class')
+                        and isinstance(val.value, dict)
+                        and not val.value.get("name")):
+                    val.value["name"] = _id["name"]
             _id = d["id"]
             _vname = _id.get("name", "?") if isinstance(_id, dict) and _id.get("type") == "Identifier" else "<pattern>"
             if _TRACE_ACTIVE[0]:
@@ -3355,32 +3438,27 @@ class Interpreter:
 
     def _exec_switch_statement(self, node, env):
         disc = self._eval(node["discriminant"], env)
+        cases = node["cases"]
         matched = False
-        default_body = None
+        default_idx = -1
+        # Find matching case index
+        match_idx = -1
+        for i, case in enumerate(cases):
+            if case.get("default"):
+                default_idx = i
+            elif not matched:
+                test_val = self._eval(case["test"], env)
+                if self._strict_eq(disc, test_val):
+                    match_idx = i
+                    matched = True
+        start_idx = match_idx if matched else default_idx
+        if start_idx < 0:
+            return None
         try:
-            for case in node["cases"]:
-                if case.get("default"):
-                    default_body = case["consequent"]
-                    if matched:
-                        for s in case["consequent"]:
-                            r = self._exec(s, env)
-                            if r is not None: return r
-                    continue
-                if not matched:
-                    test_val = self._eval(case["test"], env)
-                    if self._strict_eq(disc, test_val):
-                        matched = True
-                        for s in case["consequent"]:
-                            r = self._exec(s, env)
-                            if r is not None:
-                                if r == _BREAK: return None
-                                return r
-            if not matched and default_body:
-                for s in default_body:
+            for case in cases[start_idx:]:
+                for s in case["consequent"]:
                     r = self._exec(s, env)
-                    if r is not None:
-                        if r == _BREAK: return None
-                        return r
+                    if r is not None: return r
         except _JSBreak as e:
             if e.label is None: return None
             raise
@@ -3876,6 +3954,8 @@ class Interpreter:
                     'Map': None, 'Set': None, 'WeakMap': None, 'WeakSet': None,
                     'RegExp': None, 'Promise': ('promise',),
                     'Function': ('function','intrinsic','class'),
+                    'Array': ('array',),
+                    'Object': ('object','array','function','intrinsic','class','promise','regexp'),
                 }
                 if isinstance(ctor_name, str) and ctor_name in _func_builtin_map:
                     allowed = _func_builtin_map[ctor_name]

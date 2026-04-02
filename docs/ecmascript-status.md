@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **269 tests passing** | ~13 200 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–32 added 207 tests)*
+*Updated: 2026-04-03 | **277 tests passing** | ~13 500 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–33 added 215 tests)*
 
 ---
 
@@ -8,10 +8,10 @@
 
 | File | Lines | Role |
 |---|---|---|
-| `pyjs/runtime.py` | 4 449 | Tree-walking interpreter, all built-ins, event loop |
+| `pyjs/runtime.py` | 4 897 | Tree-walking interpreter, all built-ins, event loop |
 | `pyjs/parser.py` | 1 293 | Recursive-descent parser → AST dicts |
 | `pyjs/builtins_advanced.py` | 1 098 | Array, String, Math, JSON, Date, RegExp built-ins |
-| `pyjs/builtins_object.py` | 724 | Object.*, console.*, global utility functions |
+| `pyjs/builtins_object.py` | 812 | Object.*, console.*, global utility functions |
 | `pyjs/builtins_typed.py` | 563 | TypedArray constructors, ArrayBuffer, DataView |
 | `pyjs/lexer.py` | 381 | Tokenizer (BigInt, numeric separators, regex, private names, `\uXXXX`) |
 | `pyjs/builtins_core.py` | 357 | parseInt, parseFloat, isNaN, URI encoding, Math.sumPrecise |
@@ -24,7 +24,7 @@
 | `pyjs/values.py` | 54 | JsValue class, JsProxy, well-known symbols incl. Symbol.dispose |
 | `pyjs/modules.py` | 48 | ModuleLoader: path resolution, caching, cycle detection |
 | `pyjs/exceptions.py` | 27 | Internal control-flow exceptions |
-| `tests/test_pyjs.py` | 3 020 | 231 tests covering all phases |
+| `tests/test_pyjs.py` | 3 781 | 277 tests covering all phases |
 
 Architecture: **Lexer → Parser → AST → `Interpreter._exec/_eval` (tree-walk)**
 All values are `JsValue(type, value)`; environments are linked via parent chain.
@@ -35,8 +35,8 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 | Version | Estimate | Key gaps |
 |---|---|---|
-| **ES2015** | ~99 % | Full Proxy/Reflect ✓; WeakMap/WeakSet ✓; private fields ✓; `super()` in constructors ✓; `super.getter`/`super.setter` ✓ *(Phase 31–32)*; `super` in obj literals ✓; computed class fields `[expr]` ✓; string comparison operators `<`/`>`/`<=`/`>=` ✓ *(Phase 32)*; `instanceof` for all built-in constructors ✓ *(Phase 32)*; remaining: `with` (deprecated), tail-call opt |
-| **ES2016** | ~95 % | Array.includes ✓, `**` ✓ |
+| **ES2015** | ~99 % | Full Proxy/Reflect ✓; WeakMap/WeakSet ✓; private fields ✓; `super()` in constructors ✓; `super.getter`/`super.setter` ✓ *(Phase 31–32)*; `super` in obj literals ✓; computed class fields `[expr]` ✓; string comparison operators `<`/`>`/`<=`/`>=` ✓ *(Phase 32)*; `instanceof` for all built-in constructors ✓ *(Phase 32–33)*; **`typeof Array/Object` → `"function"`** ✓ *(Phase 33)*; **`new Array(n)`/`new Object()`** ✓ *(Phase 33)*; **function name inference** ✓ *(Phase 33)*; **`switch` fall-through** fixed ✓ *(Phase 33)*; remaining: `with` (deprecated), tail-call opt |
+| **ES2016** | ~96 % | Array.includes ✓ (**SameValueZero for NaN** ✓ *Phase 33*), `**` ✓ |
 | **ES2017** | ~90 % | async/await ✓, SharedArrayBuffer/Atomics absent |
 | **ES2018** | ~88 % | for-await-of ✓, regex `s`/`d` flags ✓; full `dotAll`/`unicode` edge cases |
 | **ES2019** | ~92 % | flat/flatMap ✓, fromEntries ✓, trimStart/End ✓ |
@@ -47,7 +47,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **ES2024** | ~95 % | Promise.withResolvers ✓, `using`/`await using` ✓, Set ES2025 ops ✓, Object.groupBy ✓, **ArrayBuffer resize/transfer** ✓ |
 | **ES2025** | ~88 % | Iterator.from ✓, Math.sumPrecise ✓, RegExp.escape ✓, Error.isError ✓, Symbol.dispose ✓, **Float16Array** ✓, **Uint8Array.toBase64/fromBase64/toHex/fromHex** ✓, **import attributes** ✓ |
 
-**Overall: ~98–99 % of ES2015–ES2025 surface area implemented.**
+**Overall: ~99 % of ES2015–ES2025 surface area implemented.**
 
 ---
 
@@ -89,7 +89,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 ### Functions
 - `fn.bind(thisArg, ...args)` → BoundFunction *(Phase 10)*
 - `fn.call(thisArg, ...args)`, `fn.apply(thisArg, argsArray)` *(Phase 10)*
-- `fn.name`, `fn.length` *(Phase 10)*
+- `fn.name`, `fn.length` *(Phase 10)*; **function name inferred from variable binding** (`const fn = () => {}` → `fn.name === 'fn'`) *(Phase 33)*
 - `arguments` object with `.callee` *(Phase 10/13)*
 
 ### Generators & Async
@@ -125,11 +125,11 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 ### Standard Library
 
-**Array** — push/pop/shift/unshift, splice, slice, concat, reverse, sort, indexOf, lastIndexOf, includes, join, flat, flatMap, fill, copyWithin, at, find, findIndex, findLast, findLastIndex, every, some, forEach, map, filter, reduce, reduceRight, toSorted, toReversed, toSpliced, with, **`keys`/`values`/`entries`** *(Phase 31)*, `Array.from`, `Array.of`, `Array.isArray`, **`Array.fromAsync`** (array-like, sync iterables, async generators) *(Phase 30)*
+**Array** — push/pop/shift/unshift, splice, slice, concat, reverse, sort, indexOf, lastIndexOf, **includes (SameValueZero for NaN *(Phase 33)*)**, join, flat, flatMap, fill, copyWithin, at, find, findIndex, findLast, findLastIndex, every, some, forEach, map, filter, reduce, reduceRight, toSorted, toReversed, toSpliced, with, **`keys`/`values`/`entries`** *(Phase 31)*, `Array.from`, `Array.of`, **`Array.isArray`**, **`new Array(n)`/`Array(n)` constructor** *(Phase 33)*, **`Array.fromAsync`** (array-like, sync iterables, async generators) *(Phase 30)*
 
 **String** — charAt, charCodeAt, codePointAt, at, indexOf, lastIndexOf, includes, startsWith, endsWith, slice, substring, toLowerCase, toUpperCase, trim, trimStart, trimEnd, padStart, padEnd, repeat, replace (**`$&`/`$$`/`$\``/`$'` substitution + function replacement** *(Phase 31)*), replaceAll (**function replacement** *(Phase 31)*), split, match, matchAll, search, concat, normalize, **localeCompare** *(Phase 32)*, `String.fromCharCode`, `String.fromCodePoint`, `String.raw`
 
-**Object** — keys, values, entries, assign, create (with proto chain), freeze, seal, isFrozen, isSealed, is, hasOwn, fromEntries, groupBy, defineProperty, defineProperties, getOwnPropertyDescriptor, getOwnPropertyDescriptors, getOwnPropertyNames, getOwnPropertySymbols, getPrototypeOf, setPrototypeOf, preventExtensions, isExtensible, `Object.prototype.toString` (with `Symbol.toStringTag`), `Object.prototype.hasOwnProperty`, **`propertyIsEnumerable`**, **`isPrototypeOf`** *(Phase 23)*
+**Object** — keys, values, entries, assign, create (with proto chain **+ second-arg descriptors** *(Phase 33)*), freeze, seal, isFrozen, isSealed, is, hasOwn, fromEntries, groupBy, defineProperty, **defineProperties** *(Phase 33)*, getOwnPropertyDescriptor, getOwnPropertyDescriptors, getOwnPropertyNames, getOwnPropertySymbols, getPrototypeOf, setPrototypeOf, preventExtensions, isExtensible, `Object.prototype.toString` (with `Symbol.toStringTag`), `Object.prototype.hasOwnProperty`, **`propertyIsEnumerable`**, **`isPrototypeOf`** *(Phase 23)*; **`typeof Object` → `"function"`; `new Object()` callable** *(Phase 33)*
 
 **Number** — isNaN, isFinite, isInteger, isSafeInteger (**strict type-check, no coercion** *(Phase 31)*), parseFloat, parseInt (**trailing non-digit chars, `0xFF` hex prefix** *(Phase 31)*), toFixed, toString(base), EPSILON, MAX/MIN\_SAFE\_INTEGER, MAX/MIN\_VALUE, POSITIVE/NEGATIVE\_INFINITY
 
@@ -161,7 +161,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 **Date** — constructor, now(), parse(), UTC(), getTime(), toISOString(), toJSON(), toString(), valueOf(), getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds, setFullYear/Month/Date/Hours/Minutes/Seconds/Milliseconds, toLocaleDateString, toLocaleTimeString, toLocaleString
 
-**console** — log, error, warn, info, debug, table, dir, assert, count, countReset, time, timeEnd, timeLog, group, groupCollapsed, groupEnd, trace
+**console** — log (**Node.js-style object/array/Map/Set formatting** *(Phase 33)*), error, warn, info, debug, table, dir, assert, count, countReset, time, timeEnd, timeLog, group, groupCollapsed, groupEnd, trace
 
 **Globals** — undefined, NaN, Infinity, globalThis, parseInt, parseFloat, isNaN, isFinite, encodeURI, decodeURI, encodeURIComponent, decodeURIComponent, structuredClone, atob, btoa, **Iterator**, **eval** (throws EvalError)
 
@@ -221,6 +221,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **30** | Bug fixes: `Error.prototype.toString()` (`"Error: msg"` format); `class E extends Error` subclassing (super() sets props on derived instance); `*gen(){}` and `async method(){}` and `async *gen(){}` shorthand methods in object literals; `get [Symbol.x](){}` computed accessor in object literals; RegExp `lastIndex` advanced for global/sticky regexps after `exec()`/`test()`; `Reflect.setPrototypeOf`/`isExtensible`/`preventExtensions` fully implemented; `Array.fromAsync` now handles async generators (Symbol.asyncIterator) | 9 | **255** |
 | **31** | Bug fixes: `Array.prototype.keys()`/`values()`/`entries()` implemented; computed class fields `[expr]=val` (static + instance); `String.prototype.replace` with `$&`/`$$`/`$\``/`$'` substitution sequences and function replacement; `String.prototype.replaceAll` function replacement; `parseInt` rewrite (trailing chars, `0xFF` hex, explicit base); `Number.isNaN`/`isFinite`/`isInteger` strict type-check (no coercion); `super.getter` in derived classes passes correct `this` | 7 | **262** |
 | **32** | Bug fixes: `Symbol.toPrimitive` now looked up via prototype chain (not just own props); `_to_num`/`_to_str` call `_to_primitive` for objects; string comparison operators `<`/`>`/`<=`/`>=` now lexicographic for strings; `Array.prototype.sort` comparator function now applied; abstract equality `==` handles array/function types (ToPrimitive coercion); `instanceof` works for all built-ins (Array, Object, Map, Set, RegExp, WeakMap, WeakSet, Promise, Function); `super.prop = v` setter fixed; `String.prototype.localeCompare` added | 7 | **269** |
+| **33** | Bug fixes + improvements: `Object.create` second-argument (property descriptors) applied; **`Object.defineProperties`** added; `typeof Array`/`typeof Object` → `"function"` (now intrinsic constructors); **`new Array(n)`/`new Object()`** work correctly; **function name inference** from `const fn = () => {}` bindings; **`Array.prototype.includes`** uses SameValueZero (handles NaN); **`switch` fall-through** bug fixed; **`console.log` Node.js-style object formatting** (objects as `{ a: 1 }`, arrays as `[ 1, 2 ]`, Map/Set with contents) | 8 | **277** |
 
 ---
 

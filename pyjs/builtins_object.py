@@ -32,7 +32,13 @@ _log = get_logger("scope")
 def register_object_builtins(interp, g, intr):
     """Register object builtins into environment g."""
     # -- Object statics --
-    obj_ctor = JsValue("object", {})
+    obj_ctor = JsValue("intrinsic", {})
+    def _obj_ctor_fn(this_val, args, interp):
+        if args and args[0].type not in ('null', 'undefined'):
+            return args[0]
+        return JsValue('object', {})
+    obj_ctor.value['fn'] = _obj_ctor_fn
+    obj_ctor.value['name'] = 'Object'
 
     def _public_keys(d, obj=None):
         keys = [k for k in d.keys() if not k.startswith('__') and not (k.startswith('@@') and k.endswith('@@'))]
@@ -103,6 +109,12 @@ def register_object_builtins(interp, g, intr):
         new_obj = JsValue('object', {})
         if proto.type not in ('undefined', 'null'):
             new_obj.value['__proto__'] = proto
+        # Handle second argument: property descriptors object
+        if len(args) > 1 and args[1].type == 'object' and isinstance(args[1].value, dict):
+            for prop_key, prop_desc in args[1].value.items():
+                if prop_key.startswith('__'): continue
+                if isinstance(prop_desc, JsValue) and prop_desc.type == 'object':
+                    _obj_define_property([new_obj, JsValue('string', prop_key), prop_desc], interp)
         return new_obj
     obj_ctor.value['create'] = intr(_obj_create, 'Object.create')
     def _obj_define_property(args, interp):
@@ -139,6 +151,17 @@ def register_object_builtins(interp, g, intr):
                 interp._set_desc(obj, key, existing)
         return obj
     obj_ctor.value['defineProperty'] = intr(_obj_define_property, 'defineProperty')
+    def _obj_define_properties(args, interp):
+        obj = args[0] if args else UNDEFINED
+        props = args[1] if len(args) > 1 else UNDEFINED
+        if obj.type not in ('object', 'function', 'intrinsic', 'class'): return obj
+        if props.type == 'object' and isinstance(props.value, dict):
+            for prop_key, prop_desc in props.value.items():
+                if prop_key.startswith('__'): continue
+                if isinstance(prop_desc, JsValue) and prop_desc.type == 'object':
+                    _obj_define_property([obj, JsValue('string', prop_key), prop_desc], interp)
+        return obj
+    obj_ctor.value['defineProperties'] = intr(_obj_define_properties, 'defineProperties')
     obj_ctor.value['getOwnPropertyNames'] = intr(
         lambda a, i: py_to_js([k for k in (a[0].value.keys() if a and a[0].type == 'object' else []) if not k.startswith('__')]),
         'getOwnPropertyNames',
@@ -340,7 +363,17 @@ def register_object_builtins(interp, g, intr):
     g.declare('Object', obj_ctor, 'var')
 
     # -- Array constructor (used for Array.isArray etc.) --
-    arr_ctor = JsValue("object", {})
+    arr_ctor = JsValue("intrinsic", {})
+    def _array_ctor_fn(this_val, args, interp):
+        if len(args) == 1 and args[0].type == 'number':
+            n = args[0].value
+            ni = int(n)
+            if n != ni or ni < 0:
+                raise ValueError('Invalid array length')
+            return JsValue('array', [UNDEFINED] * ni)
+        return JsValue('array', list(args))
+    arr_ctor.value['fn'] = _array_ctor_fn
+    arr_ctor.value['name'] = 'Array'
     arr_ctor.value['isArray'] = intr(lambda a,i: JS_TRUE if a and a[0].type=='array' else JS_FALSE, 'isArray')
     def _array_from(args, interp):
         if not args:

@@ -3620,6 +3620,162 @@ console.log("a".localeCompare("a"));
         self.assertEqual(lines[1], "1")
         self.assertEqual(lines[2], "0")
 
+    def test_object_create_with_descriptors(self):
+        """Object.create with second argument (property descriptors) applies them"""
+        source = '''
+const obj = Object.create({base: true}, {
+    x: { value: 42, enumerable: true },
+    y: { value: "hidden", enumerable: false }
+});
+console.log(obj.x);
+console.log(obj.y);
+console.log(obj.base);
+console.log(Object.keys(obj).join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "42")
+        self.assertEqual(lines[1], "hidden")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "x")
+
+    def test_object_define_properties(self):
+        """Object.defineProperties defines multiple properties at once"""
+        source = '''
+const obj = {};
+Object.defineProperties(obj, {
+    x: { value: 1, enumerable: true },
+    y: { value: 2, enumerable: true },
+    hidden: { value: 3, enumerable: false }
+});
+console.log(obj.x, obj.y, obj.hidden);
+console.log(Object.keys(obj).join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "1 2 3")
+        self.assertEqual(lines[1], "x,y")
+
+    def test_array_constructor(self):
+        """new Array(n) and Array(n) create arrays; typeof Array is 'function'"""
+        source = '''
+console.log(typeof Array);
+const a = new Array(3);
+console.log(a.length);
+console.log(Array.isArray(a));
+const b = new Array(1, 2, 3);
+console.log(b.join(","));
+const c = Array.of(4, 5, 6);
+console.log(c.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "function")
+        self.assertEqual(lines[1], "3")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "1,2,3")
+        self.assertEqual(lines[4], "4,5,6")
+
+    def test_object_constructor(self):
+        """typeof Object is 'function'; new Object() and Object(x) work"""
+        source = '''
+console.log(typeof Object);
+const o = new Object();
+console.log(typeof o);
+const o2 = new Object({x: 1});
+console.log(o2.x);
+console.log(Object.keys({a:1,b:2}).join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "function")
+        self.assertEqual(lines[1], "object")
+        self.assertEqual(lines[2], "1")
+        self.assertEqual(lines[3], "a,b")
+
+    def test_function_name_inference(self):
+        """Function name is inferred from const/let/var variable binding"""
+        source = '''
+const fn1 = function() {};
+let fn2 = () => {};
+var fn3 = function named() {};
+console.log(fn1.name);
+console.log(fn2.name);
+console.log(fn3.name);
+const obj = { greet() {} };
+console.log(obj.greet.name);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "fn1")
+        self.assertEqual(lines[1], "fn2")
+        self.assertEqual(lines[2], "named")
+        self.assertEqual(lines[3], "greet")
+
+    def test_array_includes_nan(self):
+        """Array.prototype.includes uses SameValueZero (handles NaN)"""
+        source = '''
+const arr = [1, NaN, 3];
+console.log(arr.includes(NaN));
+console.log(arr.includes(1));
+console.log(arr.includes(4));
+console.log(arr.indexOf(NaN));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "true")
+        self.assertEqual(lines[2], "false")
+        self.assertEqual(lines[3], "-1")
+
+    def test_switch_fall_through(self):
+        """switch fall-through executes subsequent cases until break"""
+        source = '''
+const x = 2;
+const out = [];
+switch(x) {
+    case 1: out.push("one");
+    case 2: out.push("two");
+    case 3: out.push("three"); break;
+    default: out.push("other");
+}
+console.log(out.join(","));
+const y = 5;
+const out2 = [];
+switch(y) {
+    case 1: out2.push("one"); break;
+    default: out2.push("default");
+    case 2: out2.push("two"); break;
+}
+console.log(out2.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "two,three")
+        self.assertEqual(lines[1], "default,two")
+
+    def test_console_log_object_formatting(self):
+        """console.log formats objects, arrays, Map, Set in Node.js style"""
+        source = '''
+console.log({a: 1, b: "hello"});
+console.log([1, 2, 3]);
+console.log(new Map([["x", 1]]));
+console.log(new Set([1, 2, 3]));
+console.log(null);
+console.log(undefined);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertIn("a: 1", lines[0])
+        self.assertIn("b:", lines[0])
+        self.assertIn("1", lines[1])
+        self.assertIn("2", lines[1])
+        self.assertIn("3", lines[1])
+        self.assertIn("Map(1)", lines[2])
+        self.assertIn("Set(3)", lines[3])
+        self.assertEqual(lines[4], "null")
+        self.assertEqual(lines[5], "undefined")
+
 
 if __name__ == '__main__':
     unittest.main()
