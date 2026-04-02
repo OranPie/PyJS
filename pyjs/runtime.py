@@ -1459,8 +1459,30 @@ class Interpreter:
                     return JsValue('string', '[object Null]')
                 if tv is UNDEFINED or (isinstance(tv, JsValue) and tv.type == 'undefined'):
                     return JsValue('string', '[object Undefined]')
-                if isinstance(tv, JsValue) and tv.type == 'array':
-                    return JsValue('string', '[object Array]')
+                if isinstance(tv, JsValue):
+                    if tv.type == 'array':    return JsValue('string', '[object Array]')
+                    if tv.type == 'promise':  return JsValue('string', '[object Promise]')
+                    if tv.type == 'regexp':   return JsValue('string', '[object RegExp]')
+                    if tv.type == 'symbol':   return JsValue('string', '[object Symbol]')
+                    if tv.type == 'bigint':   return JsValue('string', '[object BigInt]')
+                    if tv.type == 'number':   return JsValue('string', '[object Number]')
+                    if tv.type == 'string':   return JsValue('string', '[object String]')
+                    if tv.type == 'boolean':  return JsValue('string', '[object Boolean]')
+                    if tv.type in ('function','intrinsic','class'):
+                        return JsValue('string', '[object Function]')
+                    if isinstance(tv.value, dict):
+                        # TypedArrays, ArrayBuffer etc. use __name__
+                        tname = tv.value.get('__name__')
+                        if isinstance(tname, JsValue) and tname.type == 'string':
+                            return JsValue('string', f'[object {tname.value}]')
+                        # ArrayBuffer
+                        ttype = tv.value.get('__type__')
+                        if isinstance(ttype, JsValue) and ttype.value == 'ArrayBuffer':
+                            return JsValue('string', '[object ArrayBuffer]')
+                        # Objects with __kind__
+                        kind = tv.value.get('__kind__')
+                        if isinstance(kind, JsValue) and kind.type == 'string':
+                            return JsValue('string', f'[object {kind.value}]')
                 return JsValue('string', '[object Object]')
             return self._make_intrinsic(_obj_to_string, 'Object.toString')
         if obj.type in ('function', 'intrinsic') and key == 'call':

@@ -4479,5 +4479,40 @@ console.log("xyz" in s);
         self.assertEqual(lines[2], 'false')
 
 
+    # ── Phase 41 tests ──────────────────────────────────────────────────────────
+
+    def test_object_proto_tostring_promise(self):
+        """Object.prototype.toString.call(promise) → [object Promise]"""
+        source = '''
+const ts = Object.prototype.toString;
+console.log(ts.call(new Promise(r => r())));
+console.log(ts.call(/re/));
+console.log(ts.call(null));
+console.log(ts.call(undefined));
+console.log(ts.call(function(){}));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '[object Promise]')
+        self.assertEqual(lines[1], '[object RegExp]')
+        self.assertEqual(lines[2], '[object Null]')
+        self.assertEqual(lines[3], '[object Undefined]')
+        self.assertEqual(lines[4], '[object Function]')
+
+    def test_object_proto_tostring_typed_arrays(self):
+        """Object.prototype.toString returns correct tag for TypedArrays and ArrayBuffer."""
+        source = '''
+const ts = Object.prototype.toString;
+console.log(ts.call(new Uint8Array(4)));
+console.log(ts.call(new Int32Array(4)));
+console.log(ts.call(new ArrayBuffer(8)));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '[object Uint8Array]')
+        self.assertEqual(lines[1], '[object Int32Array]')
+        self.assertEqual(lines[2], '[object ArrayBuffer]')
+
+
 if __name__ == '__main__':
     unittest.main()

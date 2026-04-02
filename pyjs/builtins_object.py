@@ -272,14 +272,25 @@ def register_object_builtins(interp, g, intr):
         if target.type == 'symbol': return py_to_js('[object Symbol]')
         if target.type == 'bigint': return py_to_js('[object BigInt]')
         if target.type == 'array': return py_to_js('[object Array]')
-        if target.type == 'function': return py_to_js('[object Function]')
-        if target.type in ('object', 'intrinsic', 'class'):
+        if target.type in ('function', 'intrinsic', 'class'): return py_to_js('[object Function]')
+        if target.type == 'promise': return py_to_js('[object Promise]')
+        if target.type == 'regexp': return py_to_js('[object RegExp]')
+        if target.type in ('object',):
             # Check Symbol.toStringTag via full property access (walks proto chain + getters)
             tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
             tag = interp._get_prop(target, tag_key)
             if tag and isinstance(tag, JsValue) and tag.type == 'string':
                 return py_to_js(f'[object {tag.value}]')
             if isinstance(target.value, dict):
+                # TypedArray / ArrayBuffer use __name__ or __type__
+                tname = target.value.get('__name__')
+                if isinstance(tname, str):
+                    return py_to_js(f'[object {tname}]')
+                if isinstance(tname, JsValue) and tname.type == 'string':
+                    return py_to_js(f'[object {tname.value}]')
+                ttype = target.value.get('__type__')
+                if isinstance(ttype, JsValue) and ttype.value == 'ArrayBuffer':
+                    return py_to_js('[object ArrayBuffer]')
                 kind = target.value.get('__kind__')
                 if isinstance(kind, JsValue) and kind.type == 'string':
                     return py_to_js(f'[object {kind.value}]')
