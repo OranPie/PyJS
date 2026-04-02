@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **280 tests passing** | ~13 600 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–34 added 218 tests)*
+*Updated: 2026-04-03 | **284 tests passing** | ~13 700 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–35 added 222 tests)*
 
 ---
 
@@ -24,7 +24,7 @@
 | `pyjs/values.py` | 54 | JsValue class, JsProxy, well-known symbols incl. Symbol.dispose |
 | `pyjs/modules.py` | 48 | ModuleLoader: path resolution, caching, cycle detection |
 | `pyjs/exceptions.py` | 27 | Internal control-flow exceptions |
-| `tests/test_pyjs.py` | 3 781 | 277 tests covering all phases |
+| `tests/test_pyjs.py` | 3 914 | 284 tests covering all phases |
 
 Architecture: **Lexer → Parser → AST → `Interpreter._exec/_eval` (tree-walk)**
 All values are `JsValue(type, value)`; environments are linked via parent chain.
@@ -222,7 +222,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **31** | Bug fixes: `Array.prototype.keys()`/`values()`/`entries()` implemented; computed class fields `[expr]=val` (static + instance); `String.prototype.replace` with `$&`/`$$`/`$\``/`$'` substitution sequences and function replacement; `String.prototype.replaceAll` function replacement; `parseInt` rewrite (trailing chars, `0xFF` hex, explicit base); `Number.isNaN`/`isFinite`/`isInteger` strict type-check (no coercion); `super.getter` in derived classes passes correct `this` | 7 | **262** |
 | **32** | Bug fixes: `Symbol.toPrimitive` now looked up via prototype chain (not just own props); `_to_num`/`_to_str` call `_to_primitive` for objects; string comparison operators `<`/`>`/`<=`/`>=` now lexicographic for strings; `Array.prototype.sort` comparator function now applied; abstract equality `==` handles array/function types (ToPrimitive coercion); `instanceof` works for all built-ins (Array, Object, Map, Set, RegExp, WeakMap, WeakSet, Promise, Function); `super.prop = v` setter fixed; `String.prototype.localeCompare` added | 7 | **269** |
 | **33** | Bug fixes + improvements: `Object.create` second-argument (property descriptors) applied; **`Object.defineProperties`** added; `typeof Array`/`typeof Object` → `"function"` (now intrinsic constructors); **`new Array(n)`/`new Object()`** work correctly; **function name inference** from `const fn = () => {}` bindings; **`Array.prototype.includes`** uses SameValueZero (handles NaN); **`switch` fall-through** bug fixed; **`console.log` Node.js-style object formatting** (objects as `{ a: 1 }`, arrays as `[ 1, 2 ]`, Map/Set with contents) | 8 | **277** |
-| **34** | Bug fixes: **`ReferenceError` thrown for undeclared variables** (was silently `undefined`); `typeof undeclaredVar` still returns `"undefined"` without throwing (spec §11.4.3); **`class D extends mixin(B)`** — call expressions now valid in `extends` clause (both `_class_decl` and `_class_expr`); **number formatting** — integers up to `1e21` now print without `.0` suffix (fixes `Number.MAX_SAFE_INTEGER`) | 3 | **280** |
+| **35** | Correctness fixes: **`hasOwnProperty.call(obj,k)`** now uses `this` correctly (not captured receiver); **`propertyIsEnumerable.call`** and **`valueOf.call`** likewise fixed; **`Object.prototype.toString`** upgraded to full dispatch (Symbol/BigInt types); **`Object.keys/values/entries`** respects Proxy `ownKeys` trap; **`JSON.stringify(undefined)`** returns `undefined` (not `"null"`); **`JSON.stringify([1,undefined,3])`** → `[1,null,3]`; **`using` declaration** Symbol.dispose lookup now searches prototype chain; JSON number threshold `1e15` → `1e21` | 4 | **284** |
 
 ---
 

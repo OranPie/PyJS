@@ -1257,20 +1257,20 @@ class Interpreter:
                 return current.value[key]
             current = self._get_proto(current)
         if key == 'hasOwnProperty':
-            obj_ref = obj
-            def _has_own_property(tv, call_args, interp, _obj=obj_ref):
+            def _has_own_property(tv, call_args, interp):
                 prop_name = interp._to_key(call_args[0]) if call_args else ''
-                if isinstance(_obj.value, dict) and prop_name in _obj.value:
+                target = tv if (isinstance(tv, JsValue) and tv.type not in ('null','undefined')) else UNDEFINED
+                if isinstance(getattr(target, 'value', None), dict) and prop_name in target.value:
                     return JS_TRUE
                 return JS_FALSE
             return self._make_intrinsic(_has_own_property, 'Object.hasOwnProperty')
         if key == 'propertyIsEnumerable':
-            obj_ref = obj
-            def _prop_is_enum(tv, call_args, interp, _obj=obj_ref):
+            def _prop_is_enum(tv, call_args, interp):
                 prop_name = interp._to_key(call_args[0]) if call_args else ''
-                if not isinstance(_obj.value, dict) or prop_name not in _obj.value:
+                target = tv if (isinstance(tv, JsValue) and tv.type not in ('null','undefined')) else UNDEFINED
+                if not isinstance(getattr(target, 'value', None), dict) or prop_name not in target.value:
                     return JS_FALSE
-                desc = interp._get_desc(_obj, prop_name)
+                desc = interp._get_desc(target, prop_name)
                 if desc is not None and not desc.get('enumerable', True):
                     return JS_FALSE
                 return JS_TRUE
@@ -1287,16 +1287,22 @@ class Interpreter:
                 return JS_FALSE
             return self._make_intrinsic(_is_proto_of, 'Object.isPrototypeOf')
         if key == 'valueOf':
-            obj_ref = obj
-            return self._make_intrinsic(lambda tv, a, i, o=obj_ref: o, 'Object.valueOf')
+            return self._make_intrinsic(lambda tv, a, i: tv, 'Object.valueOf')
         if key == 'toString' and obj.type == 'object':
-            tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
-            tag = obj.value.get(tag_key, None) if isinstance(obj.value, dict) else None
-            if isinstance(tag, JsValue) and tag.type == 'string':
-                label = tag.value
-            else:
-                label = 'Object'
-            return self._make_intrinsic(lambda tv, a, i, l=label: JsValue('string', f'[object {l}]'), 'Object.toString')
+            def _obj_to_string(tv, a, interp):
+                tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
+                if isinstance(getattr(tv, 'value', None), dict):
+                    tag = tv.value.get(tag_key, None)
+                    if isinstance(tag, JsValue) and tag.type == 'string':
+                        return JsValue('string', f'[object {tag.value}]')
+                if tv is JS_NULL or (isinstance(tv, JsValue) and tv.type == 'null'):
+                    return JsValue('string', '[object Null]')
+                if tv is UNDEFINED or (isinstance(tv, JsValue) and tv.type == 'undefined'):
+                    return JsValue('string', '[object Undefined]')
+                if isinstance(tv, JsValue) and tv.type == 'array':
+                    return JsValue('string', '[object Array]')
+                return JsValue('string', '[object Object]')
+            return self._make_intrinsic(_obj_to_string, 'Object.toString')
         if obj.type in ('function', 'intrinsic') and key == 'call':
             fn_ref = obj
             def _fn_call(this_val, call_args, interp, _fn=fn_ref):
@@ -2920,13 +2926,10 @@ class Interpreter:
             name = d['id'].get('name', '?') if isinstance(d['id'], dict) else '?'
             # Verify the value has a dispose method (unless null/undefined)
             if val.type not in ('null', 'undefined'):
-                dispose_fn = None
-                if isinstance(val.value, dict):
-                    dispose_fn = val.value.get(dispose_sym_key)
-                if dispose_fn is None or (isinstance(dispose_fn, JsValue) and
-                                           dispose_fn.type == 'undefined'):
+                dispose_fn = self._get_prop(val, dispose_sym_key)
+                if dispose_fn is None or dispose_fn.type in ('null', 'undefined'):
                     raise _JSError(self._make_js_error('TypeError',
-                        f"The resource does not have a [{dispose_sym_key}] method"))
+                        f"The resource does not have a [Symbol.dispose] method"))
             # Declare binding
             self._bind_pattern(d['id'], val, env, 'const', True)
             # Register for disposal on scope exit (using env's disposal stack)
@@ -2942,8 +2945,8 @@ class Interpreter:
         for val, sym_key, is_async in reversed(stack):
             if val.type in ('null', 'undefined'):
                 continue
-            dispose_fn = val.value.get(sym_key) if isinstance(val.value, dict) else None
-            if not dispose_fn or not isinstance(dispose_fn, JsValue):
+            dispose_fn = self._get_prop(val, sym_key)
+            if not dispose_fn or not isinstance(dispose_fn, JsValue) or dispose_fn.type in ('null', 'undefined'):
                 continue
             try:
                 result = self._call_js(dispose_fn, [], val)

@@ -268,9 +268,11 @@ def register_core_builtins(interp, g, intr):
     # -- JSON --
     json_obj = JsValue("object", {})
     def _stringify(args, interp):
-        if not args or args[0].type in ('null', 'undefined'):
-            return JS_NULL
+        if not args:
+            return UNDEFINED
         val = args[0]
+        if val.type == 'undefined':
+            return UNDEFINED
         replacer = args[1] if len(args) > 1 else UNDEFINED
         space_arg = args[2] if len(args) > 2 else UNDEFINED
 
@@ -310,7 +312,7 @@ def register_core_builtins(interp, g, intr):
                 n = v.value
                 if math.isnan(n) or math.isinf(n):
                     return None
-                if n == int(n) and abs(n) < 1e15:
+                if n == int(n) and abs(n) < 1e21:
                     return int(n)
                 return n
             if v.type == 'string':
@@ -321,7 +323,12 @@ def register_core_builtins(interp, g, intr):
                     raise _JSError(interp._make_js_error('TypeError', 'Converting circular structure to JSON'))
                 _seen.add(vid)
                 try:
-                    return [_convert(str(i), x) for i, x in enumerate(v.value)]
+                    # undefined in arrays becomes null (not omitted)
+                    result = []
+                    for i, x in enumerate(v.value):
+                        pv = _convert(str(i), x)
+                        result.append(None if pv is _OMIT else pv)
+                    return result
                 finally:
                     _seen.discard(vid)
             if v.type == 'object':

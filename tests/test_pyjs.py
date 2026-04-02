@@ -3831,6 +3831,84 @@ console.log(1e20);
         self.assertEqual(lines[2], "true")
         self.assertEqual(lines[3], "100000000000000000000")
 
+    def test_hasownproperty_call(self):
+        """Object.prototype.hasOwnProperty.call() works correctly (uses this, not captured obj)"""
+        source = '''
+const proto = { inherited: 1 };
+const obj = Object.create(proto);
+obj.own = 2;
+// Direct call
+console.log(obj.hasOwnProperty("own"));
+console.log(obj.hasOwnProperty("inherited"));
+// .call() form
+console.log(Object.prototype.hasOwnProperty.call(obj, "own"));
+console.log(Object.prototype.hasOwnProperty.call(obj, "inherited"));
+// valueOf using .call()
+const a = { x: 1 };
+const b = { x: 2 };
+console.log(Object.prototype.valueOf.call(a) === a);
+console.log(Object.prototype.valueOf.call(b) === b);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "false")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "false")
+        self.assertEqual(lines[4], "true")
+        self.assertEqual(lines[5], "true")
+
+    def test_json_stringify_edge_cases(self):
+        """JSON.stringify handles undefined, null in arrays, number threshold"""
+        source = '''
+console.log(JSON.stringify(undefined) === undefined);
+console.log(JSON.stringify(null));
+console.log(JSON.stringify([1, undefined, 3]));
+console.log(JSON.stringify({ a: undefined, b: 1 }));
+console.log(JSON.stringify(9007199254740991));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "null")
+        self.assertEqual(lines[2], "[1,null,3]")
+        self.assertEqual(lines[3], '{"b":1}')
+        self.assertEqual(lines[4], "9007199254740991")
+
+    def test_proxy_ownkeys_trap(self):
+        """Proxy ownKeys trap is invoked by Object.keys/values/entries"""
+        source = '''
+const p = new Proxy({ a: 1, b: 2, c: 3 }, {
+    ownKeys(target) { return Object.keys(target).filter(k => k !== "b"); }
+});
+console.log(Object.keys(p).join(","));
+console.log(Object.values(p).join(","));
+console.log(Object.entries(p).map(e => e[0] + "=" + e[1]).join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "a,c")
+        self.assertEqual(lines[1], "1,3")
+        self.assertEqual(lines[2], "a=1,c=3")
+
+    def test_using_declaration_class_dispose(self):
+        """using declaration works with Symbol.dispose on class prototype"""
+        source = '''
+const log = [];
+class Resource {
+    constructor(name) { this.name = name; }
+    [Symbol.dispose]() { log.push("disposed:" + this.name); }
+}
+{
+    using r1 = new Resource("A");
+    using r2 = new Resource("B");
+    log.push("using");
+}
+console.log(log.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), "using,disposed:B,disposed:A")
+
 
 if __name__ == '__main__':
     unittest.main()

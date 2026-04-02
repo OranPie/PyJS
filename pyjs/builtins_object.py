@@ -46,9 +46,54 @@ def register_object_builtins(interp, g, intr):
             keys = [k for k in keys if interp._is_enumerable(obj, k)]
         return keys
 
-    obj_ctor.value['keys']   = intr(lambda a,i: py_to_js(_public_keys(a[0].value, a[0])) if a and a[0].type=='object' else py_to_js([]), 'keys')
-    obj_ctor.value['values'] = intr(lambda a,i: py_to_js([a[0].value[k] for k in _public_keys(a[0].value, a[0])]) if a and a[0].type=='object' else py_to_js([]), 'values')
-    obj_ctor.value['entries']= intr(lambda a,i: py_to_js([[k,a[0].value[k]] for k in _public_keys(a[0].value, a[0])]) if a and a[0].type=='object' else py_to_js([]), 'entries')
+    def _obj_keys_impl(_, args, interp):
+        if not args: return py_to_js([])
+        obj = args[0]
+        if obj.type == 'proxy':
+            proxy = obj.value
+            trap = interp._get_trap(proxy.handler, 'ownKeys')
+            if trap:
+                result = interp._call_js(trap, [proxy.target], UNDEFINED)
+                keys = list(result.value) if result.type == 'array' else []
+                return py_to_js([k.value for k in keys if isinstance(k, JsValue) and k.type == 'string' and interp._is_enumerable(proxy.target, k.value)])
+            obj = proxy.target
+        if obj.type != 'object' or not isinstance(obj.value, dict):
+            return py_to_js([])
+        return py_to_js(_public_keys(obj.value, obj))
+
+    def _obj_values_impl(_, args, interp):
+        if not args: return py_to_js([])
+        obj = args[0]
+        if obj.type == 'proxy':
+            proxy = obj.value
+            trap = interp._get_trap(proxy.handler, 'ownKeys')
+            if trap:
+                result = interp._call_js(trap, [proxy.target], UNDEFINED)
+                keys = list(result.value) if result.type == 'array' else []
+                return py_to_js([interp._get_prop(proxy.target, k.value) for k in keys if isinstance(k, JsValue) and k.type == 'string' and interp._is_enumerable(proxy.target, k.value)])
+            obj = proxy.target
+        if obj.type != 'object' or not isinstance(obj.value, dict):
+            return py_to_js([])
+        return py_to_js([obj.value[k] for k in _public_keys(obj.value, obj)])
+
+    def _obj_entries_impl(_, args, interp):
+        if not args: return py_to_js([])
+        obj = args[0]
+        if obj.type == 'proxy':
+            proxy = obj.value
+            trap = interp._get_trap(proxy.handler, 'ownKeys')
+            if trap:
+                result = interp._call_js(trap, [proxy.target], UNDEFINED)
+                keys = list(result.value) if result.type == 'array' else []
+                return py_to_js([[k.value, interp._get_prop(proxy.target, k.value)] for k in keys if isinstance(k, JsValue) and k.type == 'string' and interp._is_enumerable(proxy.target, k.value)])
+            obj = proxy.target
+        if obj.type != 'object' or not isinstance(obj.value, dict):
+            return py_to_js([])
+        return py_to_js([[k, obj.value[k]] for k in _public_keys(obj.value, obj)])
+
+    obj_ctor.value['keys']   = interp._make_intrinsic(_obj_keys_impl, 'Object.keys')
+    obj_ctor.value['values'] = interp._make_intrinsic(_obj_values_impl, 'Object.values')
+    obj_ctor.value['entries']= interp._make_intrinsic(_obj_entries_impl, 'Object.entries')
     obj_ctor.value['assign'] = intr(lambda a,i: _obj_assign(a,i), 'assign')
     def _obj_assign(args, interp):
         target = args[0] if args else py_to_js({})
@@ -209,6 +254,8 @@ def register_object_builtins(interp, g, intr):
         if target.type == 'number': return py_to_js('[object Number]')
         if target.type == 'string': return py_to_js('[object String]')
         if target.type == 'boolean': return py_to_js('[object Boolean]')
+        if target.type == 'symbol': return py_to_js('[object Symbol]')
+        if target.type == 'bigint': return py_to_js('[object BigInt]')
         if target.type == 'array': return py_to_js('[object Array]')
         if target.type == 'function': return py_to_js('[object Function]')
         if target.type in ('object', 'intrinsic', 'class'):
