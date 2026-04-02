@@ -3197,8 +3197,14 @@ class Interpreter:
         if self._has_use_strict(node["body"]):
             env._strict = True
         for s in node["body"]:
-            r = self._exec(s, env)
-            if r is not None: return r
+            # Track value of ExpressionStatements for completion-value semantics
+            if s.get("type") == "ExpressionStatement":
+                val = self._eval(s["expression"], env)
+                self._last_value = val
+            else:
+                r = self._exec(s, env)
+                if r is not None:
+                    return r
         return None
 
     def _exec_variable_declaration(self, node, env):
@@ -5356,7 +5362,7 @@ class Interpreter:
         try:
             tokens = Lexer(source).tokenize()
             ast = Parser(tokens).parse()
-            # Track last expression value for REPL display
+            # Track last expression value for REPL / completion-value semantics
             body = ast.get('body', [])
             if (len(body) == 1 and
                     body[0].get('type') == 'ExpressionStatement'):
@@ -5365,6 +5371,7 @@ class Interpreter:
             else:
                 self._exec(ast, self.genv)
                 self._run_event_loop()
+                # _exec_program now updates _last_value for ExpressionStatements
         except _JSReturn:
             pass
         except _JSError as e:
