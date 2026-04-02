@@ -3776,6 +3776,61 @@ console.log(undefined);
         self.assertEqual(lines[4], "null")
         self.assertEqual(lines[5], "undefined")
 
+    def test_reference_error_undeclared(self):
+        """Accessing undeclared variable throws ReferenceError; typeof undeclared returns 'undefined'"""
+        source = '''
+try { undeclaredVariable; } catch(e) {
+    console.log(e instanceof ReferenceError);
+    console.log(e.name);
+}
+console.log(typeof undeclaredVar2);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "ReferenceError")
+        self.assertEqual(lines[2], "undefined")
+
+    def test_class_extends_call_expression(self):
+        """class C extends mixin(B) {} supports arbitrary expression in extends clause"""
+        source = '''
+function addExtra(Base) {
+    return class extends Base {
+        extra() { return "extra"; }
+    };
+}
+class Animal { speak() { return "..."; } }
+class Dog extends addExtra(Animal) {
+    speak() { return "woof"; }
+}
+const d = new Dog();
+console.log(d.speak());
+console.log(d.extra());
+console.log(d instanceof Dog);
+console.log(d instanceof Animal);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "woof")
+        self.assertEqual(lines[1], "extra")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "true")
+
+    def test_number_large_integer_formatting(self):
+        """Numbers like MAX_SAFE_INTEGER format without .0 suffix"""
+        source = '''
+console.log(Number.MAX_SAFE_INTEGER);
+console.log(Number.MIN_SAFE_INTEGER);
+console.log(9007199254740991 === Number.MAX_SAFE_INTEGER);
+console.log(1e20);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "9007199254740991")
+        self.assertEqual(lines[1], "-9007199254740991")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "100000000000000000000")
+
 
 if __name__ == '__main__':
     unittest.main()

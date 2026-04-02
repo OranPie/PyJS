@@ -515,19 +515,8 @@ class Parser:
         super_ = None
         if self._check('EXTENDS'):
             self._advance()
-            # super class can be any left-hand-side expression
-            super_expr = self._primary()
-            while self._check('DOT') or self._check('LBRACKET'):
-                if self._check('DOT'):
-                    self._advance()
-                    prop = self._consume_identifier_name()
-                    super_expr = N.MemberExpr(super_expr, N.Id(prop), False)
-                else:
-                    self._advance()
-                    prop = self._assign()
-                    self._expect('RBRACKET')
-                    super_expr = N.MemberExpr(super_expr, prop, True)
-            super_ = super_expr
+            # super class can be any left-hand-side expression (including calls)
+            super_ = self._call()
         self._expect('LBRACE')
         members = []
         while not self._check('RBRACE') and not self._check('EOF'):
@@ -594,7 +583,9 @@ class Parser:
         name = self._expect('IDENTIFIER').value
         super_ = None
         if self._check('EXTENDS'):
-            self._advance(); super_ = self._expect('IDENTIFIER').value
+            self._advance()
+            # super class can be any left-hand-side expression (including calls/members)
+            super_ = self._call()
         self._expect('LBRACE')
         members = []
         while not self._check('RBRACE') and not self._check('EOF'):

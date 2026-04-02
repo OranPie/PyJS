@@ -722,7 +722,7 @@ class Interpreter:
             n = v.value
             if math.isnan(n): return 'NaN'
             if math.isinf(n): return 'Infinity' if n>0 else '-Infinity'
-            if n == int(n) and abs(n) < 1e15: return str(int(n))
+            if n == int(n) and abs(n) < 1e21: return str(int(n))
             return str(n)
         if v.type == 'array':     return ','.join(self._to_str(e) for e in v.value)
         if v.type == 'promise':   return '[object Promise]'
@@ -813,7 +813,7 @@ class Interpreter:
             import math as _math
             if _math.isnan(n): return 'NaN'
             if _math.isinf(n): return 'Infinity' if n > 0 else '-Infinity'
-            if n == int(n) and abs(n) < 1e15: return str(int(n))
+            if n == int(n) and abs(n) < 1e21: return str(int(n))
             return str(n)
         if v.type == 'string': return repr(v.value)
         if v.type == 'bigint': return f'{v.value}n'
@@ -3719,10 +3719,7 @@ class Interpreter:
                 _log_scope.log(TRACE, "read %s → %s", node["name"], self._to_str(_val)[:60])
             return _val
         except ReferenceError as re:
-            msg = str(re)
-            if "before initialization" in msg:
-                raise _JSError(self._make_js_error('ReferenceError', msg))
-            return UNDEFINED
+            raise _JSError(self._make_js_error('ReferenceError', str(re)))
 
     def _eval_this_expression(self, node, env):
         e = env
@@ -3803,15 +3800,18 @@ class Interpreter:
             return UNDEFINED
 
     def _eval_unary_expression(self, node, env):
-        arg = self._eval(node["argument"], env)
         op = node["operator"]
         if op == "typeof":
+            # typeof on undeclared identifier must not throw (ES5.1 §11.4.3)
+            if node["argument"].get("type") == "Identifier":
+                if not env.has(node["argument"]["name"]):
+                    return JsValue("string", "undefined")
             try:
-                if node["argument"]["type"] == "Identifier":
-                    if not env.has(node["argument"]["name"]):
-                        return JsValue("string", "undefined")
-            except (KeyError, AttributeError, TypeError): pass
+                arg = self._eval(node["argument"], env)
+            except _JSError:
+                return JsValue("string", "undefined")
             return JsValue("string", self._typeof(arg))
+        arg = self._eval(node["argument"], env)
         if op == "!":  return JS_FALSE if self._truthy(arg) else JS_TRUE
         if op == "-":  return JsValue("number", -self._to_num(arg))
         if op == "+":
