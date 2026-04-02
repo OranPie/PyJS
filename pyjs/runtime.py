@@ -1101,7 +1101,13 @@ class Interpreter:
                 if kv == 'RegExp': return self._regexp_proto
             if obj.type == 'function': return self._function_proto
             return self._object_proto
-        if obj.type == 'array': return self._array_proto
+        if obj.type == 'array':
+            # Array subclasses store their prototype in extras.__proto__
+            if obj.extras:
+                sub_proto = obj.extras.get('__proto__')
+                if isinstance(sub_proto, JsValue) and sub_proto.type == 'object':
+                    return sub_proto
+            return self._array_proto
         if obj.type == 'string': return self._string_proto
         if obj.type == 'number': return self._number_proto
         if obj.type == 'boolean': return self._boolean_proto
@@ -1656,7 +1662,13 @@ class Interpreter:
                     obj.value.append(UNDEFINED)
                 obj.value[idx] = val
             except ValueError:
-                obj.value[key] = val if key != 'length' else val
+                if key == 'length':
+                    pass  # length is read-only via list
+                else:
+                    # Non-numeric string property on array (e.g. subclass `this.max = n`)
+                    if obj.extras is None:
+                        obj.extras = {}
+                    obj.extras[key] = val
         elif obj.type in ('object', 'function', 'intrinsic', 'class'):
             # TypedArray numeric index write
             if isinstance(obj.value, dict):
@@ -4748,15 +4760,36 @@ class Interpreter:
         def _make_intr(fn, name):
             return self._make_intrinsic(lambda tv, args, interp: fn(args, interp), name)
 
+        def _iter_next(it_obj):
+            """Advance iterator; returns (value, done)."""
+            r = self._call_js(it_obj.value['next'], [], it_obj)
+            if r.type == 'object':
+                done = r.value.get('done', JS_FALSE)
+                if done is JS_TRUE or (isinstance(done, JsValue) and done.value is True):
+                    return UNDEFINED, True
+                return r.value.get('value', UNDEFINED), False
+            return UNDEFINED, True
+
         def _iter_to_list(it_obj):
             items = []
             while True:
-                r = self._call_js(it_obj.value['next'], [], it_obj)
-                if r.type == 'object' and r.value.get('done', JS_FALSE).value is True:
+                val, done = _iter_next(it_obj)
+                if done:
                     break
-                val = r.value.get('value', UNDEFINED) if r.type == 'object' else UNDEFINED
                 items.append(val)
             return items
+
+        def _make_lazy_iter(next_fn):
+            """Create a lazy iterator object from a stateful next_fn() → (val, done)."""
+            new_obj = JsValue('object', {})
+            def _next(tv, a, intp):
+                val, done = next_fn()
+                if done:
+                    return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
+                return JsValue('object', {'value': val, 'done': JS_FALSE})
+            new_obj.value['next'] = self._make_intrinsic(_next, 'Iterator.next')
+            self._add_iterator_helpers(new_obj)
+            return new_obj
 
         def _make_list_iter(items):
             idx = [0]
@@ -4772,83 +4805,148 @@ class Interpreter:
 
         def _map(args, interp):
             fn = args[0] if args else UNDEFINED
-            items = _iter_to_list(iter_obj)
-            mapped = [self._call_js(fn, [el, py_to_js(i)], None) for i, el in enumerate(items)]
-            return _make_list_iter(mapped)
+            idx = [0]
+            def _next():
+                val, done = _iter_next(iter_obj)
+                if done:
+                    return UNDEFINED, True
+                mapped = self._call_js(fn, [val, py_to_js(idx[0])], None)
+                idx[0] += 1
+                return mapped, False
+            return _make_lazy_iter(_next)
 
         def _filter(args, interp):
             fn = args[0] if args else UNDEFINED
-            items = _iter_to_list(iter_obj)
-            filtered = [el for i, el in enumerate(items)
-                        if self._truthy(self._call_js(fn, [el, py_to_js(i)], None))]
-            return _make_list_iter(filtered)
+            idx = [0]
+            def _next():
+                while True:
+                    val, done = _iter_next(iter_obj)
+                    if done:
+                        return UNDEFINED, True
+                    i = idx[0]; idx[0] += 1
+                    if self._truthy(self._call_js(fn, [val, py_to_js(i)], None)):
+                        return val, False
+            return _make_lazy_iter(_next)
 
         def _take(args, interp):
             n = int(self._to_num(args[0])) if args else 0
-            items = _iter_to_list(iter_obj)
-            return _make_list_iter(items[:n])
+            remaining = [n]
+            def _next():
+                if remaining[0] <= 0:
+                    return UNDEFINED, True
+                val, done = _iter_next(iter_obj)
+                if done:
+                    return UNDEFINED, True
+                remaining[0] -= 1
+                return val, False
+            return _make_lazy_iter(_next)
 
         def _drop(args, interp):
             n = int(self._to_num(args[0])) if args else 0
-            items = _iter_to_list(iter_obj)
-            return _make_list_iter(items[n:])
+            skipped = [0]
+            def _next():
+                while skipped[0] < n:
+                    val, done = _iter_next(iter_obj)
+                    if done:
+                        return UNDEFINED, True
+                    skipped[0] += 1
+                return _iter_next(iter_obj)
+            return _make_lazy_iter(_next)
 
         def _flat_map(args, interp):
             fn = args[0] if args else UNDEFINED
-            items = _iter_to_list(iter_obj)
-            result = []
-            for i, el in enumerate(items):
-                mapped = self._call_js(fn, [el, py_to_js(i)], None)
-                sub_it = self._get_js_iterator(mapped)
-                if sub_it is not None:
-                    while True:
-                        r = sub_it()
-                        if r.type == 'object' and r.value.get('done', JS_FALSE).value is True:
-                            break
-                        result.append(r.value.get('value', UNDEFINED) if r.type == 'object' else r)
-                else:
-                    result.append(mapped)
-            return _make_list_iter(result)
+            idx = [0]
+            inner = [None]  # current inner iterator
+            def _next():
+                while True:
+                    if inner[0] is not None:
+                        r = self._call_js(inner[0].value['next'], [], inner[0])
+                        if r.type == 'object':
+                            done = r.value.get('done', JS_FALSE)
+                            if not (done is JS_TRUE or (isinstance(done, JsValue) and done.value is True)):
+                                return r.value.get('value', UNDEFINED), False
+                        inner[0] = None
+                    val, done = _iter_next(iter_obj)
+                    if done:
+                        return UNDEFINED, True
+                    i = idx[0]; idx[0] += 1
+                    mapped = self._call_js(fn, [val, py_to_js(i)], None)
+                    sub_it = self._get_prop(mapped, f"@@{SYMBOL_ITERATOR}@@")
+                    if isinstance(sub_it, JsValue) and sub_it.type in ('function', 'intrinsic'):
+                        it_obj = self._call_js(sub_it, [], mapped)
+                        if isinstance(it_obj, JsValue) and 'next' in it_obj.value:
+                            inner[0] = it_obj
+                            continue
+                    return mapped, False
+            return _make_lazy_iter(_next)
 
         def _to_array(args, interp):
             return JsValue('array', _iter_to_list(iter_obj))
 
         def _for_each(args, interp):
             fn = args[0] if args else UNDEFINED
-            for i, el in enumerate(_iter_to_list(iter_obj)):
-                self._call_js(fn, [el, py_to_js(i)], None)
+            i = 0
+            while True:
+                val, done = _iter_next(iter_obj)
+                if done:
+                    break
+                self._call_js(fn, [val, py_to_js(i)], None)
+                i += 1
             return UNDEFINED
 
         def _some(args, interp):
             fn = args[0] if args else UNDEFINED
-            for i, el in enumerate(_iter_to_list(iter_obj)):
-                if self._truthy(self._call_js(fn, [el, py_to_js(i)], None)):
+            i = 0
+            while True:
+                val, done = _iter_next(iter_obj)
+                if done:
+                    break
+                if self._truthy(self._call_js(fn, [val, py_to_js(i)], None)):
                     return JS_TRUE
+                i += 1
             return JS_FALSE
 
         def _every(args, interp):
             fn = args[0] if args else UNDEFINED
-            for i, el in enumerate(_iter_to_list(iter_obj)):
-                if not self._truthy(self._call_js(fn, [el, py_to_js(i)], None)):
+            i = 0
+            while True:
+                val, done = _iter_next(iter_obj)
+                if done:
+                    break
+                if not self._truthy(self._call_js(fn, [val, py_to_js(i)], None)):
                     return JS_FALSE
+                i += 1
             return JS_TRUE
 
         def _find(args, interp):
             fn = args[0] if args else UNDEFINED
-            for i, el in enumerate(_iter_to_list(iter_obj)):
-                if self._truthy(self._call_js(fn, [el, py_to_js(i)], None)):
-                    return el
+            i = 0
+            while True:
+                val, done = _iter_next(iter_obj)
+                if done:
+                    break
+                if self._truthy(self._call_js(fn, [val, py_to_js(i)], None)):
+                    return val
+                i += 1
             return UNDEFINED
 
         def _reduce(args, interp):
             fn = args[0] if args else UNDEFINED
-            items = _iter_to_list(iter_obj)
-            if not items:
-                return args[1] if len(args) > 1 else UNDEFINED
-            acc = args[1] if len(args) > 1 else items[0]
-            start = 0 if len(args) > 1 else 1
-            for el in items[start:]:
-                acc = self._call_js(fn, [acc, el], None)
+            if len(args) > 1:
+                acc = args[1]
+                i = 0
+            else:
+                val, done = _iter_next(iter_obj)
+                if done:
+                    return UNDEFINED
+                acc = val
+                i = 1
+            while True:
+                val, done = _iter_next(iter_obj)
+                if done:
+                    break
+                acc = self._call_js(fn, [acc, val], None)
+                i += 1
             return acc
 
         iter_obj.value['map'] = _make_intr(_map, 'Iterator.map')

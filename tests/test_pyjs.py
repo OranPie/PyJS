@@ -4596,5 +4596,67 @@ console.log(s.join(","));
         self.assertEqual(lines[2], '1,2,3')
 
 
+    # ── Phase 43 tests ──────────────────────────────────────────────────────────
+
+    def test_class_extends_array_instanceof_and_extra_props(self):
+        """Array subclass instances are instanceof the subclass, Array, and support extra props."""
+        source = '''
+class Stack extends Array {
+  constructor() { super(); this.label = "stack"; }
+  push(...items) { super.push(...items); return this; }
+}
+const s = new Stack();
+s.push(1, 2, 3);
+console.log(s instanceof Stack);
+console.log(s instanceof Array);
+console.log(s.label);
+console.log(s.length);
+console.log(s.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'true')
+        self.assertEqual(lines[2], 'stack')
+        self.assertEqual(lines[3], '3')
+        self.assertEqual(lines[4], '1,2,3')
+
+    def test_lazy_iterator_filter_take_on_infinite_generator(self):
+        """filter().take() on an infinite generator must terminate lazily."""
+        source = '''
+function* naturals() { let n = 0; while (true) yield n++; }
+const evens = naturals().filter(n => n % 2 === 0).take(5).toArray();
+console.log(evens.join(","));
+const squares = naturals().take(5).map(n => n * n).toArray();
+console.log(squares.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '0,2,4,6,8')
+        self.assertEqual(lines[1], '0,1,4,9,16')
+
+    def test_lazy_iterator_drop_and_helpers(self):
+        """drop(), forEach(), some(), every(), find(), reduce() work on generators."""
+        source = '''
+function* range(n) { for (let i = 1; i <= n; i++) yield i; }
+console.log(range(10).drop(5).take(3).toArray().join(","));
+const seen = [];
+range(5).forEach(x => seen.push(x));
+console.log(seen.join(","));
+console.log(range(10).some(x => x > 5));
+console.log(range(10).every(x => x > 0));
+console.log(range(10).find(x => x > 7));
+console.log(range(5).reduce((a, b) => a + b));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '6,7,8')
+        self.assertEqual(lines[1], '1,2,3,4,5')
+        self.assertEqual(lines[2], 'true')
+        self.assertEqual(lines[3], 'true')
+        self.assertEqual(lines[4], '8')
+        self.assertEqual(lines[5], '15')
+
+
 if __name__ == '__main__':
     unittest.main()

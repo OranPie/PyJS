@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **325 tests passing** | ~14 400 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–42 added 263 tests)*
+*Updated: 2026-04-03 | **328 tests passing** | ~14 500 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–43 added 266 tests)*
 
 ---
 
@@ -230,7 +230,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **39** | Correctness fixes: **static field initializers can reference own class name** (`class C { static y = C.x + 1; }` now works — class declared in env before field init runs) ✓; **`Math.fround`** now performs correct float32 round-trip via `struct.pack('f')` (was returning original value unchanged) ✓; **invalid regex patterns** (e.g. variable-width lookbehind unsupported by Python `re`) converted to JS `SyntaxError` instead of crashing with an uncaught `re.error` ✓ | 5 | **315** |
 | **40** | ES2022 + correctness fixes: **`#name in obj` private field brand check** — new `PrivateIdentifier`/`private_in` AST node type; parser recognizes `PRIVATE_NAME IN` in relational expressions; runtime checks `#name` directly in `target.value` ✓; **`"push" in arr`** now returns `true` — `in` operator checks `ARRAY_METHODS` frozenset for array targets ✓; **`"split" in str`** likewise returns `true` via `STRING_METHODS` check ✓ | 3 | **318** |
 | **41** | `Object.prototype.toString` completeness: **Promise** → `[object Promise]` ✓; **RegExp** → `[object RegExp]` ✓; **Function/intrinsic/class** → `[object Function]` ✓; **Symbol/BigInt/Number/String/Boolean** via type dispatch ✓; **TypedArrays** use `__name__` (plain Python str) → `[object Uint8Array]`, `[object Float32Array]`, etc. ✓; **ArrayBuffer** detected via `__type__ == 'ArrayBuffer'` ✓ | 2 | **320** |
-| **42** | Correctness fixes: **`class extends Array`** — subclass instances are array-typed, `super.push/pop` etc. dispatch to built-in array methods, subclass overrides take priority ✓; **`new Class(...spreadArgs)`** — spread arguments in `new` expressions now parsed and evaluated ✓; **static method named `name` overrides** class name property correctly ✓; **`JSON.stringify` integer key ordering** — integer-index keys now sorted numerically first per spec ✓ | 5 | **325** |
+| **43** | Correctness fixes: **lazy iterator helpers** — `filter`, `map`, `take`, `drop`, `flatMap`, `forEach`, `some`, `every`, `find`, `reduce` are now fully lazy (stream-based, not eager list consumption); `filter().take()` on infinite generators terminates correctly ✓; **Array subclass extra properties** (`this.x = v` in subclass constructor) stored in `extras` dict not Python list ✓; **Array subclass `instanceof` chain** — `_get_proto` for array-typed values checks `extras.__proto__` first so prototype walks reach subclass prototype ✓ | 3 | **328** |
 
 ---
 
@@ -266,7 +266,7 @@ See **[docs/plugins.md](plugins.md)** for the full plugin authoring guide.
 ## Verdict
 
 > **PyJS is a ~98–99% ES2015–ES2025 interpreter.**
-> All major language features are implemented and tested across 325 tests.
+> All major language features are implemented and tested across 328 tests.
 > Remaining gaps are specialist (SharedArrayBuffer/Atomics, full ICU Intl locale data, tail-call opt)
 > or intentionally omitted (Function constructor, with statement).
 > Decorator syntax (TC39 Stage 3) is implemented for class declarations, methods, and fields.
@@ -274,6 +274,8 @@ See **[docs/plugins.md](plugins.md)** for the full plugin authoring guide.
 > are extensible just as in real JavaScript.
 > **`class extends Array`** is fully supported — subclasses are real array-typed instances
 > with built-in array methods and correct `super` dispatch.
+> **ES2025 iterator helpers** (`filter`, `map`, `take`, `drop`, etc.) are **fully lazy** —
+> `naturals().filter(n => n % 2 === 0).take(5).toArray()` works correctly on infinite generators.
 > The plugin system enables extending the runtime with domain-specific APIs
 > (storage, networking, filesystem) without modifying the core.
 > For scripting, teaching, and computational tasks it is production-ready.
