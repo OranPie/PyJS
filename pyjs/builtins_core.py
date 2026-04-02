@@ -29,17 +29,39 @@ _scope_log = get_logger("scope")
 
 
 def _parseInt(args, interp):
-    s = interp._to_str(args[0]) if args else 'undefined'
-    base = int(args[1].value) if len(args)>1 and args[1].type=='number' else 10
+    if not args:
+        return JsValue("number", float('nan'))
+    s = interp._to_str(args[0]).lstrip()
+    explicit_base = len(args) > 1 and args[1].type == 'number' and not (args[1].value != args[1].value)
+    base = int(args[1].value) if explicit_base else 0
+    if not s:
+        return JsValue("number", float('nan'))
+    # Handle sign
+    sign = 1
+    if s[0] in '+-':
+        sign = -1 if s[0] == '-' else 1
+        s = s[1:]
+    if not s:
+        return JsValue("number", float('nan'))
+    # Auto-detect base / strip prefix
+    if base == 0 or base == 16:
+        if s.startswith(('0x', '0X')):
+            s = s[2:]
+            base = 16
+        elif base == 0:
+            base = 10
+    if base < 2 or base > 36:
+        return JsValue("number", float('nan'))
+    valid = '0123456789abcdefghijklmnopqrstuvwxyz'[:base]
+    i = 0
+    while i < len(s) and s[i].lower() in valid:
+        i += 1
+    if i == 0:
+        return JsValue("number", float('nan'))
     try:
-        if base == 0:
-            s2 = s.lstrip()
-            if s2.startswith(('0x','0X')): base=16
-            elif s2.startswith(('0o','0O')): base=8
-            elif s2.startswith(('0b','0B')): base=2
-            else: base=10
-        return JsValue("number", int(s, base))
-    except (ValueError, TypeError, OverflowError): return JsValue("number", float('nan'))
+        return JsValue("number", float(sign * int(s[:i], base)))
+    except (ValueError, TypeError):
+        return JsValue("number", float('nan'))
 
 def _parseFloat(args, interp):
     s = interp._to_str(args[0]) if args else 'undefined'

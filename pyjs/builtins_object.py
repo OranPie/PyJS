@@ -459,15 +459,15 @@ def register_object_builtins(interp, g, intr):
 
     number_ctor = intr(lambda a,i: py_to_js(i._to_num(a[0]) if a else 0), 'Number')
     number_ctor.value['isNaN'] = interp._make_intrinsic(
-        lambda this_val, args, interp: JS_TRUE if args and math.isnan(interp._to_num(args[0])) else JS_FALSE,
+        lambda this_val, args, interp: JS_TRUE if args and args[0].type == 'number' and math.isnan(args[0].value) else JS_FALSE,
         'Number.isNaN',
     )
     number_ctor.value['isFinite'] = interp._make_intrinsic(
-        lambda this_val, args, interp: JS_TRUE if args and math.isfinite(interp._to_num(args[0])) else JS_FALSE,
+        lambda this_val, args, interp: JS_TRUE if args and args[0].type == 'number' and math.isfinite(args[0].value) else JS_FALSE,
         'Number.isFinite',
     )
     number_ctor.value['isInteger'] = interp._make_intrinsic(
-        lambda this_val, args, interp: JS_TRUE if args and interp._to_num(args[0]) == int(interp._to_num(args[0])) and math.isfinite(interp._to_num(args[0])) else JS_FALSE,
+        lambda this_val, args, interp: JS_TRUE if args and args[0].type == 'number' and math.isfinite(args[0].value) and args[0].value == int(args[0].value) else JS_FALSE,
         'Number.isInteger',
     )
     number_ctor.value['EPSILON'] = JsValue('number', 2.220446049250313e-16)

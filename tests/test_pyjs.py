@@ -3377,5 +3377,120 @@ console.log(mapped.join(","));
         self.assertEqual(lines[1], "10,20,30")
 
 
+    # ----- Phase 31 tests -----
+
+    def test_array_entries_iterator(self):
+        """Array.prototype.entries/keys/values return correct iterators"""
+        source = '''
+const arr = ["a", "b", "c"];
+const e = [];
+for (const [i, v] of arr.entries()) e.push(i + ":" + v);
+console.log(e.join(","));
+const k = [];
+for (const i of arr.keys()) k.push(i);
+console.log(k.join(","));
+const v = [];
+for (const x of arr.values()) v.push(x);
+console.log(v.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "0:a,1:b,2:c")
+        self.assertEqual(lines[1], "0,1,2")
+        self.assertEqual(lines[2], "a,b,c")
+
+    def test_computed_class_fields(self):
+        """Computed class fields work for both static and instance fields"""
+        source = '''
+const key = "hello";
+class C {
+    [key] = 42;
+    static ["world"] = 99;
+}
+const c = new C();
+console.log(c.hello);
+console.log(C.world);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "42")
+        self.assertEqual(lines[1], "99")
+
+    def test_replace_dollar_sequences(self):
+        """String.prototype.replace handles $& $$ $` $' sequences"""
+        source = '''
+console.log("hello world".replace("world", "[$&]"));
+console.log("abc".replace("b", "$$"));
+console.log("abc".replace("b", "[$`]"));
+console.log("abc".replace("b", "[$']"));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "hello [world]")
+        self.assertEqual(lines[1], "a$c")
+        self.assertEqual(lines[2], "a[a]c")
+        self.assertEqual(lines[3], "a[c]c")
+
+    def test_replaceall_function(self):
+        """String.prototype.replaceAll with a function replacement"""
+        source = '''
+const result = "aabbcc".replaceAll("b", (m, offset, s) => m.toUpperCase() + offset);
+console.log(result);
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), "aaB2B3cc")
+
+    def test_parseint_radix(self):
+        """parseInt handles trailing chars, hex, and explicit base"""
+        source = '''
+console.log(parseInt("42px"));
+console.log(parseInt("0xFF"));
+console.log(parseInt("11", 2));
+console.log(parseInt("  10  "));
+console.log(parseInt("xyz"));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "42")
+        self.assertEqual(lines[1], "255")
+        self.assertEqual(lines[2], "3")
+        self.assertEqual(lines[3], "10")
+        self.assertEqual(lines[4], "NaN")
+
+    def test_number_is_nan_strict(self):
+        """Number.isNaN/isFinite/isInteger do NOT coerce types"""
+        source = '''
+console.log(Number.isNaN("NaN"));
+console.log(Number.isNaN(NaN));
+console.log(Number.isFinite("1"));
+console.log(Number.isFinite(1));
+console.log(Number.isInteger("1"));
+console.log(Number.isInteger(1));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "false")
+        self.assertEqual(lines[1], "true")
+        self.assertEqual(lines[2], "false")
+        self.assertEqual(lines[3], "true")
+        self.assertEqual(lines[4], "false")
+        self.assertEqual(lines[5], "true")
+
+    def test_super_getter_this(self):
+        """super.getter in derived class passes correct this"""
+        source = '''
+class Animal {
+    constructor(n) { this.name = n; }
+    get description() { return "Animal: " + this.name; }
+}
+class Dog extends Animal {
+    get description() { return super.description + " (Dog)"; }
+}
+console.log(new Dog("Rex").description);
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), "Animal: Rex (Dog)")
+
+
 if __name__ == '__main__':
     unittest.main()

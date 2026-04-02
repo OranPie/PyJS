@@ -62,7 +62,7 @@ _log_proxy = get_logger("proxy")
 # ============================================================================
 
 class Interpreter:
-    ARRAY_METHODS = frozenset({'push', 'pop', 'shift', 'unshift', 'indexOf', 'includes', 'join', 'slice', 'splice', 'concat', 'reverse', 'sort', 'forEach', 'map', 'filter', 'reduce', 'find', 'flat', 'flatMap', 'every', 'some', 'fill', 'copyWithin', 'toString', 'at', 'findIndex', 'findLast', 'findLastIndex', 'reduceRight', 'lastIndexOf', 'toSorted', 'toReversed', 'toSpliced', 'with'})
+    ARRAY_METHODS = frozenset({'push', 'pop', 'shift', 'unshift', 'indexOf', 'includes', 'join', 'slice', 'splice', 'concat', 'reverse', 'sort', 'forEach', 'map', 'filter', 'reduce', 'find', 'flat', 'flatMap', 'every', 'some', 'fill', 'copyWithin', 'toString', 'at', 'findIndex', 'findLast', 'findLastIndex', 'reduceRight', 'lastIndexOf', 'toSorted', 'toReversed', 'toSpliced', 'with', 'keys', 'values', 'entries'})
     STRING_METHODS = frozenset({'charAt', 'charCodeAt', 'indexOf', 'includes', 'slice', 'substring', 'toLowerCase', 'toUpperCase', 'trim', 'split', 'replace', 'replaceAll', 'startsWith', 'endsWith', 'padStart', 'padEnd', 'repeat', 'match', 'search', 'concat', 'lastIndexOf', 'normalize', 'at', 'matchAll', 'trimStart', 'trimLeft', 'trimEnd', 'trimRight', 'codePointAt', 'isWellFormed', 'toWellFormed'})
     NUMBER_METHODS = frozenset({'toFixed', 'toPrecision', 'toString', 'toLocaleString', 'valueOf', 'toExponential'})
     PROMISE_METHODS = frozenset({'then', 'catch', 'finally'})
@@ -1130,7 +1130,9 @@ class Interpreter:
             return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
         return UNDEFINED
 
-    def _get_prop_object_like(self, obj, key):
+    def _get_prop_object_like(self, obj, key, receiver=None):
+        if receiver is None:
+            receiver = obj
         obj_type = obj.value.get('__type__') if isinstance(obj.value, dict) else None
         if isinstance(obj_type, JsValue) and obj_type.value == 'WeakRef':
             if key == 'deref':
@@ -1169,7 +1171,7 @@ class Interpreter:
         while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
             getter_key = f"__get__{key}"
             if getter_key in current.value:
-                return self._call_js(current.value[getter_key], [], obj)
+                return self._call_js(current.value[getter_key], [], receiver)
             if key in current.value:
                 return current.value[key]
             current = self._get_proto(current)
@@ -1321,8 +1323,9 @@ class Interpreter:
             return self._get_prop(proxy.target, key)
         if obj.type == 'object' and '__super_target__' in obj.value:
             target = obj.value.get('__super_target__')
+            this_val = obj.value.get('__super_this__', target)
             if isinstance(target, JsValue):
-                return self._get_prop(target, key)
+                return self._get_prop_object_like(target, key, receiver=this_val)
             return UNDEFINED
         handler = self._GET_PROP_DISPATCH.get(obj.type)
         if handler:
@@ -1674,6 +1677,27 @@ class Interpreter:
                 if 0 <= idx < len(copy):
                     copy[idx] = val
                 return JsValue('array', copy)
+            if name in ('keys', 'values', 'entries'):
+                items = list(a)
+                idx = [0]
+                sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+                iter_obj = JsValue('object', {})
+                def _make_iter_next(items=items, idx=idx, kind=name):
+                    def _next(tv, nargs, ni):
+                        if idx[0] >= len(items):
+                            return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
+                        i = idx[0]; idx[0] += 1
+                        if kind == 'keys':
+                            val = JsValue('number', float(i))
+                        elif kind == 'values':
+                            val = items[i]
+                        else:  # entries
+                            val = JsValue('array', [JsValue('number', float(i)), items[i]])
+                        return JsValue('object', {'value': val, 'done': JS_FALSE})
+                    return _next
+                iter_obj.value['next'] = interp._make_intrinsic(_make_iter_next(), f'Array.{name}.next')
+                iter_obj.value[sym_iter_key] = interp._make_intrinsic(lambda tv, a, ni, o=iter_obj: o, f'Array.{name}[Symbol.iterator]')
+                return iter_obj
             # Check plugin-registered methods
             plugin_key = ('array', name)
             if interp._plugin_methods and plugin_key in interp._plugin_methods:
@@ -1821,8 +1845,23 @@ class Interpreter:
                         return JsValue('string', re.sub(py_src, _str_repl, s, count=count, flags=py_flg))
                 else:
                     old = _pattern_text(pat_arg)
+                    if interp._is_callable(repl_arg):
+                        idx = s.find(old)
+                        if idx == -1:
+                            return JsValue("string", s)
+                        repl_val = interp._call_js(repl_arg, [JsValue('string', old), JsValue('number', float(idx)), JsValue('string', s)], None)
+                        return JsValue("string", s[:idx] + interp._to_str(repl_val) + s[idx+len(old):])
                     new = interp._to_str(repl_arg) if isinstance(repl_arg, JsValue) else ''
-                    return JsValue("string", s.replace(old, new, 1))
+                    idx = s.find(old)
+                    if idx == -1:
+                        return JsValue("string", s)
+                    # Process replacement string $ sequences
+                    r = new.replace('$$', '\x00')
+                    r = r.replace('$&', old)
+                    r = r.replace('$`', s[:idx])
+                    r = r.replace("$'", s[idx+len(old):])
+                    r = r.replace('\x00', '$')
+                    return JsValue("string", s[:idx] + r + s[idx+len(old):])
             if name == 'replaceAll':
                 pat_arg = args[0] if args else UNDEFINED
                 repl_arg = args[1] if len(args) > 1 else UNDEFINED
@@ -1841,6 +1880,14 @@ class Interpreter:
                     if 'm' in flg_str: py_flg |= re.MULTILINE
                     if 's' in flg_str: py_flg |= re.DOTALL
                     if 'u' in flg_str or 'v' in flg_str: py_flg |= re.UNICODE
+                    if interp._is_callable(repl_arg):
+                        def _fn_repl_re_all(m, rf=repl_arg):
+                            call_args = [JsValue('string', m.group(0))]
+                            call_args.extend(JsValue('string', g) if g is not None else UNDEFINED for g in m.groups())
+                            call_args.append(JsValue('number', float(m.start())))
+                            call_args.append(JsValue('string', s))
+                            return interp._to_str(interp._call_js(rf, call_args, None))
+                        return JsValue('string', re.sub(py_src, _fn_repl_re_all, s, flags=py_flg))
                     repl_str = interp._to_str(repl_arg) if isinstance(repl_arg, JsValue) and repl_arg.type != 'undefined' else ''
                     def _str_repl_all(m):
                         r = repl_str
@@ -1860,8 +1907,41 @@ class Interpreter:
                     return JsValue('string', re.sub(py_src, _str_repl_all, s, flags=py_flg))
                 else:
                     old = _pattern_text(pat_arg)
-                    new = interp._to_str(repl_arg) if isinstance(repl_arg, JsValue) else ''
-                    return JsValue("string", s.replace(old, new))
+                    if interp._is_callable(repl_arg):
+                        def _fn_repl_all(match_str, start_pos, full_str, rf=repl_arg):
+                            call_args = [JsValue('string', match_str),
+                                         JsValue('number', float(start_pos)),
+                                         JsValue('string', full_str)]
+                            return interp._to_str(interp._call_js(rf, call_args, None))
+                        if not old:
+                            return JsValue("string", s)
+                        parts = s.split(old)
+                        result_parts = []
+                        pos = 0
+                        for i, part in enumerate(parts):
+                            if i > 0:
+                                result_parts.append(_fn_repl_all(old, pos - len(old), s))
+                            result_parts.append(part)
+                            pos += len(part) + len(old)
+                        return JsValue("string", "".join(result_parts))
+                    else:
+                        new = interp._to_str(repl_arg) if isinstance(repl_arg, JsValue) else ''
+                        if not old:
+                            return JsValue("string", s)
+                        # Process $ sequences per-occurrence
+                        parts = s.split(old)
+                        result_parts = []
+                        pos = 0
+                        for i, part in enumerate(parts):
+                            if i > 0:
+                                idx = pos - len(old)
+                                r = new.replace('$$', '\x00').replace('$&', old)
+                                r = r.replace('$`', s[:idx]).replace("$'", s[idx+len(old):])
+                                r = r.replace('\x00', '$')
+                                result_parts.append(r)
+                            result_parts.append(part)
+                            pos += len(part) + len(old)
+                        return JsValue("string", "".join(result_parts))
             if name == 'padStart':
                 target = int(args[0].value) if args else 0
                 fill = args[1].value if len(args)>1 and args[1].type=='string' else ' '
@@ -2838,8 +2918,15 @@ class Interpreter:
         if isinstance(parent_class, JsValue):
             ctor.value["__proto__"] = parent_class
         for sf in static_fields:
+            sf_key = sf["key"]
+            if sf.get("computed") and sf.get("computed_key"):
+                computed_val = self._eval(sf["computed_key"], env)
+                if computed_val.type == 'symbol':
+                    sf_key = f"@@{computed_val.value['id']}@@"
+                else:
+                    sf_key = self._to_str(computed_val)
             sf_val = self._eval(sf["value"], env) if sf.get("value") else UNDEFINED
-            ctor.value[sf["key"]] = sf_val
+            ctor.value[sf_key] = sf_val
         if instance_fields:
             ctor.value["__instance_fields__"] = instance_fields
 
@@ -3909,7 +3996,14 @@ class Interpreter:
                 field_env._this = new_obj
                 for field in instance_fields:
                     fval = self._eval(field["value"], field_env) if field.get("value") else UNDEFINED
-                    new_obj.value[field["key"]] = fval
+                    fkey = field["key"]
+                    if field.get("computed") and field.get("computed_key"):
+                        computed_val = self._eval(field["computed_key"], field_env)
+                        if computed_val.type == 'symbol':
+                            fkey = f"@@{computed_val.value['id']}@@"
+                        else:
+                            fkey = self._to_str(computed_val)
+                    new_obj.value[fkey] = fval
             result = self._call_js(callee, args, new_obj, is_new_call=True)
             if isinstance(result, JsValue) and result.type in ('object', 'array', 'function', 'intrinsic', 'class', 'promise', 'proxy'):
                 return result

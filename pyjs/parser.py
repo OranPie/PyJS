@@ -21,7 +21,7 @@ class N:
     VarDeclarator  = lambda id,init=None,line=0: N._n("VariableDeclarator", id=id, init=init, line=line)
     FnDecl         = lambda name,params,body,async_=False,generator_=False: N._n("FunctionDeclaration", id=name, params=params, body=body, async_=async_, generator_=generator_)
     ClassDecl      = lambda name,super_,body,decorators=None: N._n("ClassDeclaration", id=name, superClass=super_, body=body, decorators=decorators or [])
-    ClassField     = lambda key, value, static_=False, decorators=None: N._n("ClassField", key=key, value=value, static_=static_, decorators=decorators or [])
+    ClassField     = lambda key, value, static_=False, decorators=None, computed=False, computed_key=None: N._n("ClassField", key=key, value=value, static_=static_, decorators=decorators or [], computed=computed, computed_key=computed_key)
     Decorator      = lambda expr: N._n("Decorator", expression=expr)
     StaticBlock    = lambda body: N._n("StaticBlock", body=body)
     RetStmt        = lambda arg=None:       N._n("ReturnStatement", argument=arg)
@@ -564,13 +564,13 @@ class Parser:
                 computed = True
             else:
                 key = self._consume_identifier_name()
-            is_field = kind == 'method' and not generator and not is_async and not self._check('LPAREN') and not computed
+            is_field = kind == 'method' and not generator and not is_async and not self._check('LPAREN')
             if is_field:
                 value = None
                 if self._optional('ASSIGN'):
                     value = self._assign()
                 self._optional('SEMICOLON')
-                members.append(N.ClassField(key, value, static, decorators=member_decorators))
+                members.append(N.ClassField(key, value, static, decorators=member_decorators, computed=computed, computed_key=computed_key_node))
             else:
                 self._expect('LPAREN')
                 params = []
@@ -636,13 +636,13 @@ class Parser:
             else:
                 key = self._consume_identifier_name()
             # decide: field vs method
-            is_field = kind == 'method' and not generator and not is_async and not self._check('LPAREN') and not computed
+            is_field = kind == 'method' and not generator and not is_async and not self._check('LPAREN')
             if is_field:
                 value = None
                 if self._optional('ASSIGN'):
                     value = self._assign()
                 self._optional('SEMICOLON')
-                members.append(N.ClassField(key, value, static, decorators=member_decorators))
+                members.append(N.ClassField(key, value, static, decorators=member_decorators, computed=computed, computed_key=computed_key_node))
             else:
                 self._expect('LPAREN')
                 params = []
