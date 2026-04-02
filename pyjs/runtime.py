@@ -4122,6 +4122,16 @@ class Interpreter:
 
     def _eval_binary_expression(self, node, env):
         op = node["operator"]
+        # Private field brand check: #name in obj  (ES2022)
+        if op == 'private_in':
+            priv_name = node["left"]["name"]  # PrivateIdentifier node; name includes '#'
+            target = self._eval(node["right"], env)
+            if target.type not in ('object', 'array', 'function', 'intrinsic'):
+                raise _JSError(self._make_js_error('TypeError', f'Cannot use "in" operator to search for "{priv_name}" in {self._to_str(target)}'))
+            # Private fields are stored as "{#name}" directly in target.value
+            if isinstance(target.value, dict) and priv_name in target.value:
+                return JS_TRUE
+            return JS_FALSE
         l = self._eval(node["left"], env)
         if op in ("||","&&"):
             if op == "||":
@@ -4285,6 +4295,9 @@ class Interpreter:
                 # Check extras (e.g. 'groups' on regex match) and array prototype chain
                 if target.extras and key in target.extras:
                     return JS_TRUE
+                # Built-in array methods are dispatch-based, not stored in proto
+                if key in self.ARRAY_METHODS:
+                    return JS_TRUE
                 # Walk array prototype for inherited properties (like push, pop, etc.)
                 cur = self._get_proto(target)
                 while isinstance(cur, JsValue) and cur.type in ('object', 'function', 'intrinsic', 'class'):
@@ -4298,8 +4311,11 @@ class Interpreter:
                 try:
                     return JS_TRUE if 0 <= int(key) < len(target.value) else JS_FALSE
                 except (ValueError, TypeError):
-                    return JS_FALSE
-            return JS_FALSE
+                    pass
+                # Built-in string methods
+                if key in self.STRING_METHODS:
+                    return JS_TRUE
+                return JS_FALSE
         # bitwise
         li, ri = int(self._to_num(l)), int(self._to_num(r))
         if op == "<<":  return JsValue("number", li << ri)

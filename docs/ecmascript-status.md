@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **315 tests passing** | ~14 300 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–39 added 253 tests)*
+*Updated: 2026-04-03 | **318 tests passing** | ~14 300 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–40 added 256 tests)*
 
 ---
 
@@ -228,6 +228,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **37** | Constructor `.prototype` objects + prototype chain: **14 shared prototype objects** created (`_array_proto`, `_object_proto`, `_function_proto`, etc.); `Array/Map/Set/String/Number/Boolean/RegExp/Symbol/WeakMap/WeakSet/Promise.prototype` all wired up; `Array.prototype === Object.getPrototypeOf([])` ✓; user can extend `Array.prototype.sum = fn` and use on all arrays ✓; `Map.prototype.toObject = fn` ✓; `Set.prototype.toArray = fn` ✓; `Object.create(null)` null-proto correctly reported by `getPrototypeOf` ✓; `Object.prototype.toString` on `_object_proto` (non-enumerable) ✓; `Function.prototype.toString` takes priority over chain ✓; `Symbol.toStringTag` getter walked via prototype chain by `Object.prototype.toString` ✓ | 5 | **301** |
 | **38** | Correctness fixes: **destructuring assignment to `MemberExpression` LHS** (`[obj.a, obj.b] = [1, 2]`; `[this.x] = arr` in setters) ✓; **`in` operator walks prototype chain** for getters (`"area" in rect` → `true`) + checks `length` in arrays ✓; **`String.prototype.toString`/`valueOf`** callable (was `undefined`) ✓; **`String.fromCharCode`** added ✓; **`finally` re-throws** errors/breaks/continues when no catch clause present ✓; **`new Date("YYYY-MM-DD")`** string parsing ✓; **`Array.values()`/`keys()`/`entries()`** iterators now have iterator helpers (`map`, `filter`, `take`, …) ✓ | 9 | **310** |
 | **39** | Correctness fixes: **static field initializers can reference own class name** (`class C { static y = C.x + 1; }` now works — class declared in env before field init runs) ✓; **`Math.fround`** now performs correct float32 round-trip via `struct.pack('f')` (was returning original value unchanged) ✓; **invalid regex patterns** (e.g. variable-width lookbehind unsupported by Python `re`) converted to JS `SyntaxError` instead of crashing with an uncaught `re.error` ✓ | 5 | **315** |
+| **40** | ES2022 + correctness fixes: **`#name in obj` private field brand check** — new `PrivateIdentifier`/`private_in` AST node type; parser recognizes `PRIVATE_NAME IN` in relational expressions; runtime checks `#name` directly in `target.value` ✓; **`"push" in arr`** now returns `true` — `in` operator checks `ARRAY_METHODS` frozenset for array targets ✓; **`"split" in str`** likewise returns `true` via `STRING_METHODS` check ✓ | 3 | **318** |
 
 ---
 

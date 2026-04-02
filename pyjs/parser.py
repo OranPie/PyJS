@@ -893,6 +893,14 @@ class Parser:
         return left
 
     def _rel(self):
+        # Private field brand check: #name in obj  (ES2022)
+        if self._check('PRIVATE_NAME'):
+            priv_tok = self._peek(1)   # peek at next token (after PRIVATE_NAME)
+            if priv_tok and priv_tok.type == 'IN':
+                priv_name = self._advance().value   # consume #name
+                self._advance()                      # consume 'in'
+                right = self._shift()
+                return N.BinExpr('private_in', N._n('PrivateIdentifier', name=priv_name), right)
         left = self._shift()
         while self._check('LT','GT','LTE','GTE','INSTANCEOF'):
             op = self._advance().value

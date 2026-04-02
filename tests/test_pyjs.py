@@ -4423,5 +4423,61 @@ try {
         self.assertEqual(result.strip(), 'SyntaxError')
 
 
+    # ── Phase 40 tests ──────────────────────────────────────────────────────────
+
+    def test_private_field_brand_check_in_class(self):
+        """#name in obj brand check works inside class methods."""
+        source = '''
+class Stamped {
+  #brand = true;
+  isStamped() { return #brand in this; }
+  checkOther(o) { return #brand in o; }
+}
+const s = new Stamped();
+console.log(s.isStamped());       // true
+console.log(s.checkOther({}));    // false
+console.log(s.checkOther(s));     // true
+console.log(s.checkOther(new Stamped()));  // true
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'false')
+        self.assertEqual(lines[2], 'true')
+        self.assertEqual(lines[3], 'true')
+
+    def test_in_operator_array_builtin_methods(self):
+        """'push' in arr and similar should return true for built-in array methods."""
+        source = '''
+const arr = [1, 2, 3];
+console.log("push" in arr);
+console.log("map" in arr);
+console.log("filter" in arr);
+console.log("xyz" in arr);
+console.log("length" in arr);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'true')
+        self.assertEqual(lines[2], 'true')
+        self.assertEqual(lines[3], 'false')
+        self.assertEqual(lines[4], 'true')
+
+    def test_in_operator_string_builtin_methods(self):
+        """'split' in str and similar should return true for built-in string methods."""
+        source = '''
+const s = "hello";
+console.log("split" in s);
+console.log("length" in s);
+console.log("xyz" in s);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'true')
+        self.assertEqual(lines[2], 'false')
+
+
 if __name__ == '__main__':
     unittest.main()
