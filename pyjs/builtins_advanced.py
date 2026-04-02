@@ -298,10 +298,24 @@ def register_advanced_builtins(interp, g, intr):
         target = args[0]
         if target.type in ('object', 'function', 'intrinsic', 'class'):
             result = []
+            seen = set()
             for k in target.value.keys():
-                if k.startswith('__') and k.endswith('__'): continue
-                sym = interp._sym_key_to_jsval(k)
-                result.append(sym if sym else JsValue('string', k))
+                if k.startswith('@@') and k.endswith('@@'):
+                    sym = interp._sym_key_to_jsval(k)
+                    if sym and k not in seen:
+                        seen.add(k); result.append(sym)
+                elif k.startswith('__get__'):
+                    bare = k[len('__get__'):]
+                    if bare not in seen:
+                        seen.add(bare); result.append(JsValue('string', bare))
+                elif k.startswith('__set__'):
+                    bare = k[len('__set__'):]
+                    if bare not in seen and bare not in target.value:
+                        seen.add(bare); result.append(JsValue('string', bare))
+                elif k.startswith('__') and k.endswith('__'):
+                    continue
+                elif k not in seen:
+                    seen.add(k); result.append(JsValue('string', k))
             return JsValue('array', result)
         if target.type == 'array':
             return py_to_js([str(i) for i in range(len(target.value))])

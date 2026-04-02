@@ -1001,6 +1001,11 @@ class Interpreter:
 
     def _get_js_iterator(self, value):
         """Returns a Python callable () -> JsValue({value, done}) or None."""
+        result = self._get_js_iterator_with_obj(value)
+        return result[0] if result is not None else None
+
+    def _get_js_iterator_with_obj(self, value):
+        """Returns (next_callable, iterator_obj) or None. iterator_obj may be None for built-in iterables."""
         if value.type == 'array':
             items = list(value.value)
             idx = [0]
@@ -1009,7 +1014,7 @@ class Interpreter:
                     return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
                 v = items[idx[0]]; idx[0] += 1
                 return JsValue('object', {'value': v, 'done': JS_FALSE})
-            return _arr_next
+            return (_arr_next, None)
 
         if value.type == 'string':
             chars = list(value.value)
@@ -1019,7 +1024,7 @@ class Interpreter:
                     return JsValue('object', {'value': UNDEFINED, 'done': JS_TRUE})
                 v = JsValue('string', chars[idx[0]]); idx[0] += 1
                 return JsValue('object', {'value': v, 'done': JS_FALSE})
-            return _str_next
+            return (_str_next, None)
 
         if value.type in ('object', 'function', 'intrinsic', 'class'):
             sym_key = f"@@{SYMBOL_ITERATOR}@@"
@@ -1032,14 +1037,14 @@ class Interpreter:
                 if self._is_callable(next_fn):
                     def _obj_next(nf=next_fn, it=iterator):
                         return self._call_js(nf, [], it)
-                    return _obj_next
+                    return (_obj_next, iterator)
 
             # Already an iterator (has .next method but no [Symbol.iterator])
             next_fn = value.value.get('next') if isinstance(value.value, dict) else None
             if next_fn and self._is_callable(next_fn):
                 def _iter_next(nf=next_fn, it=value):
                     return self._call_js(nf, [], it)
-                return _iter_next
+                return (_iter_next, value)
 
         return None
 
@@ -3281,8 +3286,12 @@ class Interpreter:
             parent_class = None
         methods = node["body"]
         proto = JsValue("object", {})
-        if isinstance(parent_class, JsValue):
-            parent_proto = parent_class.value.get("prototype")
+        if isinstance(parent_class, JsValue) and parent_class.type == 'null':
+            # class C extends null — inherits from nothing; constructor must call Object.create(null)-style
+            parent_proto = None
+            proto.value["__proto__"] = JS_NULL  # sentinel: null prototype chain
+        elif isinstance(parent_class, JsValue):
+            parent_proto = parent_class.value.get("prototype") if isinstance(parent_class.value, dict) else None
             if isinstance(parent_proto, JsValue) and parent_proto.type == "object":
                 proto.value["__proto__"] = parent_proto
         else:
@@ -3742,11 +3751,23 @@ class Interpreter:
                         if e.label is None or (_lbl and e.label == _lbl): continue
                         raise
             return None
-        iterator = self._get_js_iterator(right)
+        # Get the iterator object (for calling .return() on early exit)
+        iterator_obj = None
+        iterator = self._get_js_iterator_with_obj(right)
         if iterator is not None:
+            next_fn, iterator_obj = iterator
+            def _call_iterator_return():
+                """Call iterator.return() if it has one (IteratorClose spec operation)."""
+                if iterator_obj is not None:
+                    ret_fn = self._get_prop(iterator_obj, 'return') if isinstance(iterator_obj, JsValue) else None
+                    if ret_fn and self._is_callable(ret_fn):
+                        try:
+                            self._call_js(ret_fn, [UNDEFINED], iterator_obj)
+                        except Exception:
+                            pass
             while True:
                 self._check_step_limit()
-                result = iterator()
+                result = next_fn()
                 done = self._get_prop(result, 'done')
                 if self._truthy(done):
                     break
@@ -3759,14 +3780,22 @@ class Interpreter:
                 try:
                     r = self._exec(node["body"], loop_env)
                     if r is not None:
+                        _call_iterator_return()
                         return r
                 except _JSBreak as e:
                     _lbl = node.get('__label__')
-                    if e.label is None or (_lbl and e.label == _lbl): break
+                    if e.label is None or (_lbl and e.label == _lbl):
+                        _call_iterator_return()
+                        break
+                    _call_iterator_return()
                     raise
                 except _JSContinue as e:
                     _lbl = node.get('__label__')
                     if e.label is None or (_lbl and e.label == _lbl): continue
+                    _call_iterator_return()
+                    raise
+                except _JSError:
+                    _call_iterator_return()
                     raise
         else:
             items = self._array_like_items(right)

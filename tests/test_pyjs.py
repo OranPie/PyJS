@@ -4690,5 +4690,46 @@ console.log(keys.join(","));
         self.assertEqual(result, 'a,c')
 
 
+    def test_reflect_own_keys_with_accessors(self):
+        source = '''
+const obj = {};
+Object.defineProperty(obj, "x", { get() { return 1; }, enumerable: true });
+obj.y = 2;
+const keys = Reflect.ownKeys(obj).filter(k => typeof k === "string");
+console.log(keys.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, 'x,y')
+
+    def test_class_extends_null_throws(self):
+        source = '''
+class C extends null {}
+try { new C(); } catch(e) { console.log(e.constructor.name); }
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, 'TypeError')
+
+    def test_for_of_break_calls_generator_finally(self):
+        source = '''
+function* gen() {
+  try {
+    yield 1; yield 2; yield 3;
+  } finally {
+    console.log("finally");
+  }
+}
+for (const x of gen()) {
+  console.log(x);
+  if (x === 1) break;
+}
+console.log("done");
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '1')
+        self.assertEqual(lines[1], 'finally')
+        self.assertEqual(lines[2], 'done')
+
+
 if __name__ == '__main__':
     unittest.main()
