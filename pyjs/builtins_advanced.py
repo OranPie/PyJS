@@ -119,6 +119,7 @@ def register_advanced_builtins(interp, g, intr):
 
     sym_ctor.value['for']    = intr(_sym_for, 'Symbol.for')
     sym_ctor.value['keyFor'] = intr(_sym_key_for, 'Symbol.keyFor')
+    sym_ctor.value['prototype'] = interp._symbol_proto
     g.declare('Symbol', sym_ctor, 'var')
 
     # -- Proxy (real implementation) --
@@ -194,8 +195,12 @@ def register_advanced_builtins(interp, g, intr):
         ws.value['__kind__'] = py_to_js('WeakSet')
         return ws
 
-    g.declare('WeakMap', interp._make_intrinsic(lambda this_val, args, interp: _make_weakmap(), 'WeakMap'), 'var')
-    g.declare('WeakSet', interp._make_intrinsic(lambda this_val, args, interp: _make_weakset(), 'WeakSet'), 'var')
+    weakmap_ctor = interp._make_intrinsic(lambda this_val, args, interp: _make_weakmap(), 'WeakMap')
+    weakset_ctor = interp._make_intrinsic(lambda this_val, args, interp: _make_weakset(), 'WeakSet')
+    weakmap_ctor.value['prototype'] = interp._weakmap_proto
+    weakset_ctor.value['prototype'] = interp._weakset_proto
+    g.declare('WeakMap', weakmap_ctor, 'var')
+    g.declare('WeakSet', weakset_ctor, 'var')
 
     # -- WeakRef --
     def _make_weakref(args, interp):
@@ -678,8 +683,11 @@ def register_advanced_builtins(interp, g, intr):
                 interp._call_js(map_set_fn, [key, JsValue('array', [item])], result)
         return result
     map_ctor.value['groupBy'] = intr(_map_group_by, 'Map.groupBy')
+    map_ctor.value['prototype'] = interp._map_proto
+    set_ctor = interp._make_intrinsic(lambda this_val, args, interp: _make_set(args[0] if args else None), 'Set')
+    set_ctor.value['prototype'] = interp._set_proto
     g.declare('Map', map_ctor, 'var')
-    g.declare('Set', interp._make_intrinsic(lambda this_val, args, interp: _make_set(args[0] if args else None), 'Set'), 'var')
+    g.declare('Set', set_ctor, 'var')
 
     def _promise_ctor(this_val, args, interp):
         executor = args[0] if args else UNDEFINED
@@ -766,6 +774,7 @@ def register_advanced_builtins(interp, g, intr):
             return interp._rejected_promise(js_err)
 
     promise_ctor.value['try'] = intr(_promise_try, 'Promise.try')
+    promise_ctor.value['prototype'] = interp._promise_proto
     g.declare('Promise', promise_ctor, 'var')
 
     pyvm_obj = JsValue('object', {})

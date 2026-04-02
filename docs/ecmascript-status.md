@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **296 tests passing** | ~14 000 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–36 added 234 tests)*
+*Updated: 2026-04-03 | **301 tests passing** | ~14 200 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–37 added 239 tests)*
 
 ---
 
@@ -35,7 +35,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 | Version | Estimate | Key gaps |
 |---|---|---|
-| **ES2015** | ~99 % | Full Proxy/Reflect ✓; WeakMap/WeakSet ✓; private fields ✓; `super()` in constructors ✓; `super.getter`/`super.setter` ✓ *(Phase 31–32)*; `super` in obj literals ✓; computed class fields `[expr]` ✓; string comparison operators ✓ *(Phase 32)*; `instanceof` for all built-ins ✓ *(Phase 32–33)*; **`typeof Array/Object` → `"function"`** ✓ *(Phase 33)*; **`new Array(n)`/`new Object()`** ✓ *(Phase 33)*; **function name inference** ✓ *(Phase 33)*; **`switch` fall-through** fixed ✓ *(Phase 33)*; **`class D extends mixin(B)`** (call in extends) ✓ *(Phase 34)*; **`ReferenceError` for undeclared vars** ✓ *(Phase 34)*; **arrow function destructuring params** `([a,b]) =>` / `({x}) =>` ✓ *(Phase 36)*; remaining: `with` (deprecated), tail-call opt |
+| **ES2015** | ~99 % | Full Proxy/Reflect ✓; WeakMap/WeakSet ✓; private fields ✓; `super()` in constructors ✓; `super.getter`/`super.setter` ✓ *(Phase 31–32)*; `super` in obj literals ✓; computed class fields `[expr]` ✓; string comparison operators ✓ *(Phase 32)*; `instanceof` for all built-ins ✓ *(Phase 32–33)*; **`typeof Array/Object` → `"function"`** ✓ *(Phase 33)*; **`new Array(n)`/`new Object()`** ✓ *(Phase 33)*; **function name inference** ✓ *(Phase 33)*; **`switch` fall-through** fixed ✓ *(Phase 33)*; **`class D extends mixin(B)`** (call in extends) ✓ *(Phase 34)*; **`ReferenceError` for undeclared vars** ✓ *(Phase 34)*; **arrow function destructuring params** `([a,b]) =>` / `({x}) =>` ✓ *(Phase 36)*; **`Array/Map/Set/Object.prototype` extensions** ✓ *(Phase 37)*; remaining: `with` (deprecated), tail-call opt |
 | **ES2016** | ~96 % | Array.includes ✓ (**SameValueZero for NaN** ✓ *Phase 33*), `**` ✓ |
 | **ES2017** | ~90 % | async/await ✓, SharedArrayBuffer/Atomics absent |
 | **ES2018** | ~88 % | for-await-of ✓, regex `s`/`d` flags ✓; **named capture groups `.groups`** in `match`/`exec` ✓ *(Phase 36)*; **`indices.groups`** for `d` flag ✓ *(Phase 36)*; full unicode edge cases |
@@ -188,7 +188,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | Full regex `unicode` (`u`) semantics | ES2015 | Flag translated but some unicode escape edge cases |
 | Async iterator helpers (full spec) | ES2025 | Sync helpers complete; async path partial |
 | Non-configurable built-in props | ES5 | Built-in method properties are all writable/configurable |
-| Proper `[[Prototype]]` chain for primitives | ES5 | Method dispatch via type-switch, not prototype walk |
+| Proper `[[Prototype]]` chain for primitives | ES5 | Inherited built-in methods work; user-extensible via `Type.prototype.X = fn` ✓ *(Phase 37)*; internal dispatch still type-switch for performance |
 | `@decorator` syntax | Stage 3 | `class expressions` not yet decorated via first-class pipeline |
 | `Temporal` API | Stage 3 | Complex date/time proposal; not yet standard |
 | Regex `v` flag (unicodeSets) | ES2024 | `v` flag parsed but unicodeSets intersection/subtraction not implemented |
@@ -225,6 +225,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **33** | Bug fixes + improvements: `Object.create` second-argument (property descriptors) applied; **`Object.defineProperties`** added; `typeof Array`/`typeof Object` → `"function"` (now intrinsic constructors); **`new Array(n)`/`new Object()`** work correctly; **function name inference** from `const fn = () => {}` bindings; **`Array.prototype.includes`** uses SameValueZero (handles NaN); **`switch` fall-through** bug fixed; **`console.log` Node.js-style object formatting** (objects as `{ a: 1 }`, arrays as `[ 1, 2 ]`, Map/Set with contents) | 8 | **277** |
 | **35** | Correctness fixes: **`hasOwnProperty.call(obj,k)`** now uses `this` correctly (not captured receiver); **`propertyIsEnumerable.call`** and **`valueOf.call`** likewise fixed; **`Object.prototype.toString`** upgraded to full dispatch (Symbol/BigInt types); **`Object.keys/values/entries`** respects Proxy `ownKeys` trap; **`JSON.stringify(undefined)`** returns `undefined` (not `"null"`); **`JSON.stringify([1,undefined,3])`** → `[1,null,3]`; **`using` declaration** Symbol.dispose lookup now searches prototype chain; JSON number threshold `1e15` → `1e21` | 4 | **284** |
 | **36** | Regex/string improvements: **named capture groups** `.groups` returned by `String.match` ✓; **`String.replace/replaceAll` passes named groups** object as last arg to function ✓; **`String.prototype.search`** handles RegExp (named groups, flags) ✓; **`indices.groups`** on regex `d`-flag results ✓; **`Number.toString(base)`** supports fractional numbers ✓; **`BigInt.prototype.toString/valueOf/toLocaleString`** ✓; **`Reflect.ownKeys`** returns symbols as proper `symbol` JsValues ✓; **`Object.getOwnPropertySymbols`** likewise ✓; **arrow function destructuring params** `([a,b]) =>` / `({x}) =>` ✓ | 12 | **296** |
+| **37** | Constructor `.prototype` objects + prototype chain: **14 shared prototype objects** created (`_array_proto`, `_object_proto`, `_function_proto`, etc.); `Array/Map/Set/String/Number/Boolean/RegExp/Symbol/WeakMap/WeakSet/Promise.prototype` all wired up; `Array.prototype === Object.getPrototypeOf([])` ✓; user can extend `Array.prototype.sum = fn` and use on all arrays ✓; `Map.prototype.toObject = fn` ✓; `Set.prototype.toArray = fn` ✓; `Object.create(null)` null-proto correctly reported by `getPrototypeOf` ✓; `Object.prototype.toString` on `_object_proto` (non-enumerable) ✓; `Function.prototype.toString` takes priority over chain ✓; `Symbol.toStringTag` getter walked via prototype chain by `Object.prototype.toString` ✓ | 5 | **301** |
 
 ---
 
@@ -260,10 +261,12 @@ See **[docs/plugins.md](plugins.md)** for the full plugin authoring guide.
 ## Verdict
 
 > **PyJS is a ~98–99% ES2015–ES2025 interpreter.**
-> All major language features are implemented and tested across 296 tests.
+> All major language features are implemented and tested across 301 tests.
 > Remaining gaps are specialist (SharedArrayBuffer/Atomics, full ICU Intl locale data, tail-call opt)
 > or intentionally omitted (Function constructor, with statement).
 > Decorator syntax (TC39 Stage 3) is implemented for class declarations, methods, and fields.
+> Constructor `.prototype` objects are fully wired up — `Array.prototype`, `Map.prototype`, etc.
+> are extensible just as in real JavaScript.
 > The plugin system enables extending the runtime with domain-specific APIs
 > (storage, networking, filesystem) without modifying the core.
 > For scripting, teaching, and computational tasks it is production-ready.

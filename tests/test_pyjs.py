@@ -4092,6 +4092,102 @@ console.log("abc 2024 def".search(re));
         self.assertEqual(lines[1], "-1")
         self.assertEqual(lines[2], "4")
 
+    # ── Phase 37: Constructor .prototype objects & prototype chain ──────────
+
+    def test_array_prototype_extension(self):
+        """User-added methods on Array.prototype are accessible on all arrays."""
+        source = '''
+Array.prototype.sum = function() { return this.reduce((a,b) => a+b, 0); };
+console.log([1,2,3].sum());
+console.log([10,20].sum());
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '6')
+        self.assertEqual(lines[1], '30')
+
+    def test_map_prototype_extension(self):
+        """User-added methods on Map.prototype are accessible on all Map instances."""
+        source = '''
+Map.prototype.toObject = function() {
+  const o = {};
+  this.forEach((v,k) => { o[k] = v; });
+  return o;
+};
+const m = new Map([["x",1],["y",2]]);
+const obj = m.toObject();
+console.log(obj.x);
+console.log(obj.y);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '1')
+        self.assertEqual(lines[1], '2')
+
+    def test_constructor_prototype_identity(self):
+        """Array.prototype === Object.getPrototypeOf([]) and Map.prototype etc."""
+        source = '''
+console.log(Array.prototype === Object.getPrototypeOf([]));
+console.log(typeof Array.prototype);
+console.log(Object.prototype === Object.getPrototypeOf({}));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'object')
+        self.assertEqual(lines[2], 'true')
+
+    def test_object_prototype_tostring_on_types(self):
+        """Object.prototype.toString.call returns correct tags for all types."""
+        source = '''
+const ts = Object.prototype.toString;
+console.log(ts.call(null));
+console.log(ts.call(undefined));
+console.log(ts.call([]));
+console.log(ts.call({}));
+console.log(ts.call(42));
+console.log(ts.call("hi"));
+console.log(ts.call(true));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '[object Null]')
+        self.assertEqual(lines[1], '[object Undefined]')
+        self.assertEqual(lines[2], '[object Array]')
+        self.assertEqual(lines[3], '[object Object]')
+        self.assertEqual(lines[4], '[object Number]')
+        self.assertEqual(lines[5], '[object String]')
+        self.assertEqual(lines[6], '[object Boolean]')
+
+    def test_set_prototype_extension(self):
+        """User-added methods on Set.prototype are accessible on all Set instances."""
+        source = '''
+Set.prototype.toArray = function() {
+  const a = [];
+  this.forEach(v => a.push(v));
+  return a;
+};
+const s = new Set([1,2,3]);
+const a = s.toArray();
+a.sort((x,y)=>x-y);
+console.log(a.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), '1,2,3')
+
+    def test_object_create_null_proto(self):
+        """Object.create(null) produces an object with null prototype."""
+        source = '''
+const n = Object.create(null);
+console.log(Object.getPrototypeOf(n) === null);
+n.x = 1;
+console.log(n.x);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], '1')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -152,7 +152,9 @@ def register_object_builtins(interp, g, intr):
     def _obj_create(args, interp):
         proto = args[0] if args else UNDEFINED
         new_obj = JsValue('object', {})
-        if proto.type not in ('undefined', 'null'):
+        if proto.type == 'null':
+            new_obj.value['__proto__'] = JS_NULL  # explicitly null prototype
+        elif proto.type not in ('undefined',):
             new_obj.value['__proto__'] = proto
         # Handle second argument: property descriptors object
         if len(args) > 1 and args[1].type == 'object' and isinstance(args[1].value, dict):
@@ -271,8 +273,10 @@ def register_object_builtins(interp, g, intr):
             return py_to_js('[object Object]')
         return py_to_js('[object Object]')
 
-    proto_obj = JsValue('object', {})
+    proto_obj = interp._object_proto  # Use the shared object_proto
     proto_obj.value['toString'] = interp._make_intrinsic(_obj_proto_to_string, 'Object.prototype.toString')
+    # Mark toString as non-enumerable (spec requirement)
+    interp._set_desc(proto_obj, 'toString', {'enumerable': False, 'configurable': True, 'writable': True})
     obj_ctor.value['prototype'] = proto_obj
 
     def _obj_get_own_prop_desc(args, interp):
@@ -856,7 +860,19 @@ def register_object_builtins(interp, g, intr):
     # Declare String / Number / Boolean constructors
     g.declare('String',  string_ctor, 'var')
     g.declare('Number',  number_ctor, 'var')
-    g.declare('Boolean', intr(lambda a,i: JS_TRUE if a and i._truthy(a[0]) else JS_FALSE, 'Boolean'), 'var')
+    bool_ctor = intr(lambda a,i: JS_TRUE if a and i._truthy(a[0]) else JS_FALSE, 'Boolean')
+    g.declare('Boolean', bool_ctor, 'var')
+
+    # Wire up constructor.prototype properties using interpreter's shared proto objects
+    arr_ctor.value['prototype']       = interp._array_proto
+    # obj_ctor.value['prototype'] already set earlier to interp._object_proto (proto_obj)
+    number_ctor.value['prototype']    = interp._number_proto
+    string_ctor.value['prototype']    = interp._string_proto
+    bool_ctor.value['prototype']      = interp._boolean_proto
+    _regexp_ctor_fn.value['prototype'] = interp._regexp_proto
+    # Mark Array.prototype as an array (spec requirement)
+    interp._array_proto.value['__is_array_proto__'] = JS_TRUE
+
     _log.info("registered object builtins")
 
 

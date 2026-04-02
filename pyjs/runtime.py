@@ -90,6 +90,37 @@ class Interpreter:
         self._console_indent: int = 0
         self._call_depth: int = 0
         self._exec_steps: int = 0
+        # Built-in prototype objects - must be initialized before _global_env()
+        self._array_proto   = JsValue('object', {})
+        self._object_proto  = JsValue('object', {})
+        self._function_proto = JsValue('object', {})
+        self._string_proto  = JsValue('object', {})
+        self._number_proto  = JsValue('object', {})
+        self._boolean_proto = JsValue('object', {})
+        self._regexp_proto  = JsValue('object', {})
+        self._map_proto     = JsValue('object', {})
+        self._set_proto     = JsValue('object', {})
+        self._weakmap_proto = JsValue('object', {})
+        self._weakset_proto = JsValue('object', {})
+        self._promise_proto = JsValue('object', {})
+        self._bigint_proto  = JsValue('object', {})
+        self._symbol_proto  = JsValue('object', {})
+        # Set up prototype chains
+        self._array_proto.value['__proto__']    = self._object_proto
+        self._function_proto.value['__proto__']  = self._object_proto
+        self._string_proto.value['__proto__']   = self._object_proto
+        self._number_proto.value['__proto__']   = self._object_proto
+        self._boolean_proto.value['__proto__']  = self._object_proto
+        self._regexp_proto.value['__proto__']   = self._object_proto
+        self._map_proto.value['__proto__']      = self._object_proto
+        self._set_proto.value['__proto__']      = self._object_proto
+        self._weakmap_proto.value['__proto__']  = self._object_proto
+        self._weakset_proto.value['__proto__']  = self._object_proto
+        self._promise_proto.value['__proto__']  = self._object_proto
+        self._bigint_proto.value['__proto__']   = self._object_proto
+        self._symbol_proto.value['__proto__']   = self._object_proto
+        # Object.prototype itself has null prototype (terminates the chain)
+        self._object_proto.value['__proto__']   = JS_NULL
         self.genv = self._global_env()
         self.env  = self.genv
         self._module_exports: dict = {}
@@ -1043,10 +1074,28 @@ class Interpreter:
         if obj.type in ('object', 'function', 'intrinsic', 'class'):
             proto = obj.value.get('__proto__')
             if isinstance(proto, JsValue):
-                if proto.type == 'object':
+                if proto.type in ('object', 'function', 'intrinsic', 'class'):
                     return proto
                 if proto.type == 'null':
                     return JS_NULL  # explicit null prototype
+            # Fall through to built-in protos for known kinds
+            kind = obj.value.get('__kind__')
+            if isinstance(kind, JsValue) and kind.type == 'string':
+                kv = kind.value
+                if kv == 'Map': return self._map_proto
+                if kv == 'Set': return self._set_proto
+                if kv == 'WeakMap': return self._weakmap_proto
+                if kv == 'WeakSet': return self._weakset_proto
+                if kv == 'RegExp': return self._regexp_proto
+            if obj.type == 'function': return self._function_proto
+            return self._object_proto
+        if obj.type == 'array': return self._array_proto
+        if obj.type == 'string': return self._string_proto
+        if obj.type == 'number': return self._number_proto
+        if obj.type == 'boolean': return self._boolean_proto
+        if obj.type == 'bigint': return self._bigint_proto
+        if obj.type == 'symbol': return self._symbol_proto
+        if obj.type == 'promise': return self._promise_proto
         return None
 
     def _make_super_proxy(self, proto, this_val, ctor=None):
@@ -1203,6 +1252,17 @@ class Interpreter:
             pass
         if obj.extras and key in obj.extras:
             return obj.extras[key]
+        # Check Array.prototype for user-added methods
+        proto_val = self._array_proto.value.get(key)
+        if proto_val is not None:
+            if isinstance(proto_val, JsValue) and proto_val.type in ('function', 'intrinsic'):
+                # Bind method to this array
+                proto_val_ref = proto_val
+                return self._make_intrinsic(
+                    lambda tv, a, i, fn=proto_val_ref: i._call_js(fn, a, tv),
+                    key
+                )
+            return proto_val
         plugin_key = ('array', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
@@ -1236,6 +1296,14 @@ class Interpreter:
                 return JsValue("string", obj.value[idx])
         except ValueError:
             pass
+        # Check String.prototype for user-added methods
+        proto_val = self._string_proto.value.get(key)
+        if proto_val is not None:
+            if isinstance(proto_val, JsValue) and proto_val.type in ('function', 'intrinsic'):
+                proto_val_ref = proto_val
+                return self._make_intrinsic(
+                    lambda tv, a, i, fn=proto_val_ref: i._call_js(fn, a, tv), key)
+            return proto_val
         plugin_key = ('string', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
@@ -1288,6 +1356,37 @@ class Interpreter:
             return JsValue('number', float(count))
         if obj.type == 'intrinsic' and key == 'length':
             return JsValue('number', 0.0)
+        if obj.type in ('function', 'intrinsic') and key == 'toString':
+            def _fn_tostring(tv, a, i, _fn=obj):
+                if _fn.type == 'function' and isinstance(_fn.value, dict):
+                    node = _fn.value.get('node')
+                    fn_name = _fn.value.get('name', '')
+                    if node:
+                        params = node.get('params', [])
+                        param_names = []
+                        for p in params:
+                            if isinstance(p, dict):
+                                pt = p.get('type', '')
+                                if pt == 'Identifier':
+                                    param_names.append(p.get('name', ''))
+                                elif pt == 'RestElement':
+                                    inner = p.get('argument', {})
+                                    param_names.append('...' + inner.get('name', ''))
+                                elif pt == 'AssignmentPattern':
+                                    left = p.get('left', {})
+                                    param_names.append(left.get('name', ''))
+                                else:
+                                    param_names.append(str(p))
+                            else:
+                                param_names.append(str(p))
+                        params_str = ', '.join(param_names)
+                        is_async = node.get('async', False)
+                        is_gen = node.get('generator', False)
+                        prefix = ('async ' if is_async else '') + 'function' + ('*' if is_gen else '')
+                        return JsValue('string', f'{prefix} {fn_name}({params_str}) {{ [source] }}')
+                n = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
+                return JsValue('string', f'function {n}() {{ [native code] }}')
+            return self._make_intrinsic(_fn_tostring, 'Function.toString')
         current = obj
         while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
             getter_key = f"__get__{key}"
@@ -1331,10 +1430,10 @@ class Interpreter:
         if key == 'toString' and obj.type == 'object':
             def _obj_to_string(tv, a, interp):
                 tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
-                if isinstance(getattr(tv, 'value', None), dict):
-                    tag = tv.value.get(tag_key, None)
-                    if isinstance(tag, JsValue) and tag.type == 'string':
-                        return JsValue('string', f'[object {tag.value}]')
+                # Use _get_prop to walk prototype chain and invoke getters
+                tag = interp._get_prop(tv, tag_key) if isinstance(tv, JsValue) and tv.type not in ('null','undefined') else UNDEFINED
+                if isinstance(tag, JsValue) and tag.type == 'string':
+                    return JsValue('string', f'[object {tag.value}]')
                 if tv is JS_NULL or (isinstance(tv, JsValue) and tv.type == 'null'):
                     return JsValue('string', '[object Null]')
                 if tv is UNDEFINED or (isinstance(tv, JsValue) and tv.type == 'undefined'):
@@ -1367,37 +1466,6 @@ class Interpreter:
                     return i._call_js(_bfn, _bargs + list(a), _bthis)
                 return i._make_intrinsic(_bound, 'bound function') if False else interp._make_intrinsic(_bound, 'bound function')
             return self._make_intrinsic(_fn_bind, 'Function.bind')
-        if obj.type in ('function', 'intrinsic') and key == 'toString':
-            def _fn_tostring(tv, a, i, _fn=obj):
-                if _fn.type == 'function' and isinstance(_fn.value, dict):
-                    node = _fn.value.get('node')
-                    fn_name = _fn.value.get('name', '')
-                    if node:
-                        params = node.get('params', [])
-                        param_names = []
-                        for p in params:
-                            if isinstance(p, dict):
-                                pt = p.get('type', '')
-                                if pt == 'Identifier':
-                                    param_names.append(p.get('name', ''))
-                                elif pt == 'RestElement':
-                                    inner = p.get('argument', {})
-                                    param_names.append('...' + inner.get('name', ''))
-                                elif pt == 'AssignmentPattern':
-                                    left = p.get('left', {})
-                                    param_names.append(left.get('name', ''))
-                                else:
-                                    param_names.append(str(p))
-                            else:
-                                param_names.append(str(p))
-                        params_str = ', '.join(param_names)
-                        is_async = node.get('async', False)
-                        is_gen = node.get('generator', False)
-                        prefix = ('async ' if is_async else '') + 'function' + ('*' if is_gen else '')
-                        return JsValue('string', f'{prefix} {fn_name}({params_str}) {{ [source] }}')
-                n = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
-                return JsValue('string', f'function {n}() {{ [native code] }}')
-            return self._make_intrinsic(_fn_tostring, 'Function.toString')
         plugin_key = ('object', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
@@ -1407,6 +1475,14 @@ class Interpreter:
     def _get_prop_number(self, obj, key):
         if key in self.NUMBER_METHODS:
             return self._num_method(obj, key)
+        # Check Number.prototype for user-added methods
+        proto_val = self._number_proto.value.get(key)
+        if proto_val is not None:
+            if isinstance(proto_val, JsValue) and proto_val.type in ('function', 'intrinsic'):
+                proto_val_ref = proto_val
+                return self._make_intrinsic(
+                    lambda tv, a, i, fn=proto_val_ref: i._call_js(fn, a, tv), key)
+            return proto_val
         plugin_key = ('number', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
