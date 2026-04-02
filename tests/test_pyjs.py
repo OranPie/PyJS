@@ -4658,5 +4658,37 @@ console.log(range(5).reduce((a, b) => a + b));
         self.assertEqual(lines[5], '15')
 
 
+    def test_accessor_property_object_keys_entries_values(self):
+        source = '''
+const obj = {};
+Object.defineProperty(obj, "x", { get() { return 42; }, enumerable: true, configurable: true });
+Object.defineProperty(obj, "hidden", { get() { return 99; }, enumerable: false });
+obj.visible = "yes";
+console.log(Object.keys(obj).join(","));
+console.log(Object.getOwnPropertyNames(obj).sort().join(","));
+console.log(Object.entries(obj).map(([k,v]) => `${k}:${v}`).join(","));
+console.log(Object.values(obj).join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'x,visible')
+        self.assertEqual(lines[1], 'hidden,visible,x')
+        self.assertEqual(lines[2], 'x:42,visible:yes')
+        self.assertEqual(lines[3], '42,yes')
+
+    def test_accessor_property_for_in(self):
+        source = '''
+const obj = {};
+Object.defineProperty(obj, "a", { get() { return 1; }, enumerable: true });
+Object.defineProperty(obj, "b", { get() { return 2; }, enumerable: false });
+obj.c = 3;
+const keys = [];
+for (const k in obj) keys.push(k);
+console.log(keys.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, 'a,c')
+
+
 if __name__ == '__main__':
     unittest.main()

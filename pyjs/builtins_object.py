@@ -41,7 +41,27 @@ def register_object_builtins(interp, g, intr):
     obj_ctor.value['name'] = 'Object'
 
     def _public_keys(d, obj=None):
-        keys = [k for k in d.keys() if not k.startswith('__') and not (k.startswith('@@') and k.endswith('@@'))]
+        all_keys = []
+        seen = set()
+        for k in d.keys():
+            if k.startswith('@@') and k.endswith('@@'):
+                continue
+            if k.startswith('__get__'):
+                bare = k[len('__get__'):]
+                if bare not in seen:
+                    seen.add(bare)
+                    all_keys.append(bare)
+            elif k.startswith('__set__'):
+                bare = k[len('__set__'):]
+                if bare not in seen and bare not in d:
+                    seen.add(bare)
+                    all_keys.append(bare)
+            elif k.startswith('__') and k.endswith('__'):
+                continue  # internal slots like __proto__, __class_name__, etc.
+            elif k not in seen:
+                seen.add(k)
+                all_keys.append(k)
+        keys = all_keys
         if obj is not None:
             keys = [k for k in keys if interp._is_enumerable(obj, k)]
         # Spec: integer indices first in ascending numeric order, then string keys in insertion order
@@ -87,7 +107,7 @@ def register_object_builtins(interp, g, intr):
             obj = proxy.target
         if obj.type != 'object' or not isinstance(obj.value, dict):
             return py_to_js([])
-        return py_to_js([obj.value[k] for k in _public_keys(obj.value, obj)])
+        return py_to_js([interp._get_prop(obj, k) for k in _public_keys(obj.value, obj)])
 
     def _obj_entries_impl(_, args, interp):
         if not args: return py_to_js([])
@@ -102,7 +122,7 @@ def register_object_builtins(interp, g, intr):
             obj = proxy.target
         if obj.type != 'object' or not isinstance(obj.value, dict):
             return py_to_js([])
-        return py_to_js([[k, obj.value[k]] for k in _public_keys(obj.value, obj)])
+        return py_to_js([[k, interp._get_prop(obj, k)] for k in _public_keys(obj.value, obj)])
 
     obj_ctor.value['keys']   = interp._make_intrinsic(_obj_keys_impl, 'Object.keys')
     obj_ctor.value['values'] = interp._make_intrinsic(_obj_values_impl, 'Object.values')
@@ -222,10 +242,32 @@ def register_object_builtins(interp, g, intr):
                     _obj_define_property([obj, JsValue('string', prop_key), prop_desc], interp)
         return obj
     obj_ctor.value['defineProperties'] = intr(_obj_define_properties, 'defineProperties')
-    obj_ctor.value['getOwnPropertyNames'] = intr(
-        lambda a, i: py_to_js([k for k in (a[0].value.keys() if a and a[0].type == 'object' else []) if not k.startswith('__')]),
-        'getOwnPropertyNames',
-    )
+    def _obj_get_own_prop_names(args, interp):
+        if not args or args[0].type not in ('object', 'function', 'intrinsic', 'class'):
+            return py_to_js([])
+        d = args[0].value
+        seen = set()
+        result = []
+        for k in d.keys():
+            if k.startswith('@@') and k.endswith('@@'):
+                continue
+            if k.startswith('__get__'):
+                bare = k[len('__get__'):]
+                if bare not in seen:
+                    seen.add(bare)
+                    result.append(bare)
+            elif k.startswith('__set__'):
+                bare = k[len('__set__'):]
+                if bare not in seen and bare not in d:
+                    seen.add(bare)
+                    result.append(bare)
+            elif k.startswith('__') and k.endswith('__'):
+                continue
+            elif k not in seen:
+                seen.add(k)
+                result.append(k)
+        return py_to_js(result)
+    obj_ctor.value['getOwnPropertyNames'] = intr(_obj_get_own_prop_names, 'getOwnPropertyNames')
 
     def _obj_is(args, interp):
         a = args[0] if args else UNDEFINED

@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-03 | **328 tests passing** | ~14 500 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–43 added 266 tests)*
+*Updated: 2026-04-04 | **330 tests passing** | ~14 800 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–44 added 268 tests)*
 
 ---
 
@@ -231,6 +231,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **40** | ES2022 + correctness fixes: **`#name in obj` private field brand check** — new `PrivateIdentifier`/`private_in` AST node type; parser recognizes `PRIVATE_NAME IN` in relational expressions; runtime checks `#name` directly in `target.value` ✓; **`"push" in arr`** now returns `true` — `in` operator checks `ARRAY_METHODS` frozenset for array targets ✓; **`"split" in str`** likewise returns `true` via `STRING_METHODS` check ✓ | 3 | **318** |
 | **41** | `Object.prototype.toString` completeness: **Promise** → `[object Promise]` ✓; **RegExp** → `[object RegExp]` ✓; **Function/intrinsic/class** → `[object Function]` ✓; **Symbol/BigInt/Number/String/Boolean** via type dispatch ✓; **TypedArrays** use `__name__` (plain Python str) → `[object Uint8Array]`, `[object Float32Array]`, etc. ✓; **ArrayBuffer** detected via `__type__ == 'ArrayBuffer'` ✓ | 2 | **320** |
 | **43** | Correctness fixes: **lazy iterator helpers** — `filter`, `map`, `take`, `drop`, `flatMap`, `forEach`, `some`, `every`, `find`, `reduce` are now fully lazy (stream-based, not eager list consumption); `filter().take()` on infinite generators terminates correctly ✓; **Array subclass extra properties** (`this.x = v` in subclass constructor) stored in `extras` dict not Python list ✓; **Array subclass `instanceof` chain** — `_get_proto` for array-typed values checks `extras.__proto__` first so prototype walks reach subclass prototype ✓ | 3 | **328** |
+| **44** | Accessor-property enumeration fixes: **`Object.keys`/`Object.values`/`Object.entries`** now correctly include properties defined only via `get:`/`set:` in `Object.defineProperty` (previously invisible because `__get__x` keys were filtered by `__` prefix guard) ✓; **`Object.getOwnPropertyNames`** returns accessor-only keys (both enumerable and non-enumerable) ✓; **`for-in`** enumerates accessor properties with `enumerable:true` and walks proto chain correctly ✓; **`Object.values`/`Object.entries`** use `_get_prop()` to invoke getters instead of raw dict lookup ✓ | 2 | **330** |
 
 ---
 
@@ -266,7 +267,7 @@ See **[docs/plugins.md](plugins.md)** for the full plugin authoring guide.
 ## Verdict
 
 > **PyJS is a ~98–99% ES2015–ES2025 interpreter.**
-> All major language features are implemented and tested across 328 tests.
+> All major language features are implemented and tested across 330 tests.
 > Remaining gaps are specialist (SharedArrayBuffer/Atomics, full ICU Intl locale data, tail-call opt)
 > or intentionally omitted (Function constructor, with statement).
 > Decorator syntax (TC39 Stage 3) is implemented for class declarations, methods, and fields.

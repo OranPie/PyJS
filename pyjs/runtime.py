@@ -3630,23 +3630,49 @@ class Interpreter:
         if right.type == "object":
             cur = right
             while isinstance(cur, JsValue) and cur.type == 'object':
-                # Collect own enumerable keys for this level
+                # Collect own enumerable keys for this level (including accessor properties)
                 level_int_keys = []
                 level_str_keys = []
                 for k in cur.value.keys():
-                    if k in seen or k.startswith('__') or k.startswith('@@'):
+                    if k.startswith('@@') and k.endswith('@@'):
                         continue
-                    seen.add(k)
-                    if not self._is_enumerable(cur, k):
-                        continue
-                    try:
-                        n = int(k)
-                        if n >= 0 and str(n) == k:
-                            level_int_keys.append((n, k))
+                    if k.startswith('__get__'):
+                        bare = k[len('__get__'):]
+                        if bare in seen:
                             continue
-                    except (ValueError, TypeError):
-                        pass
-                    level_str_keys.append(k)
+                        seen.add(bare)
+                        if not self._is_enumerable(cur, bare):
+                            continue
+                        try:
+                            n = int(bare)
+                            if n >= 0 and str(n) == bare:
+                                level_int_keys.append((n, bare)); continue
+                        except (ValueError, TypeError):
+                            pass
+                        level_str_keys.append(bare)
+                    elif k.startswith('__set__'):
+                        bare = k[len('__set__'):]
+                        if bare in seen or bare in cur.value:
+                            continue
+                        seen.add(bare)
+                        if not self._is_enumerable(cur, bare):
+                            continue
+                        level_str_keys.append(bare)
+                    elif k.startswith('__') and k.endswith('__'):
+                        continue
+                    else:
+                        if k in seen:
+                            continue
+                        seen.add(k)
+                        if not self._is_enumerable(cur, k):
+                            continue
+                        try:
+                            n = int(k)
+                            if n >= 0 and str(n) == k:
+                                level_int_keys.append((n, k)); continue
+                        except (ValueError, TypeError):
+                            pass
+                        level_str_keys.append(k)
                 level_int_keys.sort()
                 keys.extend(k for _, k in level_int_keys)
                 keys.extend(level_str_keys)
