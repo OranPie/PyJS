@@ -4071,7 +4071,14 @@ class Interpreter:
 
     # --------------------------------------------------------- function creation / calling
     def _make_fn(self, node, closure_env):
-        return JsValue("function", {"node": node, "env": closure_env, "name": node.get("id") or ""})
+        fn_val = JsValue("function", {"node": node, "env": closure_env, "name": node.get("id") or ""})
+        # Non-arrow, non-generator functions get an auto-created .prototype property
+        # (arrow functions and async arrows don't have .prototype per spec)
+        if not node.get("arrow") and not node.get("generator_"):
+            proto = JsValue("object", {"constructor": fn_val})
+            self._set_desc(proto, "constructor", {'enumerable': False, 'writable': True, 'configurable': True})
+            fn_val.value["prototype"] = proto
+        return fn_val
 
     def _add_iterator_helpers(self, iter_obj):
         """Add ES2025 iterator helper methods to an iterator object in-place."""

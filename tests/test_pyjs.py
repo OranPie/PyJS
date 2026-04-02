@@ -3138,5 +3138,106 @@ console.log(val2);
         self.assertAlmostEqual(float(lines[1]), -0.5, places=1)
 
 
+    # ── Phase 29: ES Gap Fixes ──────────────────────────────────────────────
+
+    def test_for_of_array_destructuring(self):
+        """for-of with array destructuring pattern in head"""
+        source = '''
+const results = [];
+for (const [a, b] of [[1, 2], [3, 4], [5, 6]]) {
+    results.push(a + b);
+}
+console.log(results.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, "3,7,11")
+
+    def test_for_of_object_destructuring(self):
+        """for-of with object destructuring pattern in head"""
+        source = '''
+const out = [];
+for (const {x, y} of [{x:1,y:2},{x:3,y:4}]) {
+    out.push(x * y);
+}
+console.log(out.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, "2,12")
+
+    def test_function_prototype_auto_created(self):
+        """Plain function declarations auto-get a .prototype object"""
+        source = '''
+function Person(name) { this.name = name; }
+Person.prototype.greet = function() { return "hi " + this.name; };
+const p = new Person("Bob");
+console.log(p.greet());
+console.log(Object.getPrototypeOf(p) === Person.prototype);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "hi Bob")
+        self.assertEqual(lines[1], "true")
+
+    def test_for_in_inherited_properties(self):
+        """for-in enumerates inherited properties from .prototype"""
+        source = '''
+function Base() { this.own = 1; }
+Base.prototype.inherited = 2;
+const keys = [];
+for (const k in new Base()) keys.push(k);
+console.log(keys.sort().join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, "inherited,own")
+
+    def test_iterator_from_helpers_chain(self):
+        """Iterator.from() returns an iterator with .map().filter().toArray()"""
+        source = '''
+const arr = Iterator.from([1,2,3,4,5])
+    .filter(x => x % 2 === 0)
+    .map(x => x * 10)
+    .toArray();
+console.log(arr.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, "20,40")
+
+    def test_symbol_tostringtag_class_getter(self):
+        """get [Symbol.toStringTag]() in a class is honoured by Object.prototype.toString"""
+        source = '''
+class MyList {
+    get [Symbol.toStringTag]() { return "MyList"; }
+}
+console.log(Object.prototype.toString.call(new MyList()));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, "[object MyList]")
+
+    def test_date_instanceof(self):
+        """new Date() instanceof Date is true"""
+        source = '''
+const d = new Date();
+console.log(d instanceof Date);
+console.log(42 instanceof Date);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "false")
+
+    def test_structuredclone_date_instanceof(self):
+        """structuredClone(date) instanceof Date is true"""
+        source = '''
+const d = new Date(2024, 0, 1);
+const cloned = structuredClone(d);
+console.log(cloned instanceof Date);
+console.log(typeof cloned.getFullYear);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "function")
+
+
 if __name__ == '__main__':
     unittest.main()

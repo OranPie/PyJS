@@ -1068,9 +1068,10 @@ def register_advanced_builtins(interp, g, intr):
         src = args[0] if args else UNDEFINED
         if src.type == 'undefined':
             raise _JSError(interp._make_js_error('TypeError', 'Iterator.from: argument must be iterable'))
-        # If already an iterator with .next, wrap it
+        # If already an iterator with .next, wrap it and add helpers
         next_fn = interp._get_prop(src, 'next')
         if next_fn.type != 'undefined':
+            interp._add_iterator_helpers(src)
             return src
         # Try Symbol.iterator protocol
         iter_sym_key = f'@@{SYMBOL_ITERATOR}@@'
@@ -1085,9 +1086,11 @@ def register_advanced_builtins(interp, g, intr):
                 _idx[0] += 1
                 return JsValue('object', {'done': JS_FALSE, 'value': val})
             it = JsValue('object', {'next': interp._make_intrinsic(_next, 'IteratorFrom.next')})
+            interp._add_iterator_helpers(it)
             return it
         if sym_fn and isinstance(sym_fn, JsValue):
             it = interp._call_js(sym_fn, [], src)
+            interp._add_iterator_helpers(it)
             return it
         raise _JSError(interp._make_js_error('TypeError', 'Iterator.from: argument is not iterable'))
     iterator_ctor.value['from'] = intr(_iterator_from, 'Iterator.from')

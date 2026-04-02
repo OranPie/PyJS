@@ -189,11 +189,12 @@ def register_object_builtins(interp, g, intr):
         if target.type == 'array': return py_to_js('[object Array]')
         if target.type == 'function': return py_to_js('[object Function]')
         if target.type in ('object', 'intrinsic', 'class'):
+            # Check Symbol.toStringTag via full property access (walks proto chain + getters)
+            tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
+            tag = interp._get_prop(target, tag_key)
+            if tag and isinstance(tag, JsValue) and tag.type == 'string':
+                return py_to_js(f'[object {tag.value}]')
             if isinstance(target.value, dict):
-                tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
-                tag = target.value.get(tag_key)
-                if tag and isinstance(tag, JsValue) and tag.type == 'string':
-                    return py_to_js(f'[object {tag.value}]')
                 kind = target.value.get('__kind__')
                 if isinstance(kind, JsValue) and kind.type == 'string':
                     return py_to_js(f'[object {kind.value}]')
@@ -713,6 +714,16 @@ def register_object_builtins(interp, g, intr):
         except (ValueError, OverflowError):
             return JsValue('number', float('nan'))
     date_ctor.value['UTC'] = interp._make_intrinsic(_date_utc, 'Date.UTC')
+    # Symbol.hasInstance: instanceof Date checks __kind__ == 'Date'
+    _date_hi_key = f"@@{SYMBOL_HAS_INSTANCE}@@"
+    def _date_has_instance(this_val, args, interp):
+        val = args[0] if args else UNDEFINED
+        if val.type == 'object' and isinstance(val.value, dict):
+            kind = val.value.get('__kind__')
+            if isinstance(kind, JsValue) and kind.value == 'Date':
+                return JS_TRUE
+        return JS_FALSE
+    date_ctor.value[_date_hi_key] = interp._make_intrinsic(_date_has_instance, 'Date[Symbol.hasInstance]')
     g.declare('Date', date_ctor, 'var')
 
     # Declare String / Number / Boolean constructors

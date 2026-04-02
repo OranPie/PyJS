@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-02 | **238 tests passing** | ~13 100 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–28 added 176 tests)*
+*Updated: 2026-04-02 | **246 tests passing** | ~13 100 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–29 added 184 tests)*
 
 ---
 
@@ -73,7 +73,8 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 ### Classes
 - Inheritance (`extends`, `super()`), `super.method()`
-- **`super()` in class constructors** (full chain: A→B→C) *(Phase 28)*
+- **for-of / for-in with destructuring** in the loop head (`for (const [a,b] of arr)`, `for (const {x} of arr)`) *(Phase 29)*
+- **`Function.prototype` auto-created** for all non-arrow non-generator functions; `for-in` now enumerates inherited properties via prototype chain *(Phase 29)*
 - Class/constructor prototype methods are **non-enumerable** per spec *(Phase 28)*
 - Instance fields, public static fields, static initializer blocks (class name in scope during init ✓)
 - **Private fields `#x` and private methods `#m()`** *(Phase 10)*
@@ -101,7 +102,8 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 - **`Symbol.dispose` / `Symbol.asyncDispose`** *(Phase 22)*
 - `Symbol.for` / `Symbol.keyFor`
 - ES2025 iterator helpers on all iterables: `map`, `filter`, `take`, `drop`, `flatMap`, `reduce`, `forEach`, `some`, `every`, `find`, `toArray`
-- **`Iterator.from(iterable)`** *(Phase 23)*
+- **`Iterator.from(iterable)`** helpers fully attached *(Phase 23 + fixed Phase 29)*
+- **`get [Symbol.toStringTag]()` class getter** honoured by `Object.prototype.toString` *(Phase 29)*
 - `Map` / `Set` `.keys()` / `.values()` / `.entries()` return live iterators with helpers
 
 ### Property Descriptors *(Phase 11 — new)*
@@ -212,6 +214,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **perf** | Performance: `_any_enabled` trace gate; inlined `Environment._find`; mutable list bindings; `_collect_var_names` AST caching; `_exec_block_statement` scope-skip; `_eval_binary_expression` number fast path | 0 | **223** |
 | **27** | ES2024/ES2025 built-ins: `Float16Array` + `Math.f16round`; `ArrayBuffer` `resizable`/`maxByteLength`/`resize`/`transfer`/`transferToFixedLength`/`detached`; `Uint8Array.toBase64`/`fromBase64`/`toHex`/`fromHex`; import attributes (`with { type: 'json' }`) | 8 | **231** |
 | **28** | Bug fixes: `super()` in class constructors (all chains); class/constructor methods non-enumerable per spec; `Symbol.hasInstance` in `instanceof`; template literal escape sequences (`\n`, `\t`, `\\`, etc.) + `String.raw` raw text; `DataView.getFloat16`/`setFloat16` | 7 | **238** |
+| **29** | ES gap fixes: `for-of`/`for-in` with destructuring patterns in loop head; `Function.prototype` auto-created for all plain functions; `Iterator.from()` helpers properly attached; `get [Symbol.toStringTag]()` class getter honoured by `Object.prototype.toString`; `Date instanceof Date` + `structuredClone(date) instanceof Date` | 8 | **246** |
 
 ---
 

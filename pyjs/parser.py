@@ -331,14 +331,25 @@ class Parser:
         if self._check('VAR','LET','CONST'):
             sv = self.pos
             kind = self._advance().value
-            name = self._expect('IDENTIFIER').value
-            if self._check('IN','OF'):
-                tp = self._advance().type
-                right = self._expr(); self._expect('RPAREN')
-                left = N.VarDecl(kind, [N.VarDeclarator(name)])
-                body = self._stmt()
-                return N.ForInStmt(left, right, body) if tp=='IN' else N.ForOfStmt(left, right, body, is_await)
-            self.pos = sv                         # backtrack
+            # Allow destructuring patterns: [a,b] or {x,y} or plain IDENTIFIER
+            if self._check('LBRACKET', 'LBRACE'):
+                pattern = self._binding_target()
+                if self._check('IN', 'OF'):
+                    tp = self._advance().type
+                    right = self._expr(); self._expect('RPAREN')
+                    left = N.VarDecl(kind, [N.VarDeclarator(pattern)])
+                    body = self._stmt()
+                    return N.ForInStmt(left, right, body) if tp == 'IN' else N.ForOfStmt(left, right, body, is_await)
+                self.pos = sv                     # backtrack — not for-in/of
+            else:
+                name = self._expect('IDENTIFIER').value
+                if self._check('IN','OF'):
+                    tp = self._advance().type
+                    right = self._expr(); self._expect('RPAREN')
+                    left = N.VarDecl(kind, [N.VarDeclarator(name)])
+                    body = self._stmt()
+                    return N.ForInStmt(left, right, body) if tp=='IN' else N.ForOfStmt(left, right, body, is_await)
+                self.pos = sv                         # backtrack
         # -- regular for --
         init = None
         if self._check('VAR','LET','CONST'):
@@ -536,7 +547,7 @@ class Parser:
             kind = 'method'
             if self._check('IDENTIFIER') and self._cur().value in ('get', 'set'):
                 next_tok = self._peek()
-                if next_tok.type in IDENTIFIER_NAME_TOKENS or next_tok.type in ('STRING', 'NUMBER', 'PRIVATE_NAME'):
+                if next_tok.type in IDENTIFIER_NAME_TOKENS or next_tok.type in ('STRING', 'NUMBER', 'PRIVATE_NAME', 'LBRACKET'):
                     kind = self._advance().value
             generator = self._optional('STAR') is not None
             computed = False
@@ -606,7 +617,7 @@ class Parser:
             kind = 'method'
             if self._check('IDENTIFIER') and self._cur().value in ('get', 'set'):
                 next_tok = self._peek()
-                if next_tok.type in IDENTIFIER_NAME_TOKENS or next_tok.type in ('STRING', 'NUMBER', 'PRIVATE_NAME'):
+                if next_tok.type in IDENTIFIER_NAME_TOKENS or next_tok.type in ('STRING', 'NUMBER', 'PRIVATE_NAME', 'LBRACKET'):
                     kind = self._advance().value
             generator = self._optional('STAR') is not None
             # get key
