@@ -99,6 +99,8 @@ class Interpreter:
         self._plugins: list[PyJSPlugin] = []
         self._plugin_contexts: list[PluginContext] = []
         self._plugin_methods: dict = {}
+        # Symbol id → JsValue('symbol', ...) registry for Reflect.ownKeys / getOwnPropertySymbols
+        self._symbol_id_map: dict = {}
         # JS call stack frames for error.stack traces: list of {'name': str, 'file': str, 'line': int}
         self._js_call_stack: list = []
         # Last error from run() — set on JS throw or internal Python error
@@ -222,7 +224,21 @@ class Interpreter:
                         indices_arr.append(UNDEFINED)
                     else:
                         indices_arr.append(JsValue('array', [py_to_js(float(start + s)), py_to_js(float(start + e))]))
-                result.extras['indices'] = JsValue('array', indices_arr)
+                indices_val = JsValue('array', indices_arr)
+                # Add indices.groups for named capture groups
+                if groups_dict:
+                    if indices_val.extras is None: indices_val.extras = {}
+                    name_to_idx = {n: i for i, n in enumerate(match.groupdict().keys(), 1)}
+                    indices_val.extras['groups'] = JsValue('object', {
+                        k: (lambda s2, e2: JsValue('array', [py_to_js(float(start + s2)), py_to_js(float(start + e2))]))(
+                            match.span(k)[0], match.span(k)[1]
+                        ) if match.group(k) is not None else UNDEFINED
+                        for k in groups_dict.keys()
+                    })
+                else:
+                    if indices_val.extras is None: indices_val.extras = {}
+                    indices_val.extras['groups'] = UNDEFINED
+                result.extras['indices'] = indices_val
             return result
 
         regexp = JsValue('object', {})
@@ -881,6 +897,7 @@ class Interpreter:
     def _to_key(self, value):
         if isinstance(value, JsValue):
             if value.type == 'symbol':
+                self._symbol_id_map[value.value['id']] = value
                 return f"@@{value.value['id']}@@"
             if value.type == 'number':
                 if value.value == int(value.value):
@@ -890,6 +907,29 @@ class Interpreter:
                 return value.value
             return self._to_str(value)
         return str(value)
+
+    def _sym_key_to_jsval(self, key: str):
+        """Convert an @@N@@ internal symbol key back to a JsValue('symbol', ...) if known."""
+        if key.startswith('@@') and key.endswith('@@') and len(key) > 4:
+            try:
+                sym_id = int(key[2:-2])
+                if sym_id in self._symbol_id_map:
+                    return self._symbol_id_map[sym_id]
+                # Well-known symbols
+                _well_known = {
+                    1: 'Symbol.iterator', 2: 'Symbol.toPrimitive', 3: 'Symbol.hasInstance',
+                    4: 'Symbol.toStringTag', 5: 'Symbol.asyncIterator', 6: 'Symbol.species',
+                    7: 'Symbol.match', 8: 'Symbol.replace', 9: 'Symbol.split',
+                    10: 'Symbol.search', 11: 'Symbol.isConcatSpreadable',
+                    12: 'Symbol.dispose', 13: 'Symbol.asyncDispose',
+                }
+                desc = _well_known.get(sym_id, f'Symbol({sym_id})')
+                sym = JsValue('symbol', {'id': sym_id, 'desc': desc})
+                self._symbol_id_map[sym_id] = sym
+                return sym
+            except (ValueError, TypeError):
+                pass
+        return None
 
     def _array_like_items(self, value: JsValue):
         if value.type == 'array':
@@ -1381,6 +1421,29 @@ class Interpreter:
             return JsValue('string', obj.value.get('desc', ''))
         return UNDEFINED
 
+    def _get_prop_bigint(self, obj, key):
+        n = obj.value
+        if key == 'toString':
+            def _bigint_tostring(tv, args, interp):
+                base = int(args[0].value) if args and args[0].type == 'number' else 10
+                if base < 2 or base > 36:
+                    raise _JSError(interp._make_js_error('RangeError', 'toString() radix must be between 2 and 36'))
+                val = tv.value if tv.type == 'bigint' else n
+                if base == 10: return JsValue('string', str(val))
+                digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+                sign = '-' if val < 0 else ''
+                v = abs(val)
+                if v == 0: return JsValue('string', '0')
+                parts = []
+                while v: parts.append(digits[v % base]); v //= base
+                return JsValue('string', sign + ''.join(reversed(parts)))
+            return self._make_intrinsic(_bigint_tostring, 'BigInt.toString')
+        if key == 'valueOf':
+            return self._make_intrinsic(lambda tv, a, i: JsValue('bigint', tv.value if tv.type == 'bigint' else n), 'BigInt.valueOf')
+        if key == 'toLocaleString':
+            return self._make_intrinsic(lambda tv, a, i: JsValue('string', str(tv.value if tv.type == 'bigint' else n)), 'BigInt.toLocaleString')
+        return UNDEFINED
+
     _GET_PROP_DISPATCH = None  # initialized in _init_dispatch_tables
 
     def _init_prop_dispatch(self):
@@ -1394,6 +1457,7 @@ class Interpreter:
             'class': self._get_prop_object_like,
             'number': self._get_prop_number,
             'symbol': self._get_prop_symbol,
+            'bigint': self._get_prop_bigint,
         }
 
     def _get_prop(self, obj: JsValue, prop):
@@ -1927,12 +1991,15 @@ class Interpreter:
                     if 'u' in flg_str or 'v' in flg_str: py_flg |= re.UNICODE
                     count = 0 if 'g' in flg_str else 1
                     if interp._is_callable(repl_arg):
-                        def _fn_repl(m):
+                        def _fn_repl(m, _rf=repl_arg):
                             call_args = [JsValue('string', m.group(0))]
                             call_args.extend(JsValue('string', g) if g is not None else UNDEFINED for g in m.groups())
                             call_args.append(JsValue('number', float(m.start())))
                             call_args.append(JsValue('string', s))
-                            return interp._to_str(interp._call_js(repl_arg, call_args, None))
+                            gd = m.groupdict()
+                            if gd:
+                                call_args.append(JsValue('object', {k: JsValue('string', v) if v is not None else UNDEFINED for k, v in gd.items()}))
+                            return interp._to_str(interp._call_js(_rf, call_args, None))
                         return JsValue('string', re.sub(py_src, _fn_repl, s, count=count, flags=py_flg))
                     else:
                         repl_str = interp._to_str(repl_arg) if isinstance(repl_arg, JsValue) and repl_arg.type != 'undefined' else ''
@@ -1995,6 +2062,9 @@ class Interpreter:
                             call_args.extend(JsValue('string', g) if g is not None else UNDEFINED for g in m.groups())
                             call_args.append(JsValue('number', float(m.start())))
                             call_args.append(JsValue('string', s))
+                            gd = m.groupdict()
+                            if gd:
+                                call_args.append(JsValue('object', {k: JsValue('string', v) if v is not None else UNDEFINED for k, v in gd.items()}))
                             return interp._to_str(interp._call_js(rf, call_args, None))
                         return JsValue('string', re.sub(py_src, _fn_repl_re_all, s, flags=py_flg))
                     repl_str = interp._to_str(repl_arg) if isinstance(repl_arg, JsValue) and repl_arg.type != 'undefined' else ''
@@ -2090,9 +2160,17 @@ class Interpreter:
                         m = re.search(py_src, s, py_flg)
                         if not m:
                             return JS_NULL
-                        result = [m.group(0)]
-                        result.extend(g if g is not None else None for g in m.groups())
-                        return py_to_js(result)
+                        result_arr = [JsValue('string', m.group(0))]
+                        result_arr.extend(JsValue('string', g) if g is not None else UNDEFINED for g in m.groups())
+                        arr_val = JsValue('array', result_arr)
+                        if arr_val.extras is None: arr_val.extras = {}
+                        groups_dict = m.groupdict()
+                        arr_val.extras['groups'] = JsValue('object', {
+                            k: JsValue('string', v) if v is not None else UNDEFINED
+                            for k, v in groups_dict.items()
+                        }) if groups_dict else UNDEFINED
+                        arr_val.extras['index'] = JsValue('number', float(m.start()))
+                        return arr_val
                 pat = _pattern_text(pat_arg) if pat_arg.type != 'undefined' else ''
                 m = re.search(pat, s)
                 if m:
@@ -2140,9 +2218,28 @@ class Interpreter:
                     results.append(match_arr)
                 return py_to_js(results)
             if name == 'search':
-                pat = _pattern_text(args[0]) if args else ''
+                pat_arg = args[0] if args else UNDEFINED
+                # Symbol.search delegation
+                sym_search_key = f"@@{SYMBOL_SEARCH}@@"
+                if isinstance(pat_arg.value, dict) and sym_search_key in pat_arg.value:
+                    method = pat_arg.value[sym_search_key]
+                    return interp._call_js(method, [JsValue('string', s)], pat_arg)
+                if (isinstance(pat_arg, JsValue) and pat_arg.type == 'object' and
+                        isinstance(pat_arg.value, dict) and
+                        isinstance(pat_arg.value.get('__kind__'), JsValue) and
+                        pat_arg.value['__kind__'].value == 'RegExp'):
+                    src = interp._to_str(pat_arg.value.get('source', py_to_js('')))
+                    flg_str = interp._to_str(pat_arg.value.get('flags', py_to_js('')))
+                    py_src = _js_regex_to_python(src)
+                    py_flg = 0
+                    if 'i' in flg_str: py_flg |= re.IGNORECASE
+                    if 'm' in flg_str: py_flg |= re.MULTILINE
+                    if 's' in flg_str: py_flg |= re.DOTALL
+                    m = re.search(py_src, s, py_flg)
+                    return JsValue('number', float(m.start()) if m else -1.0)
+                pat = _pattern_text(pat_arg) if pat_arg.type != 'undefined' else ''
                 m = re.search(pat, s)
-                return JsValue("number", m.start() if m else -1)
+                return JsValue("number", float(m.start()) if m else -1.0)
             if name == 'concat':
                 return JsValue("string", s + ''.join(interp._to_str(a) for a in args))
             if name == 'normalize':
@@ -2228,17 +2325,74 @@ class Interpreter:
             if name == 'toPrecision':
                 d = int(args[0].value) if args else None
                 try:
-                    if d is None: return JsValue("string", str(n))
-                    return JsValue("string", f"{n:.{d}g}")
+                    if d is None: return JsValue("string", str(int(n)) if n == int(n) else str(n))
+                    # Implement ES spec toPrecision
+                    import math as _m
+                    if _m.isnan(n): return JsValue('string', 'NaN')
+                    if _m.isinf(n): return JsValue('string', 'Infinity' if n > 0 else '-Infinity')
+                    if n == 0:
+                        if d == 1: return JsValue('string', '0')
+                        return JsValue('string', '0.' + '0' * (d - 1))
+                    sign = '' if n >= 0 else '-'
+                    n_abs = abs(n)
+                    e = _m.floor(_m.log10(n_abs))  # exponent
+                    # Round to d significant digits
+                    rounded = round(n_abs, d - 1 - int(e))
+                    # Check if rounding caused e to increase
+                    if rounded > 0:
+                        new_e = _m.floor(_m.log10(rounded))
+                        if new_e > e: e = new_e
+                    e = int(e)
+                    if e < -6 or e >= d:
+                        # Exponential notation
+                        s = f'{n_abs:.{d - 1}e}'
+                        # Normalize exponent: Python uses e+08, JS uses e+8
+                        import re as _re
+                        s = _re.sub(r'e([+-])0*(\d+)', lambda m: f'e{m.group(1)}{m.group(2)}', s)
+                        return JsValue('string', sign + s)
+                    else:
+                        # Fixed notation with d significant digits
+                        decimal_places = d - 1 - e
+                        if decimal_places < 0: decimal_places = 0
+                        s = f'{n_abs:.{decimal_places}f}'
+                        return JsValue('string', sign + s)
                 except (ValueError, TypeError, OverflowError): return JsValue("string", "NaN")
             if name == 'toString':
                 base = int(args[0].value) if args else 10
+                if base < 2 or base > 36:
+                    raise _JSError(interp._make_js_error('RangeError', 'toString() radix must be between 2 and 36'))
                 if base == 10: return JsValue("string", str(int(n)) if n==int(n) else str(n))
-                _fmts = {2: 'b', 8: 'o', 16: 'x'}
-                _fmt = _fmts.get(base)
-                if _fmt:
-                    return JsValue("string", format(int(n), _fmt))
-                return JsValue("string", format(int(n), f'{base}'))
+                import math as _math
+                def _n_to_base(num, b):
+                    """Convert a non-negative number to base-b string (integer + optional fractional part)."""
+                    int_part = int(num)
+                    frac_part = num - int_part
+                    digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+                    if int_part == 0:
+                        int_str = '0'
+                    else:
+                        parts = []
+                        tmp = int_part
+                        while tmp:
+                            parts.append(digits[tmp % b])
+                            tmp //= b
+                        int_str = ''.join(reversed(parts))
+                    if frac_part == 0:
+                        return int_str
+                    frac_str = ''
+                    seen = {}
+                    pos = 0
+                    while frac_part and pos < 52:
+                        frac_part *= b
+                        digit = int(frac_part)
+                        frac_str += digits[digit]
+                        frac_part -= digit
+                        pos += 1
+                    return int_str + '.' + frac_str
+                if _math.isnan(n): return JsValue("string", "NaN")
+                if _math.isinf(n): return JsValue("string", "Infinity" if n > 0 else "-Infinity")
+                sign = '-' if n < 0 else ''
+                return JsValue("string", sign + _n_to_base(abs(n), base))
             if name == 'toLocaleString':
                 return JsValue("string", str(n))
             if name == 'valueOf':

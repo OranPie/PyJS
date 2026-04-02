@@ -3909,6 +3909,189 @@ console.log(log.join(","));
         result = Interpreter().run(source)
         self.assertEqual(result.strip(), "using,disposed:B,disposed:A")
 
+    # ---------- Phase 36 tests ----------
+
+    def test_arrow_destructuring_array_param(self):
+        """Arrow functions with array destructuring parameter"""
+        source = '''
+const sum = ([a, b]) => a + b;
+console.log(sum([10, 20]));
+const first = ([x]) => x;
+console.log(first([99, 100]));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "30")
+        self.assertEqual(lines[1], "99")
+
+    def test_arrow_destructuring_object_param(self):
+        """Arrow functions with object destructuring parameter"""
+        source = '''
+const area = ({width, height}) => width * height;
+console.log(area({width: 5, height: 3}));
+const greet = ({name, greeting = "Hello"}) => greeting + " " + name;
+console.log(greet({name: "World"}));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "15")
+        self.assertEqual(lines[1], "Hello World")
+
+    def test_toprecision_es_spec(self):
+        """toPrecision follows ES spec algorithm (not Python's g format)"""
+        source = '''
+console.log((0.00005).toPrecision(1));
+console.log((123456789).toPrecision(3));
+console.log((1.23456).toPrecision(4));
+console.log((0).toPrecision(3));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "0.00005")
+        self.assertEqual(lines[1], "1.23e+8")
+        self.assertEqual(lines[2], "1.235")
+        self.assertEqual(lines[3], "0.00")
+
+    def test_regex_named_capture_groups_match(self):
+        """String.match returns groups object with named capture groups"""
+        source = '''
+const re = /(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})/;
+const m = "2024-03-15".match(re);
+console.log(m.groups.year);
+console.log(m.groups.month);
+console.log(m.groups.day);
+console.log(m.index);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "2024")
+        self.assertEqual(lines[1], "03")
+        self.assertEqual(lines[2], "15")
+        self.assertEqual(lines[3], "0")
+
+    def test_regex_named_capture_groups_exec(self):
+        """RegExp.exec returns groups object with named capture groups"""
+        source = '''
+const re = /(?<year>\d{4})-(?<month>\d{2})/;
+const m = re.exec("2024-03");
+console.log(m.groups.year);
+console.log(m.groups.month);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "2024")
+        self.assertEqual(lines[1], "03")
+
+    def test_regex_d_flag_indices_groups(self):
+        """Regex d flag provides indices.groups for named captures"""
+        source = '''
+const re = /(?<year>\d{4})-(?<month>\d{2})/d;
+const m = re.exec("2024-03");
+console.log(m.indices[0].join(","));
+console.log(m.indices.groups.year.join(","));
+console.log(m.indices.groups.month.join(","));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "0,7")
+        self.assertEqual(lines[1], "0,4")
+        self.assertEqual(lines[2], "5,7")
+
+    def test_replace_function_named_groups(self):
+        """String.replace with function receives named groups as last argument"""
+        source = '''
+const result = "2024-03-15".replace(
+    /(?<y>\\d{4})-(?<m>\\d{2})-(?<d>\\d{2})/,
+    (match, y, m, d, offset, str, groups) => groups.d + "/" + groups.m + "/" + groups.y
+);
+console.log(result);
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result.strip(), "15/03/2024")
+
+    def test_number_tostring_radix_fractional(self):
+        """Number.toString(base) handles fractional numbers"""
+        source = '''
+console.log((10.5).toString(2));
+console.log((255.5).toString(16));
+console.log((255).toString(16));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "1010.1")
+        self.assertEqual(lines[1], "ff.8")
+        self.assertEqual(lines[2], "ff")
+
+    def test_bigint_tostring(self):
+        """BigInt.prototype.toString works with optional radix"""
+        source = '''
+const big = 9007199254740993n;
+console.log(big.toString());
+console.log((255n).toString(16));
+console.log((255n).toString(2));
+console.log((-10n).toString());
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "9007199254740993")
+        self.assertEqual(lines[1], "ff")
+        self.assertEqual(lines[2], "11111111")
+        self.assertEqual(lines[3], "-10")
+
+    def test_reflect_own_keys_symbols(self):
+        """Reflect.ownKeys returns symbols as proper symbol values"""
+        source = '''
+const sym = Symbol("test");
+const obj = {a: 1};
+obj[sym] = 42;
+const keys = Reflect.ownKeys(obj);
+console.log(keys.length);
+console.log(typeof keys[0]);
+console.log(typeof keys[1]);
+console.log(keys.includes(sym));
+console.log(obj[keys[1]]);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "2")
+        self.assertEqual(lines[1], "string")
+        self.assertEqual(lines[2], "symbol")
+        self.assertEqual(lines[3], "true")
+        self.assertEqual(lines[4], "42")
+
+    def test_object_get_own_property_symbols(self):
+        """Object.getOwnPropertySymbols returns actual symbol values"""
+        source = '''
+const sym = Symbol("x");
+const obj = {a: 1};
+obj[sym] = 99;
+const syms = Object.getOwnPropertySymbols(obj);
+console.log(syms.length);
+console.log(typeof syms[0]);
+console.log(syms[0] === sym);
+console.log(obj[syms[0]]);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "1")
+        self.assertEqual(lines[1], "symbol")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "99")
+
+    def test_string_search_with_regexp(self):
+        """String.prototype.search works with RegExp including named groups"""
+        source = '''
+console.log("Year 2024".search(/\\d{4}/));
+console.log("hello".search(/xyz/));
+const re = /(?<year>\\d{4})/;
+console.log("abc 2024 def".search(re));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "5")
+        self.assertEqual(lines[1], "-1")
+        self.assertEqual(lines[2], "4")
+
 
 if __name__ == '__main__':
     unittest.main()

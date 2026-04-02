@@ -321,8 +321,11 @@ def register_object_builtins(interp, g, intr):
         if not args or args[0].type not in ('object', 'function', 'intrinsic', 'class'):
             return py_to_js([])
         obj = args[0]
-        syms = [JsValue('string', k) for k in obj.value.keys()
-                if k.startswith('@@') and k.endswith('@@') and len(k) > 4]
+        syms = []
+        for k in obj.value.keys():
+            if k.startswith('@@') and k.endswith('@@') and len(k) > 4:
+                sym = interp._sym_key_to_jsval(k)
+                syms.append(sym if sym else JsValue('string', k))
         return JsValue('array', syms)
 
     obj_ctor.value['getOwnPropertySymbols'] = intr(_obj_get_own_prop_symbols, 'Object.getOwnPropertySymbols')

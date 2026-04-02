@@ -75,7 +75,9 @@ def register_advanced_builtins(interp, g, intr):
     # -- Full Symbol implementation --
     def _make_symbol(desc=''):
         _symbol_id_counter[0] += 1
-        return JsValue('symbol', {'id': _symbol_id_counter[0], 'desc': str(desc)})
+        sym = JsValue('symbol', {'id': _symbol_id_counter[0], 'desc': str(desc)})
+        interp._symbol_id_map[_symbol_id_counter[0]] = sym
+        return sym
 
     def _symbol_ctor(args, interp):
         desc = interp._to_str(args[0]) if args and args[0].type != 'undefined' else ''
@@ -290,7 +292,12 @@ def register_advanced_builtins(interp, g, intr):
         if not args: return py_to_js([])
         target = args[0]
         if target.type in ('object', 'function', 'intrinsic', 'class'):
-            return py_to_js([k for k in target.value.keys() if not k.startswith('__')])
+            result = []
+            for k in target.value.keys():
+                if k.startswith('__') and k.endswith('__'): continue
+                sym = interp._sym_key_to_jsval(k)
+                result.append(sym if sym else JsValue('string', k))
+            return JsValue('array', result)
         if target.type == 'array':
             return py_to_js([str(i) for i in range(len(target.value))])
         return py_to_js([])

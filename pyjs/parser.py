@@ -1199,9 +1199,23 @@ class Parser:
                 while True:
                     if self._check('ELLIPSIS'):
                         self._advance()
-                    if not self._check('IDENTIFIER'):
+                    # Accept: identifier, array/object destructuring, assignment pattern
+                    if self._check('LBRACKET') or self._check('LBRACE'):
+                        # Skip the destructuring pattern using a bracket counter
+                        close_map = {'LBRACKET': 'RBRACKET', 'LBRACE': 'RBRACE'}
+                        close_tok = close_map[self._cur().type]
+                        self._advance()   # consume [ or {
+                        depth = 1
+                        while depth > 0:
+                            t = self._cur().type
+                            if t in ('LBRACKET', 'LBRACE'): depth += 1
+                            elif t == close_tok: depth -= 1
+                            elif t == 'EOF': break
+                            self._advance()
+                    elif self._check('IDENTIFIER'):
+                        self._advance()
+                    else:
                         break
-                    self._advance()
                     if self._check('ASSIGN'):
                         self._advance(); self._assign()   # skip default
                     if self._check('RPAREN'):
