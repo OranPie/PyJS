@@ -183,11 +183,20 @@ class Lexer:
         sc, sl = self.col, self.line
         self._nxt()                                    # skip backtick
         buf = []
+        cooked_parts = []
+        raw_parts = []
         while not self._end() and self._ch() != '`':
             if self._ch() == '\\':
-                self._nxt(); buf.append(self._nxt()); continue
-            if self._ch() == '$' and self._peek(1) == '{':
-                self._nxt(); self._nxt()
+                self._nxt()                            # consume backslash
+                c = self._nxt()                        # char after backslash
+                cooked_parts.append(self.ESCAPE_MAP.get(c, c))
+                raw_parts.append('\\' + c)
+            elif self._ch() == '$' and self._peek(1) == '{':
+                # Flush accumulated text as ('text', cooked, raw) tuple
+                buf.append(('text', ''.join(cooked_parts), ''.join(raw_parts)))
+                cooked_parts = []
+                raw_parts = []
+                self._nxt(); self._nxt()               # consume '${'
                 depth, expr_buf = 1, []
                 while not self._end() and depth > 0:
                     c = self._ch()
@@ -198,9 +207,13 @@ class Lexer:
                     expr_buf.append(self._nxt())
                 buf.append(('expr', ''.join(expr_buf)))
             else:
-                buf.append(self._nxt())
+                ch = self._nxt()
+                cooked_parts.append(ch)
+                raw_parts.append(ch)
+        # Flush final text segment
+        buf.append(('text', ''.join(cooked_parts), ''.join(raw_parts)))
         if not self._end():
-            self._nxt()
+            self._nxt()                                # consume closing backtick
         return self._mk('TEMPLATE', buf, sc, sl)
 
     def _read_regex(self, sc, sl):

@@ -900,10 +900,12 @@ class Interpreter:
                     return JS_NULL  # explicit null prototype
         return None
 
-    def _make_super_proxy(self, proto, this_val):
+    def _make_super_proxy(self, proto, this_val, ctor=None):
         proxy = JsValue('object', {})
         proxy.value['__super_target__'] = proto
         proxy.value['__super_this__'] = this_val
+        if ctor is not None:
+            proxy.value['__super_ctor__'] = ctor  # parent class ctor for super() calls
         return proxy
 
     def _bind_pattern(self, pattern, value, env, keyword='var', declare=True):
@@ -2468,7 +2470,7 @@ class Interpreter:
             'Int8': ('b', 1), 'Uint8': ('B', 1),
             'Int16': ('h', 2), 'Uint16': ('H', 2),
             'Int32': ('i', 4), 'Uint32': ('I', 4),
-            'Float32': ('f', 4), 'Float64': ('d', 8),
+            'Float16': ('e', 2), 'Float32': ('f', 4), 'Float64': ('d', 8),
             'BigInt64': ('q', 8), 'BigUint64': ('Q', 8),
         }
 
@@ -2789,6 +2791,8 @@ class Interpreter:
                     proto.value[f"__set__{actual_key}"] = fn_val
                 else:
                     proto.value[actual_key] = fn_val
+                    # Class prototype methods are non-enumerable per spec
+                    self._set_desc(proto, actual_key, {'enumerable': False, 'writable': True, 'configurable': True})
         if not ctor:
             def _default_ctor(this_val, args, interp):
                 if parent_class:
@@ -2799,6 +2803,8 @@ class Interpreter:
         ctor.value["name"] = cname
         ctor.value["prototype"] = proto
         proto.value["constructor"] = ctor
+        # constructor is non-enumerable per spec
+        self._set_desc(proto, "constructor", {'enumerable': False, 'writable': True, 'configurable': True})
         ctor.value["superClass"] = parent_class
         ctor.value.update(static_methods)
         if isinstance(parent_class, JsValue):
@@ -3672,6 +3678,13 @@ class Interpreter:
         if op in ("<",">","<=",">="):
             return JS_TRUE if self._cmp(op, l, r) else JS_FALSE
         if op == "instanceof":
+            # ES spec: check Symbol.hasInstance first
+            if r.type in ("function", "intrinsic", "class") and isinstance(r.value, dict):
+                _hi_key = f"@@{SYMBOL_HAS_INSTANCE}@@"
+                _hi_fn = r.value.get(_hi_key)
+                if isinstance(_hi_fn, JsValue) and _hi_fn.type in ('function', 'intrinsic'):
+                    result = self._call_js(_hi_fn, [l], r)
+                    return JS_TRUE if self._truthy(result) else JS_FALSE
             _error_ctor_names = {'Error','TypeError','RangeError','SyntaxError','ReferenceError','URIError','EvalError','AggregateError'}
             if r.type in ("function","intrinsic","class"):
                 ctor_name = r.value.get("name") if isinstance(r.value, dict) else None
@@ -3831,6 +3844,12 @@ class Interpreter:
                 this_val = obj
         else:
             callee = self._eval(node["callee"], env)
+            # Handle super() constructor call — super proxy with __super_ctor__ stored
+            if callee.type == 'object' and '__super_ctor__' in callee.value:
+                super_ctor = callee.value['__super_ctor__']
+                this_val = callee.value.get('__super_this__', UNDEFINED)
+                self._call_js(super_ctor, args, this_val)
+                return this_val  # super() returns `this` in derived constructors
         if node.get("optional") and self._is_nullish(callee):
             return UNDEFINED
         return self._call_js(callee, args, this_val)
@@ -3881,6 +3900,8 @@ class Interpreter:
             if isinstance(part, tuple) and part[0] == "expr":
                 val = self._eval(Parser(Lexer(part[1]).tokenize()).parse()["body"][0]["expression"], env)
                 parts.append(self._to_str(self._to_primitive(val, 'string')))
+            elif isinstance(part, tuple) and part[0] == "text":
+                parts.append(part[1])  # cooked value
             else:
                 parts.append(str(part))
         return JsValue("string", "".join(parts))
@@ -3889,18 +3910,27 @@ class Interpreter:
         tag_fn = self._eval(node["tag"], env)
         quasis = node["quasi"]["quasis"]
         strs = []
+        raw_strs = []
         vals = []
-        current_str_parts = []
+        current_cooked = []
+        current_raw = []
         for part in quasis:
             if isinstance(part, tuple) and part[0] == "expr":
-                strs.append(JsValue("string", "".join(current_str_parts)))
-                current_str_parts = []
+                strs.append(JsValue("string", "".join(current_cooked)))
+                raw_strs.append(JsValue("string", "".join(current_raw)))
+                current_cooked = []
+                current_raw = []
                 vals.append(self._eval(Parser(Lexer(part[1]).tokenize()).parse()["body"][0]["expression"], env))
+            elif isinstance(part, tuple) and part[0] == "text":
+                current_cooked.append(part[1])   # cooked
+                current_raw.append(part[2])       # raw
             else:
-                current_str_parts.append(str(part))
-        strs.append(JsValue("string", "".join(current_str_parts)))
+                current_cooked.append(str(part))
+                current_raw.append(str(part))
+        strs.append(JsValue("string", "".join(current_cooked)))
+        raw_strs.append(JsValue("string", "".join(current_raw)))
         strings_arr = JsValue("array", strs)
-        strings_arr.extras = {"raw": JsValue("array", list(strs))}
+        strings_arr.extras = {"raw": JsValue("array", raw_strs)}
         return self._call_js(tag_fn, [strings_arr] + vals, UNDEFINED)
 
     def _eval_await_expression(self, node, env):
@@ -4438,7 +4468,10 @@ class Interpreter:
                 call_env.declare('__new_target__', fn_val, 'const')
             super_proto = info.get('super_proto')
             if isinstance(super_proto, JsValue):
-                call_env.declare('super', self._make_super_proxy(super_proto, call_env._this), 'const')
+                # Always set super_ctor for derived-class constructors (they have superClass set),
+                # regardless of is_new_call (handles super() chains: C→B→A)
+                super_ctor = info.get('superClass')
+                call_env.declare('super', self._make_super_proxy(super_proto, call_env._this, super_ctor), 'const')
             params = node.get("params", [])
             arg_index = 0
             for p in params:

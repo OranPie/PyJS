@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-02 | **231 tests passing** | ~13 100 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–27 added 169 tests)*
+*Updated: 2026-04-02 | **238 tests passing** | ~13 100 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–28 added 176 tests)*
 
 ---
 
@@ -35,7 +35,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 | Version | Estimate | Key gaps |
 |---|---|---|
-| **ES2015** | ~95 % | Full Proxy/Reflect ✓, WeakMap/WeakSet ✓, private fields ✓, `super` in obj literals ✓; remaining: `with` (deprecated), tail-call opt |
+| **ES2015** | ~96 % | Full Proxy/Reflect ✓, WeakMap/WeakSet ✓, private fields ✓, `super()` in class constructors ✓, `super` in obj literals ✓; remaining: `with` (deprecated), tail-call opt |
 | **ES2016** | ~95 % | Array.includes ✓, `**` ✓ |
 | **ES2017** | ~90 % | async/await ✓, SharedArrayBuffer/Atomics absent |
 | **ES2018** | ~88 % | for-await-of ✓, regex `s`/`d` flags ✓; full `dotAll`/`unicode` edge cases |
@@ -47,7 +47,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **ES2024** | ~95 % | Promise.withResolvers ✓, `using`/`await using` ✓, Set ES2025 ops ✓, Object.groupBy ✓, **ArrayBuffer resize/transfer** ✓ |
 | **ES2025** | ~88 % | Iterator.from ✓, Math.sumPrecise ✓, RegExp.escape ✓, Error.isError ✓, Symbol.dispose ✓, **Float16Array** ✓, **Uint8Array.toBase64/fromBase64/toHex/fromHex** ✓, **import attributes** ✓ |
 
-**Overall: ~96 % of ES2015–ES2025 surface area implemented.**
+**Overall: ~97 % of ES2015–ES2025 surface area implemented.**
 
 ---
 
@@ -59,7 +59,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 - Destructuring — array and object, nested, defaults, rest patterns
 - Spread/rest in arrays, objects, function calls, parameters
 - Arrow functions with correct lexical `this`
-- Template literals (basic + tagged)
+- Template literals (basic + tagged; **escape sequences `\n`/`\t`/`\\` fully processed, `String.raw` raw text correct** *(Phase 28)*)
 - Optional chaining `?.` and nullish coalescing `??`
 - Logical assignment `&&=`, `||=`, `??=`
 - `for…of`, `for…in`, `for…await…of`, labeled `break`/`continue`
@@ -73,6 +73,8 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 ### Classes
 - Inheritance (`extends`, `super()`), `super.method()`
+- **`super()` in class constructors** (full chain: A→B→C) *(Phase 28)*
+- Class/constructor prototype methods are **non-enumerable** per spec *(Phase 28)*
 - Instance fields, public static fields, static initializer blocks (class name in scope during init ✓)
 - **Private fields `#x` and private methods `#m()`** *(Phase 10)*
 - Computed method names `[Symbol.iterator]()`
@@ -95,7 +97,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 ### Iterators & Symbols
 - Full iterator protocol (`Symbol.iterator`, `next()`)
-- All well-known symbols: `toPrimitive`, `toStringTag`, `hasInstance`, `species`, `asyncIterator`
+- All well-known symbols: `toPrimitive`, `toStringTag`, **`hasInstance`** *(checked in `instanceof` — Phase 28)*, `species`, `asyncIterator`
 - **`Symbol.dispose` / `Symbol.asyncDispose`** *(Phase 22)*
 - `Symbol.for` / `Symbol.keyFor`
 - ES2025 iterator helpers on all iterables: `map`, `filter`, `take`, `drop`, `flatMap`, `reduce`, `forEach`, `some`, `every`, `find`, `toArray`
@@ -148,7 +150,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 **Error hierarchy** — Error, TypeError, RangeError, ReferenceError, SyntaxError, URIError, EvalError, AggregateError; message, name, stack, **cause** *(Phase 13)*; **`constructor` property** *(Phase 22)*; **`Error.isError()`** *(Phase 23)*
 
-**TypedArrays** *(Phase 12 — new)*: `ArrayBuffer`, `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, **`Float16Array`** *(Phase 27)*, `Float32Array`, `Float64Array`, `BigInt64Array`, `BigUint64Array` — full methods (set, subarray, slice, fill, map, filter, forEach, sort, find, every, some, indexOf, includes, join, reduce, Symbol.iterator); `DataView` with all get/set methods + endianness; **`ArrayBuffer` resizable (`maxByteLength`/`resize`/`transfer`/`transferToFixedLength`/`detached`)** *(Phase 27)*; **`Uint8Array.toBase64`/`fromBase64`/`toHex`/`fromHex`** *(Phase 27)*
+**TypedArrays** *(Phase 12 — new)*: `ArrayBuffer`, `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, **`Float16Array`** *(Phase 27)*, `Float32Array`, `Float64Array`, `BigInt64Array`, `BigUint64Array` — full methods (set, subarray, slice, fill, map, filter, forEach, sort, find, every, some, indexOf, includes, join, reduce, Symbol.iterator); `DataView` with all get/set methods + endianness, **`getFloat16`/`setFloat16`** *(Phase 28)*; **`ArrayBuffer` resizable (`maxByteLength`/`resize`/`transfer`/`transferToFixedLength`/`detached`)** *(Phase 27)*; **`Uint8Array.toBase64`/`fromBase64`/`toHex`/`fromHex`** *(Phase 27)*
 
 **JSON** — stringify (replacer, space), parse (reviver)
 
@@ -209,6 +211,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **26** | Decorator syntax (TC39 Stage 3): `@decorator` on classes, methods, fields; `@a.b.c`, `@factory(args)` forms; class/method/field decorator semantics | 5 | **223** |
 | **perf** | Performance: `_any_enabled` trace gate; inlined `Environment._find`; mutable list bindings; `_collect_var_names` AST caching; `_exec_block_statement` scope-skip; `_eval_binary_expression` number fast path | 0 | **223** |
 | **27** | ES2024/ES2025 built-ins: `Float16Array` + `Math.f16round`; `ArrayBuffer` `resizable`/`maxByteLength`/`resize`/`transfer`/`transferToFixedLength`/`detached`; `Uint8Array.toBase64`/`fromBase64`/`toHex`/`fromHex`; import attributes (`with { type: 'json' }`) | 8 | **231** |
+| **28** | Bug fixes: `super()` in class constructors (all chains); class/constructor methods non-enumerable per spec; `Symbol.hasInstance` in `instanceof`; template literal escape sequences (`\n`, `\t`, `\\`, etc.) + `String.raw` raw text; `DataView.getFloat16`/`setFloat16` | 7 | **238** |
 
 ---
 

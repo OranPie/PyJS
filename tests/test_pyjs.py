@@ -2998,6 +2998,145 @@ console.log(typeof code);
         self.assertEqual(body[0]['type'], 'ImportDeclaration')
         self.assertEqual(body[0]['source'], './data.json')
 
+    # ── Phase 28: super(), class methods, Symbol.hasInstance, template escapes, DataView Float16 ──
+
+    def test_super_constructor(self):
+        source = '''
+class Animal {
+  constructor(name) { this.name = name; }
+}
+class Dog extends Animal {
+  constructor(name, breed) {
+    super(name);
+    this.breed = breed;
+  }
+  info() { return this.name + ':' + this.breed; }
+}
+const d = new Dog('Rex', 'Lab');
+console.log(d.name);
+console.log(d.breed);
+console.log(d.info());
+console.log(d instanceof Dog);
+console.log(d instanceof Animal);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'Rex')
+        self.assertEqual(lines[1], 'Lab')
+        self.assertEqual(lines[2], 'Rex:Lab')
+        self.assertEqual(lines[3], 'true')
+        self.assertEqual(lines[4], 'true')
+
+    def test_super_constructor_chain(self):
+        source = '''
+class A {
+  constructor(x) { this.x = x; }
+}
+class B extends A {
+  constructor(x, y) { super(x); this.y = y; }
+}
+class C extends B {
+  constructor(x, y, z) { super(x, y); this.z = z; }
+}
+const c = new C(1, 2, 3);
+console.log(c.x);
+console.log(c.y);
+console.log(c.z);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '1')
+        self.assertEqual(lines[1], '2')
+        self.assertEqual(lines[2], '3')
+
+    def test_class_method_non_enumerable(self):
+        source = '''
+class Foo {
+  bar() { return 1; }
+  baz() { return 2; }
+}
+const f = new Foo();
+f.own = 42;
+const keys = [];
+for (const k in f) { keys.push(k); }
+console.log(keys.length);
+console.log(keys[0]);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '1')   # only own property 'own'
+        self.assertEqual(lines[1], 'own')
+
+    def test_symbol_has_instance(self):
+        source = '''
+class EvenNumber {
+  static [Symbol.hasInstance](val) {
+    return typeof val === 'number' && val % 2 === 0;
+  }
+}
+console.log(2 instanceof EvenNumber);
+console.log(3 instanceof EvenNumber);
+console.log(4 instanceof EvenNumber);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], 'true')
+        self.assertEqual(lines[1], 'false')
+        self.assertEqual(lines[2], 'true')
+
+    def test_template_literal_escapes(self):
+        source = r'''
+const nl = `a\nb`;
+const tab = `a\tb`;
+const bs = `a\\b`;
+console.log(nl.length);
+console.log(nl.charCodeAt(1));
+console.log(tab.length);
+console.log(tab.charCodeAt(1));
+console.log(bs.length);
+console.log(bs.charCodeAt(1));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '3')    # 'a' + newline + 'b'
+        self.assertEqual(lines[1], '10')   # charCode of \n is 10
+        self.assertEqual(lines[2], '3')    # 'a' + tab + 'b'
+        self.assertEqual(lines[3], '9')    # charCode of \t is 9
+        self.assertEqual(lines[4], '3')    # 'a' + backslash + 'b'
+        self.assertEqual(lines[5], '92')   # charCode of \ is 92
+
+    def test_string_raw(self):
+        source = r'''
+const r = String.raw`a\nb`;
+console.log(r.length);
+console.log(r[1]);
+const r2 = String.raw`x\ty`;
+console.log(r2.length);
+console.log(r2[1]);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], '4')   # a \ n b — four chars
+        self.assertEqual(lines[1], '\\')  # literal backslash
+        self.assertEqual(lines[2], '4')   # x \ t y
+        self.assertEqual(lines[3], '\\')  # literal backslash
+
+    def test_dataview_float16(self):
+        source = '''
+const buf = new ArrayBuffer(4);
+const dv = new DataView(buf);
+dv.setFloat16(0, 1.5, true);
+const val = dv.getFloat16(0, true);
+console.log(val);
+dv.setFloat16(2, -0.5, false);
+const val2 = dv.getFloat16(2, false);
+console.log(val2);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertAlmostEqual(float(lines[0]), 1.5, places=1)
+        self.assertAlmostEqual(float(lines[1]), -0.5, places=1)
+
 
 if __name__ == '__main__':
     unittest.main()
