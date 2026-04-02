@@ -122,8 +122,9 @@ def register_promise_builtins(interp, g, intr):
     # -- Error constructors --
     _error_names = ('Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError', 'EvalError')
     def _make_error_ctor(err_name):
-        _fn_ref = [None]  # forward reference to the constructor intrinsic
-        def _ctor(args, interp):
+        _fn_ref = [None]
+        _proto_ref = [None]  # forward reference to the prototype
+        def _ctor(this_val, args, interp):
             msg = args[0] if args else UNDEFINED
             opts = args[1] if len(args) > 1 else UNDEFINED
             msg_str = interp._to_str(msg) if msg.type != 'undefined' else ''
@@ -137,18 +138,43 @@ def register_promise_builtins(interp, g, intr):
                 stack_str = f"{err_name}: {msg_str}\n{frame_lines}"
             else:
                 stack_str = f"{err_name}: {msg_str}"
-            obj = JsValue('object', {
-                'message': py_to_js(msg_str),
-                'name': py_to_js(err_name),
-                'stack': py_to_js(stack_str),
-                '__error_type__': py_to_js(err_name),
-                'constructor': _fn_ref[0] or UNDEFINED,
-            })
+            # When called as super(msg) from a derived class, this_val is the derived instance;
+            # set properties on it directly instead of creating a new object.
+            if this_val is not None and this_val.type == 'object' and isinstance(this_val.value, dict):
+                target = this_val
+            else:
+                target = JsValue('object', {})
+            target.value['message'] = py_to_js(msg_str)
+            if 'name' not in target.value:
+                target.value['name'] = py_to_js(err_name)
+            target.value['stack'] = py_to_js(stack_str)
+            target.value['__error_type__'] = py_to_js(err_name)
+            target.value['constructor'] = _fn_ref[0] or UNDEFINED
+            if _proto_ref[0] is not None:
+                target.value.setdefault('__proto__', _proto_ref[0])
             if opts and opts.type == 'object' and 'cause' in opts.value:
-                obj.value['cause'] = opts.value['cause']
-            return obj
-        fn = intr(_ctor, err_name)
-        _fn_ref[0] = fn  # complete the back-reference
+                target.value['cause'] = opts.value['cause']
+            return target
+        fn = interp._make_intrinsic(_ctor, err_name)
+        _fn_ref[0] = fn
+
+        def _error_to_string(this_val, args, interp):
+            if not isinstance(this_val.value, dict):
+                return py_to_js(err_name)
+            name = this_val.value.get('name', py_to_js(err_name))
+            name_str = interp._to_str(name) if isinstance(name, JsValue) else err_name
+            msg = this_val.value.get('message', py_to_js(''))
+            msg_str = interp._to_str(msg) if isinstance(msg, JsValue) else ''
+            if not msg_str:
+                return py_to_js(name_str)
+            return py_to_js(f'{name_str}: {msg_str}')
+
+        error_proto = JsValue('object', {})
+        error_proto.value['toString'] = interp._make_intrinsic(_error_to_string, f'{err_name}.prototype.toString')
+        error_proto.value['name'] = py_to_js(err_name)
+        error_proto.value['message'] = py_to_js('')
+        fn.value['prototype'] = error_proto
+        _proto_ref[0] = error_proto
         return fn
     for _ename in _error_names:
         g.declare(_ename, _make_error_ctor(_ename), 'var')

@@ -1,6 +1,6 @@
 # PyJS — ECMAScript Completeness Report
-*Updated: 2026-04-02 | **246 tests passing** | ~13 100 source lines*
-*(Original baseline: 62 tests / 7 366 lines — Phases 10–29 added 184 tests)*
+*Updated: 2026-04-03 | **254 tests passing** | ~13 200 source lines*
+*(Original baseline: 62 tests / 7 366 lines — Phases 10–30 added 192 tests)*
 
 ---
 
@@ -35,7 +35,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 | Version | Estimate | Key gaps |
 |---|---|---|
-| **ES2015** | ~96 % | Full Proxy/Reflect ✓, WeakMap/WeakSet ✓, private fields ✓, `super()` in class constructors ✓, `super` in obj literals ✓; remaining: `with` (deprecated), tail-call opt |
+| **ES2015** | ~97 % | Full Proxy/Reflect ✓ (setPrototypeOf/isExtensible/preventExtensions fixed Phase 30), WeakMap/WeakSet ✓, private fields ✓, `super()` in class constructors ✓, `super` in obj literals ✓; generator/async methods in object literals ✓; remaining: `with` (deprecated), tail-call opt |
 | **ES2016** | ~95 % | Array.includes ✓, `**` ✓ |
 | **ES2017** | ~90 % | async/await ✓, SharedArrayBuffer/Atomics absent |
 | **ES2018** | ~88 % | for-await-of ✓, regex `s`/`d` flags ✓; full `dotAll`/`unicode` edge cases |
@@ -47,7 +47,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **ES2024** | ~95 % | Promise.withResolvers ✓, `using`/`await using` ✓, Set ES2025 ops ✓, Object.groupBy ✓, **ArrayBuffer resize/transfer** ✓ |
 | **ES2025** | ~88 % | Iterator.from ✓, Math.sumPrecise ✓, RegExp.escape ✓, Error.isError ✓, Symbol.dispose ✓, **Float16Array** ✓, **Uint8Array.toBase64/fromBase64/toHex/fromHex** ✓, **import attributes** ✓ |
 
-**Overall: ~97 % of ES2015–ES2025 surface area implemented.**
+**Overall: ~97–98 % of ES2015–ES2025 surface area implemented.**
 
 ---
 
@@ -82,6 +82,8 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 - Getters/setters (class syntax and `Object.defineProperty`)
 - `new.target`
 - **`super.method()` in object-literal shorthand methods** *(Phase 22)*
+- **Generator methods `*name(){}`, async methods `async name(){}`, async generator methods `async *name(){}` in object literals** *(Phase 30)*
+- **Computed getter/setter `get [expr](){}` in object literals** *(Phase 30)*
 
 ### Functions
 - `fn.bind(thisArg, ...args)` → BoundFunction *(Phase 10)*
@@ -146,11 +148,11 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 
 **Symbol** — constructor, for, keyFor, description, all well-known symbols, **Symbol.dispose / Symbol.asyncDispose** *(Phase 22)*
 
-**Proxy / Reflect** — all 13 standard traps
+**Proxy / Reflect** — all 13 standard traps; **`Reflect.setPrototypeOf`/`isExtensible`/`preventExtensions` fully implemented** *(Phase 30)*
 
-**RegExp** — exec, test, match, replace, split, flags, named capture groups, `s`/`d`/`u` flags *(Phase 14)*; `exec()` result `.indices` when `d` flag set *(Phase 14)*; **`RegExp.escape()`** *(Phase 23)*
+**RegExp** — exec, test, match, replace, split, flags, named capture groups, `s`/`d`/`u` flags *(Phase 14)*; `exec()` result `.indices` when `d` flag set *(Phase 14)*; **`RegExp.escape()`** *(Phase 23)*; **`lastIndex` advanced for global/sticky regexps** *(Phase 30)*
 
-**Error hierarchy** — Error, TypeError, RangeError, ReferenceError, SyntaxError, URIError, EvalError, AggregateError; message, name, stack, **cause** *(Phase 13)*; **`constructor` property** *(Phase 22)*; **`Error.isError()`** *(Phase 23)*
+**Error hierarchy** — Error, TypeError, RangeError, ReferenceError, SyntaxError, URIError, EvalError, AggregateError; message, name, stack, **cause** *(Phase 13)*; **`constructor` property** *(Phase 22)*; **`Error.isError()`** *(Phase 23)*; **`Error.prototype.toString()`** *(Phase 30)*; **`class E extends Error` subclassing** *(Phase 30)*
 
 **TypedArrays** *(Phase 12 — new)*: `ArrayBuffer`, `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, **`Float16Array`** *(Phase 27)*, `Float32Array`, `Float64Array`, `BigInt64Array`, `BigUint64Array` — full methods (set, subarray, slice, fill, map, filter, forEach, sort, find, every, some, indexOf, includes, join, reduce, Symbol.iterator); `DataView` with all get/set methods + endianness, **`getFloat16`/`setFloat16`** *(Phase 28)*; **`ArrayBuffer` resizable (`maxByteLength`/`resize`/`transfer`/`transferToFixedLength`/`detached`)** *(Phase 27)*; **`Uint8Array.toBase64`/`fromBase64`/`toHex`/`fromHex`** *(Phase 27)*
 
@@ -215,6 +217,7 @@ All values are `JsValue(type, value)`; environments are linked via parent chain.
 | **27** | ES2024/ES2025 built-ins: `Float16Array` + `Math.f16round`; `ArrayBuffer` `resizable`/`maxByteLength`/`resize`/`transfer`/`transferToFixedLength`/`detached`; `Uint8Array.toBase64`/`fromBase64`/`toHex`/`fromHex`; import attributes (`with { type: 'json' }`) | 8 | **231** |
 | **28** | Bug fixes: `super()` in class constructors (all chains); class/constructor methods non-enumerable per spec; `Symbol.hasInstance` in `instanceof`; template literal escape sequences (`\n`, `\t`, `\\`, etc.) + `String.raw` raw text; `DataView.getFloat16`/`setFloat16` | 7 | **238** |
 | **29** | ES gap fixes: `for-of`/`for-in` with destructuring patterns in loop head; `Function.prototype` auto-created for all plain functions; `Iterator.from()` helpers properly attached; `get [Symbol.toStringTag]()` class getter honoured by `Object.prototype.toString`; `Date instanceof Date` + `structuredClone(date) instanceof Date` | 8 | **246** |
+| **30** | Bug fixes: `Error.prototype.toString()` (`"Error: msg"` format); `class E extends Error` subclassing (super() sets props on derived instance); `*gen(){}` and `async method(){}` and `async *gen(){}` shorthand methods in object literals; `get [Symbol.x](){}` computed accessor in object literals; RegExp `lastIndex` advanced for global/sticky regexps after `exec()`/`test()`; `Reflect.setPrototypeOf`/`isExtensible`/`preventExtensions` fully implemented | 8 | **254** |
 
 ---
 
@@ -249,8 +252,8 @@ See **[docs/plugins.md](plugins.md)** for the full plugin authoring guide.
 
 ## Verdict
 
-> **PyJS is a ~96% ES2015–ES2025 interpreter.**
-> All major language features are implemented and tested across 231 tests.
+> **PyJS is a ~97–98% ES2015–ES2025 interpreter.**
+> All major language features are implemented and tested across 254 tests.
 > Remaining gaps are specialist (SharedArrayBuffer/Atomics, full ICU Intl locale data, tail-call opt)
 > or intentionally omitted (Function constructor, with statement).
 > Decorator syntax (TC39 Stage 3) is implemented for class declarations, methods, and fields.

@@ -344,9 +344,34 @@ def register_advanced_builtins(interp, g, intr):
     reflect_obj.value['getPrototypeOf']           = intr(
         lambda a, i: i._get_proto(a[0]) if a else UNDEFINED, 'Reflect.getPrototypeOf',
     )
-    reflect_obj.value['setPrototypeOf']           = intr(lambda a, i: JS_TRUE, 'Reflect.setPrototypeOf')
-    reflect_obj.value['isExtensible']             = intr(lambda a, i: JS_TRUE, 'Reflect.isExtensible')
-    reflect_obj.value['preventExtensions']        = intr(lambda a, i: JS_TRUE, 'Reflect.preventExtensions')
+    def _reflect_set_prototype_of(args, interp):
+        obj = args[0] if args else UNDEFINED
+        proto = args[1] if len(args) > 1 else UNDEFINED
+        if not isinstance(getattr(obj, 'value', None), dict):
+            return JS_FALSE
+        if proto.type == 'null':
+            obj.value['__proto__'] = JS_NULL
+        elif proto.type in ('object', 'function', 'class', 'intrinsic'):
+            obj.value['__proto__'] = proto
+        else:
+            return JS_FALSE
+        return JS_TRUE
+
+    def _reflect_is_extensible(args, interp):
+        obj = args[0] if args else UNDEFINED
+        if not isinstance(getattr(obj, 'value', None), dict):
+            return JS_TRUE
+        return JS_FALSE if obj.value.get('__extensible__') is False else JS_TRUE
+
+    def _reflect_prevent_extensions(args, interp):
+        obj = args[0] if args else UNDEFINED
+        if isinstance(getattr(obj, 'value', None), dict):
+            obj.value['__extensible__'] = False
+        return JS_TRUE
+
+    reflect_obj.value['setPrototypeOf']           = intr(_reflect_set_prototype_of,  'Reflect.setPrototypeOf')
+    reflect_obj.value['isExtensible']             = intr(_reflect_is_extensible,     'Reflect.isExtensible')
+    reflect_obj.value['preventExtensions']        = intr(_reflect_prevent_extensions,'Reflect.preventExtensions')
     g.declare('Reflect', reflect_obj, 'var')
 
     # -- BigInt constructor --

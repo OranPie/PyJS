@@ -161,19 +161,44 @@ class Interpreter:
         if 's' in flag_text: py_flags |= re.DOTALL
         if 'u' in flag_text or 'v' in flag_text: py_flags |= re.UNICODE
         py_source = _js_regex_to_python(source)
+        is_global_or_sticky = 'g' in flag_text or 'y' in flag_text
 
         def _make_intr(fn, name):
-            return self._make_intrinsic(lambda tv, args, interp: fn(args, interp), name)
+            return self._make_intrinsic(lambda tv, args, interp: fn(tv, args, interp), name)
 
-        def _regexp_test(args, interp):
+        def _regexp_test(this_re, args, interp):
             text = interp._to_str(args[0]) if args else ''
+            if is_global_or_sticky and isinstance(this_re, JsValue) and this_re.type == 'object':
+                last_idx_val = this_re.value.get('lastIndex', UNDEFINED)
+                start = int(interp._to_num(last_idx_val)) if last_idx_val and last_idx_val.type == 'number' else 0
+                start = max(0, start)
+                m = re.search(py_source, text[start:] if start > 0 else text, py_flags)
+                if m:
+                    this_re.value['lastIndex'] = JsValue('number', float(start + m.end()))
+                    return JS_TRUE
+                else:
+                    this_re.value['lastIndex'] = JsValue('number', 0.0)
+                    return JS_FALSE
             return JS_TRUE if re.search(py_source, text, py_flags) else JS_FALSE
 
-        def _regexp_exec(args, interp):
+        def _regexp_exec(this_re, args, interp):
             text = interp._to_str(args[0]) if args else ''
-            match = re.search(py_source, text, py_flags)
+            if is_global_or_sticky and isinstance(this_re, JsValue) and this_re.type == 'object':
+                last_idx_val = this_re.value.get('lastIndex', UNDEFINED)
+                start = int(interp._to_num(last_idx_val)) if last_idx_val and last_idx_val.type == 'number' else 0
+                start = max(0, start)
+                search_text = text[start:] if start > 0 else text
+                match = re.search(py_source, search_text, py_flags)
+            else:
+                start = 0
+                match = re.search(py_source, text, py_flags)
             if not match:
+                if is_global_or_sticky and isinstance(this_re, JsValue) and this_re.type == 'object':
+                    this_re.value['lastIndex'] = JsValue('number', 0.0)
                 return JS_NULL
+            # Update lastIndex for global/sticky regexp
+            if is_global_or_sticky and isinstance(this_re, JsValue) and this_re.type == 'object':
+                this_re.value['lastIndex'] = JsValue('number', float(start + match.end()))
             values = [JsValue('string', match.group(0))]
             values.extend(JsValue('string', g) if g is not None else UNDEFINED for g in match.groups())
             result = JsValue('array', values)
@@ -188,14 +213,15 @@ class Interpreter:
             if result.extras is None:
                 result.extras = {}
             result.extras['groups'] = groups_obj
+            result.extras['index'] = JsValue('number', float(start + match.start()))
             if 'd' in flag_text:
                 indices_arr = []
                 for i in range(len(match.regs)):
-                    start, end = match.regs[i]
-                    if start == -1:
+                    s, e = match.regs[i]
+                    if s == -1:
                         indices_arr.append(UNDEFINED)
                     else:
-                        indices_arr.append(JsValue('array', [py_to_js(float(start)), py_to_js(float(end))]))
+                        indices_arr.append(JsValue('array', [py_to_js(float(start + s)), py_to_js(float(start + e))]))
                 result.extras['indices'] = JsValue('array', indices_arr)
             return result
 
@@ -206,6 +232,8 @@ class Interpreter:
         regexp.value['global'] = JS_TRUE if 'g' in flag_text else JS_FALSE
         regexp.value['ignoreCase'] = JS_TRUE if 'i' in flag_text else JS_FALSE
         regexp.value['multiline'] = JS_TRUE if 'm' in flag_text else JS_FALSE
+        regexp.value['sticky'] = JS_TRUE if 'y' in flag_text else JS_FALSE
+        regexp.value['lastIndex'] = JsValue('number', 0.0)
         regexp.value['test'] = _make_intr(_regexp_test, 'RegExp.test')
         regexp.value['exec'] = _make_intr(_regexp_exec, 'RegExp.exec')
         return regexp

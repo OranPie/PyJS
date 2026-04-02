@@ -3239,5 +3239,128 @@ console.log(typeof cloned.getFullYear);
         self.assertEqual(lines[1], "function")
 
 
+    # ── Phase 30 ──────────────────────────────────────────────────────────────
+
+    def test_error_proto_tostring(self):
+        """Error.prototype.toString returns 'ErrorType: message'"""
+        source = '''
+console.log(new Error("boom").toString());
+console.log(new TypeError("bad type").toString());
+console.log(new RangeError().toString());
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "Error: boom")
+        self.assertEqual(lines[1], "TypeError: bad type")
+        self.assertEqual(lines[2], "RangeError")
+
+    def test_error_subclass_extends(self):
+        """class E extends Error — message, instanceof, name"""
+        source = '''
+class AppError extends Error {
+    constructor(msg) {
+        super(msg);
+        this.name = "AppError";
+    }
+}
+const e = new AppError("oops");
+console.log(e.message);
+console.log(e.name);
+console.log(e instanceof Error);
+console.log(e instanceof AppError);
+console.log(e.toString());
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "oops")
+        self.assertEqual(lines[1], "AppError")
+        self.assertEqual(lines[2], "true")
+        self.assertEqual(lines[3], "true")
+        self.assertEqual(lines[4], "AppError: oops")
+
+    def test_object_literal_generator_method(self):
+        """*gen(){} shorthand in object literal works"""
+        source = '''
+const obj = {
+    *values() { yield 1; yield 2; yield 3; }
+};
+const arr = [...obj.values()];
+console.log(arr.join(","));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, "1,2,3")
+
+    def test_object_literal_async_method(self):
+        """async method(){} shorthand in object literal works"""
+        source = '''
+const obj = {
+    async double(x) { return x * 2; }
+};
+obj.double(21).then(v => console.log(v));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, "42")
+
+    def test_computed_getter_object_literal(self):
+        """get [Symbol.toStringTag](){} in object literal"""
+        source = '''
+const tag = "myTag";
+const obj = {
+    get [Symbol.toStringTag]() { return tag; }
+};
+console.log(Object.prototype.toString.call(obj));
+'''
+        result = Interpreter().run(source)
+        self.assertEqual(result, "[object myTag]")
+
+    def test_regexp_lastindex_global(self):
+        """Global regexp lastIndex advances after each exec()"""
+        source = '''
+const re = /a/g;
+const s = "banana";
+const m1 = re.exec(s);
+const m2 = re.exec(s);
+const m3 = re.exec(s);
+const m4 = re.exec(s);
+console.log(m1[0]);
+console.log(m2[0]);
+console.log(m3[0]);
+console.log(m4);
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "a")
+        self.assertEqual(lines[1], "a")
+        self.assertEqual(lines[2], "a")
+        self.assertEqual(lines[3], "null")
+
+    def test_reflect_set_prototype_of(self):
+        """Reflect.setPrototypeOf sets the prototype correctly"""
+        source = '''
+const proto = { greet() { return "hello"; } };
+const obj = {};
+const ok = Reflect.setPrototypeOf(obj, proto);
+console.log(ok);
+console.log(obj.greet());
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "hello")
+
+    def test_reflect_extensible(self):
+        """Reflect.isExtensible / preventExtensions work correctly"""
+        source = '''
+const obj = { x: 1 };
+console.log(Reflect.isExtensible(obj));
+Reflect.preventExtensions(obj);
+console.log(Reflect.isExtensible(obj));
+'''
+        result = Interpreter().run(source)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "true")
+        self.assertEqual(lines[1], "false")
+
+
 if __name__ == '__main__':
     unittest.main()

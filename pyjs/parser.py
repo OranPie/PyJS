@@ -1264,6 +1264,20 @@ class Parser:
             if self._check('ELLIPSIS'):
                 self._advance(); props.append({'type':'SpreadElement','argument':self._assign()})
                 self._optional('COMMA'); continue
+            # Generator method shorthand: *name(){} or *[expr](){}
+            if self._check('STAR'):
+                self._advance()
+                if self._check('LBRACKET'):
+                    self._advance(); gen_key = self._expr(); self._expect('RBRACKET'); gen_comp = True
+                elif self._check('STRING'):
+                    gen_key = self._advance().value; gen_comp = False
+                elif self._check('NUMBER'):
+                    gen_key = self._normalize_number_key(self._advance().value); gen_comp = False
+                else:
+                    gen_key = self._consume_identifier_name(); gen_comp = False
+                params, body = self._fn_sig_body()
+                props.append(N.Prop(gen_key, N.FnExpr(gen_key, params, body, False, False, True), gen_comp))
+                self._optional('COMMA'); continue
             # key
             if self._check('LBRACKET'):
                 self._advance(); key = self._expr(); self._expect('RBRACKET'); comp = True
@@ -1276,12 +1290,31 @@ class Parser:
                 key = self._advance().value; comp = False
             elif self._check('NUMBER'):
                 key = self._normalize_number_key(self._advance().value); comp = False
-            elif self._is_identifier_name():
+            elif self._check('ASYNC') or self._is_identifier_name():
                 ident = self._advance()
-                # Check for getter/setter accessor
-                if ident.value in ('get', 'set') and (self._is_identifier_name() or self._check('STRING', 'NUMBER')) and not self._check('LPAREN'):
+                # async method shorthand: async name(){} or async *name(){}
+                if ident.type == 'ASYNC' and not self._check('LPAREN', 'COLON', 'COMMA', 'RBRACE', 'ASSIGN'):
+                    is_gen = self._optional('STAR') is not None
+                    if self._check('LBRACKET'):
+                        self._advance(); am_key = self._expr(); self._expect('RBRACKET'); am_comp = True
+                    elif self._check('STRING'):
+                        am_key = self._advance().value; am_comp = False
+                    elif self._check('NUMBER'):
+                        am_key = self._normalize_number_key(self._advance().value); am_comp = False
+                    else:
+                        am_key = self._consume_identifier_name(); am_comp = False
+                    params, body = self._fn_sig_body()
+                    props.append(N.Prop(am_key, N.FnExpr(am_key, params, body, False, True, is_gen), am_comp))
+                    self._optional('COMMA'); continue
+                # Getter/setter accessor (including computed keys): get [expr](){}
+                if ident.value in ('get', 'set') and (self._is_identifier_name() or self._check('STRING', 'NUMBER', 'LBRACKET')) and not self._check('LPAREN'):
                     accessor_kind = ident.value
-                    if self._check('STRING'): acc_key = self._advance().value
+                    if self._check('LBRACKET'):
+                        self._advance(); acc_key_expr = self._expr(); self._expect('RBRACKET')
+                        params, body = self._fn_sig_body()
+                        props.append({'type': 'Property', 'key': acc_key_expr, 'value': N.FnExpr(None, params, body), 'computed': True, 'kind': accessor_kind})
+                        self._optional('COMMA'); continue
+                    elif self._check('STRING'): acc_key = self._advance().value
                     elif self._check('NUMBER'): acc_key = self._normalize_number_key(self._advance().value)
                     else: acc_key = self._consume_identifier_name()
                     params, body = self._fn_sig_body()
