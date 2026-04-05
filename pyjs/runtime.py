@@ -5269,7 +5269,41 @@ class Interpreter:
     def _eval_call_expression(self, node, env):
         callee_node = node["callee"]
         callee_type = callee_node["type"]
-        args = self._eval_arguments(node["arguments"], env)
+        # Inline _eval_arguments for 0/1/2 arg cases to avoid method call overhead
+        _arg_nodes = node["arguments"]
+        try:
+            _nargs_node = node['__nargs__']
+        except KeyError:
+            _nargs_node = len(_arg_nodes)
+            node['__nargs__'] = _nargs_node
+        if _nargs_node == 0:
+            args = []
+        elif _nargs_node == 1:
+            _a0 = _arg_nodes[0]
+            if _a0["type"] != "SpreadElement":
+                try:
+                    args = [_a0['__eh__'](_a0, env)]
+                except KeyError:
+                    args = [self._eval(_a0, env)]
+            else:
+                args = self._eval_arguments(_arg_nodes, env)
+        elif _nargs_node == 2:
+            _a0 = _arg_nodes[0]
+            _a1 = _arg_nodes[1]
+            if _a0["type"] != "SpreadElement" and _a1["type"] != "SpreadElement":
+                try:
+                    _v0 = _a0['__eh__'](_a0, env)
+                except KeyError:
+                    _v0 = self._eval(_a0, env)
+                try:
+                    args = [_v0, _a1['__eh__'](_a1, env)]
+                except KeyError:
+                    args = [_v0, self._eval(_a1, env)]
+            else:
+                args = self._eval_arguments(_arg_nodes, env)
+        else:
+            args = self._eval_arguments(_arg_nodes, env)
+        _nargs = _nargs_node  # use cached count (valid when no spread)
         this_val = UNDEFINED
         if callee_type == "MemberExpression":
             # Inline _eval for object when it's an Identifier (most common: arr.push, obj.method)
@@ -5363,7 +5397,7 @@ class Interpreter:
                 self._call_depth -= 1
                 raise _JSError(self._make_js_error('RangeError', 'Maximum call stack size exceeded'))
             try:
-                return self._call_js_impl(callee, args, this_val)
+                return self._call_js_impl(callee, args, this_val, _nargs_hint=_nargs)
             finally:
                 self._call_depth -= 1
         return self._call_js(callee, args, this_val)
@@ -6173,7 +6207,7 @@ class Interpreter:
             finally:
                 self._call_depth -= 1
 
-    def _call_js_impl(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):
+    def _call_js_impl(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False, _nargs_hint=-1):
         _fntype = fn_val.type
         if _fntype == 'proxy':
             proxy = fn_val.value
@@ -6214,7 +6248,7 @@ class Interpreter:
                 call_env._is_arrow = True
                 call_env._is_fn_env = True
                 _bindings = call_env.bindings
-                _nargs = len(args)
+                _nargs = _nargs_hint if _nargs_hint >= 0 else len(args)
                 if _nargs >= _nparam:
                     for _idx, _pname in enumerate(_simple_param_names):
                         _bindings[_pname] = ['var', args[_idx]]
@@ -6260,7 +6294,7 @@ class Interpreter:
                 call_env.declare('super', self._make_super_proxy(super_proto, call_env._this, super_ctor), 'const')
             # Bind parameters — fast path for all-Identifier params
             _bindings = call_env.bindings
-            _nargs = len(args)
+            _nargs = _nargs_hint if _nargs_hint >= 0 else len(args)
             if _simple_param_names is not None:
                 # All params are simple Identifiers — direct binding, no type checks
                 if _nargs >= _nparam:
