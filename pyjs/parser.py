@@ -118,22 +118,22 @@ class Parser:
         raise SyntaxError(f"Line {t.line}:{t.col} — expected {tt}, got {t.type} {t.value!r}  {msg}")
 
     def _optional(self, tt):
-        if self._cur().type == tt:
+        if self._tt == tt:
             return self._advance()
         return None
 
     def _is_nl(self):
         """True if current token starts on a new line vs previous token."""
         if self.pos == 0: return False
-        p, c = self.toks[self.pos-1], self._cur()
+        p, c = self.toks[self.pos-1], self.toks[self.pos]
         return c.line > p.line
 
     def _is_identifier_name(self):
-        return self._cur().type in IDENTIFIER_NAME_TOKENS
+        return self.toks[self.pos].type in IDENTIFIER_NAME_TOKENS
 
     def _consume_identifier_name(self):
-        if not self._is_identifier_name():
-            t = self._cur()
+        if not self._tt in IDENTIFIER_NAME_TOKENS:
+            t = self.toks[self.pos]
             raise SyntaxError(f"Line {t.line}:{t.col} — expected property name, got {t.type} {t.value!r}")
         return self._advance().value
 
@@ -146,19 +146,19 @@ class Parser:
         return str(value)
 
     def _binding_target(self):
-        if self._check('IDENTIFIER'):
+        if self._tt == 'IDENTIFIER':
             tok = self._advance()
             return N.Id(tok.value, tok.line)
-        if self._check('LBRACKET'):
+        if self._tt == 'LBRACKET':
             return self._array_pattern()
-        if self._check('LBRACE'):
+        if self._tt == 'LBRACE':
             return self._object_pattern()
-        t = self._cur()
+        t = self.toks[self.pos]
         raise SyntaxError(f"Line {t.line}:{t.col} — expected binding target, got {t.type} {t.value!r}")
 
     def _binding_element(self):
         target = self._binding_target()
-        if self._check('ASSIGN'):
+        if self._tt == 'ASSIGN':
             self._advance()
             return {'type': 'AssignmentPattern', 'left': target, 'right': self._assign()}
         return target
@@ -166,12 +166,12 @@ class Parser:
     def _array_pattern(self):
         self._expect('LBRACKET')
         elems = []
-        while not self._check('RBRACKET') and not self._check('EOF'):
-            if self._check('COMMA'):
+        while not self._tt == 'RBRACKET' and not self._tt == 'EOF':
+            if self._tt == 'COMMA':
                 elems.append(None)
                 self._advance()
                 continue
-            if self._check('ELLIPSIS'):
+            if self._tt == 'ELLIPSIS':
                 self._advance()
                 elems.append({'type': 'RestElement', 'argument': self._binding_target()})
                 break
@@ -184,35 +184,35 @@ class Parser:
     def _object_pattern(self):
         self._expect('LBRACE')
         props = []
-        while not self._check('RBRACE') and not self._check('EOF'):
-            if self._check('ELLIPSIS'):
+        while not self._tt == 'RBRACE' and not self._tt == 'EOF':
+            if self._tt == 'ELLIPSIS':
                 self._advance()
                 props.append({'type': 'RestElement', 'argument': self._binding_target()})
                 self._optional('COMMA')
                 continue
             key = None
-            if self._check('LBRACKET'):
+            if self._tt == 'LBRACKET':
                 self._advance()
                 key = self._expr()
                 self._expect('RBRACKET')
                 computed = True
-            elif self._check('STRING'):
+            elif self._tt == 'STRING':
                 key = self._advance().value
                 computed = False
-            elif self._check('NUMBER'):
+            elif self._tt == 'NUMBER':
                 key = self._normalize_number_key(self._advance().value)
                 computed = False
-            elif self._is_identifier_name():
+            elif self._tt in IDENTIFIER_NAME_TOKENS:
                 key = self._advance().value
                 computed = False
             else:
                 break
-            if self._check('COLON'):
+            if self._tt == 'COLON':
                 self._advance()
                 value = self._binding_element()
             else:
                 value = N.Id(key)
-                if self._check('ASSIGN'):
+                if self._tt == 'ASSIGN':
                     self._advance()
                     value = {'type': 'AssignmentPattern', 'left': value, 'right': self._assign()}
             props.append({'type': 'Property', 'key': key, 'value': value, 'computed': computed, 'shorthand': not computed and isinstance(key, str) and isinstance(value, dict) and value.get('type') == 'Identifier' and value['name'] == key})
@@ -223,24 +223,24 @@ class Parser:
     # -- top-level ----------------------------------------------------------
     def parse(self) -> dict:
         body = []
-        while not self._check('EOF'):
+        while not self._tt == 'EOF':
             body.append(self._stmt())
         _log.debug("parsed %d top-level statements", len(body)) if _TRACE_ACTIVE[0] else None
         return N.Program(body)
 
     def _semi(self):
         """Semicolon or automatic semicolon insertion."""
-        if self._check('SEMICOLON'):
+        if self._tt == 'SEMICOLON':
             self._advance()
-        elif self._is_nl() or self._check('RBRACE', 'EOF'):
+        elif self._is_nl() or self._tt in ('RBRACE', 'EOF'):
             pass
         else:
-            if not self._check('RPAREN'):
+            if not self._tt == 'RPAREN':
                 pass  # lenient: allow missing semicolons
 
     # -- statements ---------------------------------------------------------
     def _stmt(self):
-        t = self._cur().type
+        t = self.toks[self.pos].type
         if _TRACE_ACTIVE[0]:
             _log.log(TRACE, "node %s", t)
         if t in ('VAR','LET','CONST'):        return self._var_decl()
@@ -259,10 +259,10 @@ class Parser:
         if t == 'FUNCTION':                   return self._fn_decl()
         if t == 'AT':
             decorators = []
-            while self._check('AT'):
+            while self._tt == 'AT':
                 self._advance()
                 decorators.append(self._parse_decorator_expr())
-            if self._check('CLASS'):
+            if self._tt == 'CLASS':
                 return self._class_decl(decorators=decorators)
             raise SyntaxError("Decorators can only be applied to class declarations")
         if t == 'CLASS':                      return self._class_decl()
@@ -277,7 +277,7 @@ class Parser:
             body = self._stmt()
             return {'type': 'LabeledStatement', 'label': label, 'body': body}
         # `using` contextual keyword: `using x = expr` or `await using x = expr`
-        if t == 'IDENTIFIER' and self._cur().value == 'using' and \
+        if t == 'IDENTIFIER' and self.toks[self.pos].value == 'using' and \
                 self._peek().type == 'IDENTIFIER':
             return self._using_decl(is_async=False)
         if t == 'AWAIT' and self._peek().type == 'IDENTIFIER' and \
@@ -291,10 +291,10 @@ class Parser:
         while True:
             name = self._binding_target()
             init = None
-            if self._check('ASSIGN'):
+            if self._tt == 'ASSIGN':
                 self._advance()
                 init = self._assign()
-            decls.append(N.VarDeclarator(name, init, self._cur().line))
+            decls.append(N.VarDeclarator(name, init, self.toks[self.pos].line))
             if not self._optional('COMMA'):
                 break
         self._semi()
@@ -308,10 +308,10 @@ class Parser:
         while True:
             name = self._binding_target()
             init = None
-            if self._check('ASSIGN'):
+            if self._tt == 'ASSIGN':
                 self._advance()
                 init = self._assign()
-            decls.append(N.VarDeclarator(name, init, self._cur().line))
+            decls.append(N.VarDeclarator(name, init, self.toks[self.pos].line))
             if not self._optional('COMMA'):
                 break
         self._semi()
@@ -322,7 +322,7 @@ class Parser:
         self._expect('LPAREN'); test = self._expr(); self._expect('RPAREN')
         cons = self._stmt()
         alt = None
-        if self._check('ELSE'):
+        if self._tt == 'ELSE':
             self._advance(); alt = self._stmt()
         return N.IfStmt(test, cons, alt)
 
@@ -341,18 +341,18 @@ class Parser:
     def _for(self):
         self._advance()
         is_await = False
-        if self._check('AWAIT'):
+        if self._tt == 'AWAIT':
             self._advance()
             is_await = True
         self._expect('LPAREN')
         # -- for ( … in … ) / for ( … of … ) --
-        if self._check('VAR','LET','CONST'):
+        if self._tt in ('VAR', 'LET', 'CONST'):
             sv = self.pos
             kind = self._advance().value
             # Allow destructuring patterns: [a,b] or {x,y} or plain IDENTIFIER
-            if self._check('LBRACKET', 'LBRACE'):
+            if self._tt in ('LBRACKET', 'LBRACE'):
                 pattern = self._binding_target()
-                if self._check('IN', 'OF'):
+                if self._tt in ('IN', 'OF'):
                     tp = self._advance().type
                     right = self._expr(); self._expect('RPAREN')
                     left = N.VarDecl(kind, [N.VarDeclarator(pattern)])
@@ -361,7 +361,7 @@ class Parser:
                 self.pos = sv; self._tt = self.toks[sv].type                     # backtrack — not for-in/of
             else:
                 name = self._expect('IDENTIFIER').value
-                if self._check('IN','OF'):
+                if self._tt in ('IN','OF'):
                     tp = self._advance().type
                     right = self._expr(); self._expect('RPAREN')
                     left = N.VarDecl(kind, [N.VarDeclarator(name)])
@@ -370,13 +370,13 @@ class Parser:
                 self.pos = sv; self._tt = self.toks[sv].type                         # backtrack
         # -- regular for --
         init = None
-        if self._check('VAR','LET','CONST'):
+        if self._tt in ('VAR', 'LET', 'CONST'):
             init = self._var_decl()
-        elif not self._check('SEMICOLON'):
+        elif not self._tt == 'SEMICOLON':
             sv = self.pos
             try:
                 init = self._simple_assignment_target()
-                if self._check('IN','OF'):
+                if self._tt in ('IN','OF'):
                     tp = self._advance().type
                     right = self._expr(); self._expect('RPAREN')
                     body = self._stmt()
@@ -385,7 +385,7 @@ class Parser:
             except Exception:
                 self.pos = sv; self._tt = self.toks[sv].type
             init = self._assign()
-            if self._check('IN','OF'):
+            if self._tt in ('IN','OF'):
                 tp = self._advance().type
                 right = self._expr(); self._expect('RPAREN')
                 body = self._stmt()
@@ -393,9 +393,9 @@ class Parser:
             self._semi()
         else:
             self._semi()
-        test = self._expr() if not self._check('SEMICOLON') else None
+        test = self._expr() if not self._tt == 'SEMICOLON' else None
         self._semi()
-        upd = self._comma_expr() if not self._check('RPAREN') else None
+        upd = self._comma_expr() if not self._tt == 'RPAREN' else None
         self._expect('RPAREN')
         return N.ForStmt(init, test, upd, self._stmt())
 
@@ -404,17 +404,17 @@ class Parser:
         self._expect('LPAREN'); disc = self._expr(); self._expect('RPAREN')
         self._expect('LBRACE')
         cases, def_body = [], None
-        while not self._check('RBRACE') and not self._check('EOF'):
-            if self._check('CASE'):
+        while not self._tt == 'RBRACE' and not self._tt == 'EOF':
+            if self._tt == 'CASE':
                 self._advance(); test = self._expr(); self._expect('COLON')
                 body = []
-                while not self._check('CASE','DEFAULT','RBRACE','EOF'):
+                while not self._tt in ('CASE', 'DEFAULT', 'RBRACE', 'EOF'):
                     body.append(self._stmt())
                 cases.append(N.SwitchCase(test, body))
-            elif self._check('DEFAULT'):
+            elif self._tt == 'DEFAULT':
                 self._advance(); self._expect('COLON')
                 def_body = []
-                while not self._check('CASE','RBRACE','EOF'):
+                while not self._tt in ('CASE', 'RBRACE', 'EOF'):
                     def_body.append(self._stmt())
                 cases.append(N.SwitchCase(None, def_body, True))
             else:
@@ -425,7 +425,7 @@ class Parser:
     def _block(self):
         self._advance()
         body = []
-        while not self._check('RBRACE') and not self._check('EOF'):
+        while not self._tt == 'RBRACE' and not self._tt == 'EOF':
             body.append(self._stmt())
         self._expect('RBRACE')
         return N.Block(body)
@@ -433,7 +433,7 @@ class Parser:
     def _break(self):
         self._advance()
         label = None
-        if self._check('IDENTIFIER') and not self._is_nl():
+        if self._tt == 'IDENTIFIER' and not self._is_nl():
             label = self._advance().value
         self._semi()
         return N.BreakStmt(label)
@@ -441,7 +441,7 @@ class Parser:
     def _continue(self):
         self._advance()
         label = None
-        if self._check('IDENTIFIER') and not self._is_nl():
+        if self._tt == 'IDENTIFIER' and not self._is_nl():
             label = self._advance().value
         self._semi()
         return N.ContStmt(label)
@@ -449,7 +449,7 @@ class Parser:
     def _return(self):
         self._advance()
         arg = None
-        if not self._check('SEMICOLON','RBRACE','EOF') and not self._is_nl():
+        if not self._tt in ('SEMICOLON', 'RBRACE', 'EOF') and not self._is_nl():
             arg = self._assign()
         self._semi()
         return N.RetStmt(arg)
@@ -461,28 +461,28 @@ class Parser:
         self._advance()
         blk = self._block()
         handler = None
-        if self._check('CATCH'):
+        if self._tt == 'CATCH':
             self._advance()
             param = None
-            if self._check('LPAREN'):
+            if self._tt == 'LPAREN':
                 self._advance()
-                if self._check('LBRACE'):
+                if self._tt == 'LBRACE':
                     param = self._object_pattern()
-                elif self._check('LBRACKET'):
+                elif self._tt == 'LBRACKET':
                     param = self._array_pattern()
                 else:
                     param = self._expect('IDENTIFIER').value
                 self._expect('RPAREN')
             handler = N.CatchClause(param, self._block())
         finalizer = None
-        if self._check('FINALLY'):
+        if self._tt == 'FINALLY':
             self._advance(); finalizer = self._block()
         return N.TryStmt(blk, handler, finalizer)
 
     def _fn_decl(self, async_=False):
         if _TRACE_ACTIVE[0]:
             _log.log(TRACE, "node FunctionDeclaration")
-        if self._check('ASYNC'):
+        if self._tt == 'ASYNC':
             self._advance()
             async_ = True
         self._expect('FUNCTION')
@@ -494,9 +494,9 @@ class Parser:
     def _fn_sig_body(self):
         self._expect('LPAREN')
         params = []
-        if not self._check('RPAREN'):
+        if not self._tt == 'RPAREN':
             while True:
-                if self._check('ELLIPSIS'):
+                if self._tt == 'ELLIPSIS':
                     self._advance(); params.append({'type':'RestElement','argument':self._binding_target()})
                     break
                 params.append(self._binding_element())
@@ -507,15 +507,15 @@ class Parser:
     def _parse_decorator_expr(self):
         """Parse @expr — supports @ident, @ident.prop, @ident.prop(args)"""
         expr = N.Id(self._expect('IDENTIFIER').value)
-        while self._check('DOT'):
+        while self._tt == 'DOT':
             self._advance()
             prop = self._consume_identifier_name()
             expr = N.MemberExpr(expr, N.Id(prop), False)
-        if self._check('LPAREN'):
+        if self._tt == 'LPAREN':
             self._advance()
             args = []
-            while not self._check('RPAREN') and not self._check('EOF'):
-                if self._check('ELLIPSIS'):
+            while not self._tt == 'RPAREN' and not self._tt == 'EOF':
+                if self._tt == 'ELLIPSIS':
                     self._advance(); args.append(N.SpreadExpr(self._assign()))
                 else:
                     args.append(self._assign())
@@ -528,42 +528,42 @@ class Parser:
         """Parse a class expression (anonymous or named), used when 'class' appears in expression position."""
         self._advance()  # consume 'class'
         name = None
-        if self._check('IDENTIFIER'):
+        if self._tt == 'IDENTIFIER':
             name = self._advance().value
         super_ = None
-        if self._check('EXTENDS'):
+        if self._tt == 'EXTENDS':
             self._advance()
             # super class can be any left-hand-side expression (including calls)
             super_ = self._call()
         self._expect('LBRACE')
         members = []
-        while not self._check('RBRACE') and not self._check('EOF'):
+        while not self._tt == 'RBRACE' and not self._tt == 'EOF':
             while self._optional('SEMICOLON'):
                 pass
-            if self._check('RBRACE'): break
+            if self._tt == 'RBRACE': break
             member_decorators = []
-            while self._check('AT'):
+            while self._tt == 'AT':
                 self._advance()
                 member_decorators.append(self._parse_decorator_expr())
             static = bool(self._optional('STATIC'))
-            if static and self._check('LBRACE'):
+            if static and self._tt == 'LBRACE':
                 body = self._block()
                 members.append(N.StaticBlock(body))
                 continue
             is_async = bool(self._optional('ASYNC'))
             kind = 'method'
-            if self._check('IDENTIFIER') and self._cur().value in ('get', 'set'):
+            if self._tt == 'IDENTIFIER' and self.toks[self.pos].value in ('get', 'set'):
                 next_tok = self._peek()
                 if next_tok.type in IDENTIFIER_NAME_TOKENS or next_tok.type in ('STRING', 'NUMBER', 'PRIVATE_NAME', 'LBRACKET'):
                     kind = self._advance().value
             generator = self._optional('STAR') is not None
             computed = False
             computed_key_node = None
-            if self._check('PRIVATE_NAME'):
+            if self._tt == 'PRIVATE_NAME':
                 key = self._advance().value
-            elif self._check('STRING', 'NUMBER'):
+            elif self._tt in ('STRING', 'NUMBER'):
                 key = self._advance().value
-            elif self._check('LBRACKET'):
+            elif self._tt == 'LBRACKET':
                 self._advance()
                 computed_key_node = self._assign()
                 self._expect('RBRACKET')
@@ -571,7 +571,7 @@ class Parser:
                 computed = True
             else:
                 key = self._consume_identifier_name()
-            is_field = kind == 'method' and not generator and not is_async and not self._check('LPAREN')
+            is_field = kind == 'method' and not generator and not is_async and not self._tt == 'LPAREN'
             if is_field:
                 value = None
                 if self._optional('ASSIGN'):
@@ -581,9 +581,9 @@ class Parser:
             else:
                 self._expect('LPAREN')
                 params = []
-                if not self._check('RPAREN'):
+                if not self._tt == 'RPAREN':
                     while True:
-                        if self._check('ELLIPSIS'):
+                        if self._tt == 'ELLIPSIS':
                             self._advance(); params.append({'type':'RestElement','argument':self._binding_target()}); break
                         params.append(self._binding_element())
                         if not self._optional('COMMA'): break
@@ -600,31 +600,31 @@ class Parser:
         self._advance()
         name = self._expect('IDENTIFIER').value
         super_ = None
-        if self._check('EXTENDS'):
+        if self._tt == 'EXTENDS':
             self._advance()
             # super class can be any left-hand-side expression (including calls/members)
             super_ = self._call()
         self._expect('LBRACE')
         members = []
-        while not self._check('RBRACE') and not self._check('EOF'):
+        while not self._tt == 'RBRACE' and not self._tt == 'EOF':
             # skip stray semicolons (empty class body entries)
             while self._optional('SEMICOLON'):
                 pass
-            if self._check('RBRACE'): break
+            if self._tt == 'RBRACE': break
             member_decorators = []
-            while self._check('AT'):
+            while self._tt == 'AT':
                 self._advance()
                 member_decorators.append(self._parse_decorator_expr())
             static = bool(self._optional('STATIC'))
             # static block: static { ... }
-            if static and self._check('LBRACE'):
+            if static and self._tt == 'LBRACE':
                 body = self._block()
                 members.append(N.StaticBlock(body))
                 continue
             is_async = bool(self._optional('ASYNC'))
             # Detect getter/setter: 'get'/'set' as IDENTIFIER followed by a property name (not '(')
             kind = 'method'
-            if self._check('IDENTIFIER') and self._cur().value in ('get', 'set'):
+            if self._tt == 'IDENTIFIER' and self.toks[self.pos].value in ('get', 'set'):
                 next_tok = self._peek()
                 if next_tok.type in IDENTIFIER_NAME_TOKENS or next_tok.type in ('STRING', 'NUMBER', 'PRIVATE_NAME', 'LBRACKET'):
                     kind = self._advance().value
@@ -632,11 +632,11 @@ class Parser:
             # get key
             computed = False
             computed_key_node = None
-            if self._check('PRIVATE_NAME'):
+            if self._tt == 'PRIVATE_NAME':
                 key = self._advance().value
-            elif self._check('STRING', 'NUMBER'):
+            elif self._tt in ('STRING', 'NUMBER'):
                 key = self._advance().value
-            elif self._check('LBRACKET'):
+            elif self._tt == 'LBRACKET':
                 self._advance()
                 computed_key_node = self._assign()
                 self._expect('RBRACKET')
@@ -645,7 +645,7 @@ class Parser:
             else:
                 key = self._consume_identifier_name()
             # decide: field vs method
-            is_field = kind == 'method' and not generator and not is_async and not self._check('LPAREN')
+            is_field = kind == 'method' and not generator and not is_async and not self._tt == 'LPAREN'
             if is_field:
                 value = None
                 if self._optional('ASSIGN'):
@@ -655,9 +655,9 @@ class Parser:
             else:
                 self._expect('LPAREN')
                 params = []
-                if not self._check('RPAREN'):
+                if not self._tt == 'RPAREN':
                     while True:
-                        if self._check('ELLIPSIS'):
+                        if self._tt == 'ELLIPSIS':
                             self._advance(); params.append({'type':'RestElement','argument':self._binding_target()}); break
                         params.append(self._binding_element())
                         if not self._optional('COMMA'): break
@@ -670,32 +670,32 @@ class Parser:
     def _import_decl(self):
         self._expect('IMPORT')
         # import './mod' (side-effect only)
-        if self._check('STRING'):
+        if self._tt == 'STRING':
             source = self._advance().value
             self._parse_import_attributes()  # ES2025: optional 'with { ... }' clause
             self._semi()
             return N.ImportDecl([], source)
         specifiers = []
-        if self._check('STAR'):
+        if self._tt == 'STAR':
             self._advance()  # *
-            if self._check('IDENTIFIER') and self._cur().value == 'as':
+            if self._tt == 'IDENTIFIER' and self.toks[self.pos].value == 'as':
                 self._advance()
             name = self._expect('IDENTIFIER').value
             specifiers.append(N.ImportNs(name))
-        elif self._check('LBRACE'):
+        elif self._tt == 'LBRACE':
             specifiers.extend(self._parse_import_specifiers())
-        elif self._check('IDENTIFIER'):
+        elif self._tt == 'IDENTIFIER':
             default_name = self._advance().value
             specifiers.append(N.ImportDefault(default_name))
-            if self._check('COMMA'):
+            if self._tt == 'COMMA':
                 self._advance()
-                if self._check('STAR'):
+                if self._tt == 'STAR':
                     self._advance()
-                    if self._check('IDENTIFIER') and self._cur().value == 'as':
+                    if self._tt == 'IDENTIFIER' and self.toks[self.pos].value == 'as':
                         self._advance()
                     ns_name = self._expect('IDENTIFIER').value
                     specifiers.append(N.ImportNs(ns_name))
-                elif self._check('LBRACE'):
+                elif self._tt == 'LBRACE':
                     specifiers.extend(self._parse_import_specifiers())
         self._expect('FROM')
         source = self._expect('STRING').value
@@ -705,11 +705,11 @@ class Parser:
 
     def _parse_import_attributes(self):
         """Parse and discard optional ES2025 import attributes: with { key: 'value' }"""
-        if not (self._check('IDENTIFIER') and self._cur().value in ('with', 'assert')):
+        if not (self._tt == 'IDENTIFIER' and self.toks[self.pos].value in ('with', 'assert')):
             return
         self._advance()  # consume 'with' or 'assert'
         self._expect('LBRACE')
-        while not self._check('RBRACE') and not self._check('EOF'):
+        while not self._tt == 'RBRACE' and not self._tt == 'EOF':
             self._consume_identifier_name()  # attribute key
             self._expect('COLON')
             self._expect('STRING')           # attribute value
@@ -720,10 +720,10 @@ class Parser:
     def _parse_import_specifiers(self):
         self._expect('LBRACE')
         specifiers = []
-        while not self._check('RBRACE') and not self._check('EOF'):
+        while not self._tt == 'RBRACE' and not self._tt == 'EOF':
             imported = self._consume_identifier_name()
             local = imported
-            if self._check('IDENTIFIER') and self._cur().value == 'as':
+            if self._tt == 'IDENTIFIER' and self.toks[self.pos].value == 'as':
                 self._advance()
                 local = self._expect('IDENTIFIER').value
             specifiers.append(N.ImportSpec(imported, local))
@@ -734,32 +734,32 @@ class Parser:
 
     def _export_decl(self):
         self._expect('EXPORT')
-        if self._check('DEFAULT'):
+        if self._tt == 'DEFAULT':
             self._advance()
-            if self._check('FUNCTION') or (self._check('ASYNC') and self._peek().type == 'FUNCTION'):
+            if self._tt == 'FUNCTION' or (self._tt == 'ASYNC' and self._peek().type == 'FUNCTION'):
                 decl = self._fn_expr()
                 return N.ExportDefault(decl)
-            elif self._check('CLASS'):
+            elif self._tt == 'CLASS':
                 decl = self._class_decl()
                 return N.ExportDefault(decl)
             else:
                 expr = self._assign()
                 self._semi()
                 return N.ExportDefault(expr)
-        if self._check('STAR'):
+        if self._tt == 'STAR':
             self._advance()
             self._expect('FROM')
             source = self._expect('STRING').value
             self._parse_import_attributes()  # ES2025: optional 'with { ... }' clause
             self._semi()
             return N.ExportList([], source)
-        if self._check('LBRACE'):
+        if self._tt == 'LBRACE':
             self._advance()
             specifiers = []
-            while not self._check('RBRACE') and not self._check('EOF'):
+            while not self._tt == 'RBRACE' and not self._tt == 'EOF':
                 local = self._consume_identifier_name()
                 exported = local
-                if self._check('IDENTIFIER') and self._cur().value == 'as':
+                if self._tt == 'IDENTIFIER' and self.toks[self.pos].value == 'as':
                     self._advance()
                     exported = self._consume_identifier_name()
                 specifiers.append({'local': local, 'exported': exported})
@@ -767,21 +767,21 @@ class Parser:
                     break
             self._expect('RBRACE')
             source = None
-            if self._check('FROM'):
+            if self._tt == 'FROM':
                 self._advance()
                 source = self._expect('STRING').value
                 self._parse_import_attributes()  # ES2025: optional 'with { ... }' clause
             self._semi()
             return N.ExportList(specifiers, source)
-        if self._check('VAR', 'LET', 'CONST'):
+        if self._tt in ('VAR', 'LET', 'CONST'):
             return N.ExportDecl(self._var_decl())
-        if self._check('FUNCTION'):
+        if self._tt == 'FUNCTION':
             return N.ExportDecl(self._fn_decl())
-        if self._check('ASYNC') and self._peek().type == 'FUNCTION':
+        if self._tt == 'ASYNC' and self._peek().type == 'FUNCTION':
             return N.ExportDecl(self._fn_decl(async_=True))
-        if self._check('CLASS'):
+        if self._tt == 'CLASS':
             return N.ExportDecl(self._class_decl())
-        t = self._cur()
+        t = self.toks[self.pos]
         raise SyntaxError(f"Line {t.line}:{t.col} — unexpected export token {t.type} {t.value!r}")
 
     def _expr_stmt(self):
@@ -795,10 +795,7 @@ class Parser:
 
     def _assign(self):
         left = self._ternary()
-        if self._check('ASSIGN','ASSIGN_ADD','ASSIGN_SUB','ASSIGN_MUL',
-                       'ASSIGN_DIV','ASSIGN_MOD','ASSIGN_EXP',
-                       'ASSIGN_AND','ASSIGN_OR','ASSIGN_BOOL_AND','ASSIGN_NULLISH','ASSIGN_BIT_OR','ASSIGN_XOR',
-                       'ASSIGN_LSHIFT','ASSIGN_RSHIFT','ASSIGN_URSHIFT'):
+        if self._tt in ('ASSIGN', 'ASSIGN_ADD', 'ASSIGN_SUB', 'ASSIGN_MUL', 'ASSIGN_DIV', 'ASSIGN_MOD', 'ASSIGN_EXP', 'ASSIGN_AND', 'ASSIGN_OR', 'ASSIGN_BOOL_AND', 'ASSIGN_NULLISH', 'ASSIGN_BIT_OR', 'ASSIGN_XOR', 'ASSIGN_LSHIFT', 'ASSIGN_RSHIFT', 'ASSIGN_URSHIFT'):
             op = self._advance().value
             right = self._assign()
             if op == '=':
@@ -838,20 +835,20 @@ class Parser:
         raise SyntaxError(f"Invalid assignment target: {tp}")
 
     def _simple_assignment_target(self):
-        if self._check('IDENTIFIER'):
+        if self._tt == 'IDENTIFIER':
             tok = self._advance()
             node = N.Id(tok.value, tok.line)
-        elif self._check('LBRACKET', 'LBRACE'):
+        elif self._tt in ('LBRACKET', 'LBRACE'):
             node = self._assignment_target(self._primary())
         else:
             raise SyntaxError('not a simple assignment target')
         while True:
-            if self._check('LBRACKET'):
+            if self._tt == 'LBRACKET':
                 self._advance()
                 prop = self._expr()
                 self._expect('RBRACKET')
                 node = N.MemberExpr(node, prop, True)
-            elif self._check('DOT'):
+            elif self._tt == 'DOT':
                 self._advance()
                 node = N.MemberExpr(node, N.Id(self._consume_identifier_name()), False)
             else:
@@ -860,7 +857,7 @@ class Parser:
 
     def _ternary(self):
         test = self._binary(1)
-        if self._check('QUESTION'):
+        if self._tt == 'QUESTION':
             self._advance()
             cons = self._assign()
             self._expect('COLON')
@@ -895,29 +892,29 @@ class Parser:
         return left
 
     def _unary(self):
-        if self._check('INCREMENT','DECREMENT'):
+        if self._tt in ('INCREMENT','DECREMENT'):
             op = self._advance().value; return N.UpdateExpr(op, self._unary(), True)
-        if self._check('MINUS'):
+        if self._tt == 'MINUS':
             self._advance(); return N.UnaryExpr('-', self._unary(), True)
-        if self._check('PLUS'):
+        if self._tt == 'PLUS':
             self._advance(); return N.UnaryExpr('+', self._unary(), True)
-        if self._check('BANG'):
+        if self._tt == 'BANG':
             self._advance(); return N.UnaryExpr('!', self._unary(), True)
-        if self._check('TILDE'):
+        if self._tt == 'TILDE':
             self._advance(); return N.UnaryExpr('~', self._unary(), True)
-        if self._check('TYPEOF'):
+        if self._tt == 'TYPEOF':
             self._advance(); return N.UnaryExpr('typeof', self._unary(), True)
-        if self._check('VOID'):
+        if self._tt == 'VOID':
             self._advance(); return N.UnaryExpr('void', self._unary(), True)
-        if self._check('DELETE'):
+        if self._tt == 'DELETE':
             self._advance(); return N.UnaryExpr('delete', self._unary(), True)
-        if self._check('AWAIT'):
+        if self._tt == 'AWAIT':
             self._advance(); return N.AwaitExpr(self._unary())
-        if self._check('YIELD'):
+        if self._tt == 'YIELD':
             self._advance()
             delegate = bool(self._optional('STAR'))
             arg = None
-            if not self._is_nl() and not self._check('SEMICOLON', 'RBRACE', 'RPAREN', 'RBRACKET', 'COLON', 'COMMA', 'EOF'):
+            if not self._is_nl() and not self._tt in ('SEMICOLON', 'RBRACE', 'RPAREN', 'RBRACKET', 'COLON', 'COMMA', 'EOF'):
                 arg = self._assign()
             return {'type': 'YieldExpression', 'argument': arg, 'delegate': delegate}
         return self._postfix()
@@ -925,38 +922,38 @@ class Parser:
     def _postfix(self):
         node = self._call()
         if not self._is_nl():
-            if self._check('INCREMENT'):
+            if self._tt == 'INCREMENT':
                 self._advance(); return N.UpdateExpr('++', node, False)
-            if self._check('DECREMENT'):
+            if self._tt == 'DECREMENT':
                 self._advance(); return N.UpdateExpr('--', node, False)
         return node
 
     def _call(self):
         node = self._primary()
         while True:
-            if self._check('LPAREN'):
+            if self._tt == 'LPAREN':
                 self._advance()
                 args = []
-                if not self._check('RPAREN'):
+                if not self._tt == 'RPAREN':
                     while True:
-                        if self._check('ELLIPSIS'):
+                        if self._tt == 'ELLIPSIS':
                             self._advance(); args.append(N.SpreadExpr(self._assign()))
                         else:
                             args.append(self._assign())
                         if not self._optional('COMMA'): break
                 self._expect('RPAREN')
                 node = CallExpr(node, args)
-            elif self._check('LBRACKET'):
+            elif self._tt == 'LBRACKET':
                 self._advance(); prop = self._expr(); self._expect('RBRACKET')
                 node = N.MemberExpr(node, prop, True)
-            elif self._check('QDOT'):
+            elif self._tt == 'QDOT':
                 self._advance()
-                if self._check('LPAREN'):
+                if self._tt == 'LPAREN':
                     self._advance()
                     args = []
-                    if not self._check('RPAREN'):
+                    if not self._tt == 'RPAREN':
                         while True:
-                            if self._check('ELLIPSIS'):
+                            if self._tt == 'ELLIPSIS':
                                 self._advance(); args.append(N.SpreadExpr(self._assign()))
                             else:
                                 args.append(self._assign())
@@ -964,19 +961,19 @@ class Parser:
                                 break
                     self._expect('RPAREN')
                     node = CallExpr(node, args, optional=True)
-                elif self._check('LBRACKET'):
+                elif self._tt == 'LBRACKET':
                     self._advance(); prop = self._expr(); self._expect('RBRACKET')
                     node = N.MemberExpr(node, prop, True, True)
                 else:
                     node = N.MemberExpr(node, N.Id(self._consume_identifier_name()), False, True)
-            elif self._check('DOT'):
+            elif self._tt == 'DOT':
                 self._advance()
-                if self._check('PRIVATE_NAME'):
+                if self._tt == 'PRIVATE_NAME':
                     prop = self._advance().value
                 else:
                     prop = self._consume_identifier_name()
                 node = N.MemberExpr(node, N.Id(prop), False)
-            elif self._check('TEMPLATE'):
+            elif self._tt == 'TEMPLATE':
                 tmpl_tok = self._advance()
                 node = N._n("TaggedTemplateExpression", tag=node, quasi=N.TemplateExpr(tmpl_tok.value))
             else:
@@ -985,7 +982,7 @@ class Parser:
 
     # -- primary ------------------------------------------------------------
     def _primary(self):
-        t = self._cur()
+        t = self.toks[self.pos]
 
         # literals
         if t.type == 'NUMBER':
@@ -1021,9 +1018,9 @@ class Parser:
         # identifier  (maybe single-param arrow)
         if t.type == 'IDENTIFIER':
             self._advance()
-            if self._check('ARROW'):
+            if self._tt == 'ARROW':
                 self._advance()
-                if self._check('LBRACE'):
+                if self._tt == 'LBRACE':
                     return N.FnExpr(None, [t.value], self._block(), True)
                 return N.FnExpr(None, [t.value], N.Block([N.RetStmt(self._assign())]), True)
             return N.Id(t.value, t.line)
@@ -1058,15 +1055,15 @@ class Parser:
         if t.type == 'NEW':
             self._advance()
             # Check for new.target meta-property
-            if self._check('DOT'):
+            if self._tt == 'DOT':
                 self._advance()
-                if self._check('IDENTIFIER') and self._cur().value == 'target':
+                if self._tt == 'IDENTIFIER' and self.toks[self.pos].value == 'target':
                     self._advance()
                     return {'type': 'MetaProperty', 'meta': 'new', 'property': 'target'}
             callee = self._primary()
             # Support member expressions in new callee: new Foo.Bar(...)
-            while self._check('DOT') or self._check('LBRACKET'):
-                if self._check('DOT'):
+            while self._tt == 'DOT' or self._tt == 'LBRACKET':
+                if self._tt == 'DOT':
                     self._advance()
                     prop = self._consume_identifier_name()
                     callee = N.MemberExpr(callee, N.Id(prop), False)
@@ -1077,9 +1074,9 @@ class Parser:
                     callee = N.MemberExpr(callee, prop, True)
             self._expect('LPAREN')
             args = []
-            if not self._check('RPAREN'):
+            if not self._tt == 'RPAREN':
                 while True:
-                    if self._check('ELLIPSIS'):
+                    if self._tt == 'ELLIPSIS':
                         self._advance(); args.append(N.SpreadExpr(self._assign()))
                     else:
                         args.append(self._assign())
@@ -1090,12 +1087,12 @@ class Parser:
         # import.meta or dynamic import()
         if t.type == 'IMPORT':
             self._advance()
-            if self._check('DOT'):
+            if self._tt == 'DOT':
                 self._advance()
-                if self._check('IDENTIFIER') and self._cur().value == 'meta':
+                if self._tt == 'IDENTIFIER' and self.toks[self.pos].value == 'meta':
                     self._advance()
                     return {'type': 'ImportMeta'}
-            if self._check('LPAREN'):
+            if self._tt == 'LPAREN':
                 self._advance()
                 src = self._assign()
                 self._expect('RPAREN')
@@ -1112,7 +1109,7 @@ class Parser:
     def _comma_expr(self):
         """Parse expression list (comma operator), returning SequenceExpression or single expr."""
         expr = self._assign()
-        if not self._check('COMMA'):
+        if not self._tt == 'COMMA':
             return expr
         exprs = [expr]
         while self._optional('COMMA'):
@@ -1134,10 +1131,10 @@ class Parser:
         ok = False
         try:
             self._expect('ASYNC')
-            if self._check('IDENTIFIER'):
+            if self._tt == 'IDENTIFIER':
                 self._advance()
-                ok = self._check('ARROW')
-            elif self._check('LPAREN'):
+                ok = self._tt == 'ARROW'
+            elif self._tt == 'LPAREN':
                 ok = self._is_arrow_after_paren()
         except Exception:
             ok = False
@@ -1147,10 +1144,10 @@ class Parser:
 
     def _parse_async_arrow(self):
         self._expect('ASYNC')
-        if self._check('IDENTIFIER'):
+        if self._tt == 'IDENTIFIER':
             name = self._advance().value
             self._expect('ARROW')
-            if self._check('LBRACE'):
+            if self._tt == 'LBRACE':
                 return N.FnExpr(None, [name], self._block(), True, True)
             return N.FnExpr(None, [name], N.Block([N.RetStmt(self._assign())]), True, True)
         return self._parse_arrow_params(async_=True)
@@ -1161,35 +1158,35 @@ class Parser:
         ok = False
         try:
             self._advance()       # (
-            if self._check('RPAREN'):
+            if self._tt == 'RPAREN':
                 ok = self._peek().type == 'ARROW'
             else:
                 while True:
-                    if self._check('ELLIPSIS'):
+                    if self._tt == 'ELLIPSIS':
                         self._advance()
                     # Accept: identifier, array/object destructuring, assignment pattern
-                    if self._check('LBRACKET') or self._check('LBRACE'):
+                    if self._tt == 'LBRACKET' or self._tt == 'LBRACE':
                         # Skip the destructuring pattern using a bracket counter
                         close_map = {'LBRACKET': 'RBRACKET', 'LBRACE': 'RBRACE'}
-                        close_tok = close_map[self._cur().type]
+                        close_tok = close_map[self.toks[self.pos].type]
                         self._advance()   # consume [ or {
                         depth = 1
                         while depth > 0:
-                            t = self._cur().type
+                            t = self.toks[self.pos].type
                             if t in ('LBRACKET', 'LBRACE'): depth += 1
                             elif t == close_tok: depth -= 1
                             elif t == 'EOF': break
                             self._advance()
-                    elif self._check('IDENTIFIER'):
+                    elif self._tt == 'IDENTIFIER':
                         self._advance()
                     else:
                         break
-                    if self._check('ASSIGN'):
+                    if self._tt == 'ASSIGN':
                         self._advance(); self._assign()   # skip default
-                    if self._check('RPAREN'):
+                    if self._tt == 'RPAREN':
                         ok = self._peek().type == 'ARROW'
                         break
-                    if not self._check('COMMA'):
+                    if not self._tt == 'COMMA':
                         break
                     self._advance()
         except Exception:
@@ -1201,9 +1198,9 @@ class Parser:
     def _parse_arrow_params(self, async_=False):
         self._advance()           # (
         params = []
-        if not self._check('RPAREN'):
+        if not self._tt == 'RPAREN':
             while True:
-                if self._check('ELLIPSIS'):
+                if self._tt == 'ELLIPSIS':
                     self._advance()
                     params.append({'type':'RestElement','argument':self._binding_target()})
                     break
@@ -1211,7 +1208,7 @@ class Parser:
                 if not self._optional('COMMA'): break
         self._expect('RPAREN')
         self._expect('ARROW')
-        if self._check('LBRACE'):
+        if self._tt == 'LBRACE':
             return N.FnExpr(None, params, self._block(), True, async_)
         return N.FnExpr(None, params, N.Block([N.RetStmt(self._assign())]), True, async_)
 
@@ -1219,10 +1216,10 @@ class Parser:
     def _array(self):
         self._advance()
         elems = []
-        while not self._check('RBRACKET') and not self._check('EOF'):
-            if self._check('COMMA'):
+        while not self._tt == 'RBRACKET' and not self._tt == 'EOF':
+            if self._tt == 'COMMA':
                 elems.append(None); self._advance(); continue
-            if self._check('ELLIPSIS'):
+            if self._tt == 'ELLIPSIS':
                 self._advance(); elems.append(N.SpreadExpr(self._assign()))
             else:
                 elems.append(self._assign())
@@ -1233,18 +1230,18 @@ class Parser:
     def _object(self):
         self._advance()
         props = []
-        while not self._check('RBRACE') and not self._check('EOF'):
-            if self._check('ELLIPSIS'):
+        while not self._tt == 'RBRACE' and not self._tt == 'EOF':
+            if self._tt == 'ELLIPSIS':
                 self._advance(); props.append({'type':'SpreadElement','argument':self._assign()})
                 self._optional('COMMA'); continue
             # Generator method shorthand: *name(){} or *[expr](){}
-            if self._check('STAR'):
+            if self._tt == 'STAR':
                 self._advance()
-                if self._check('LBRACKET'):
+                if self._tt == 'LBRACKET':
                     self._advance(); gen_key = self._expr(); self._expect('RBRACKET'); gen_comp = True
-                elif self._check('STRING'):
+                elif self._tt == 'STRING':
                     gen_key = self._advance().value; gen_comp = False
-                elif self._check('NUMBER'):
+                elif self._tt == 'NUMBER':
                     gen_key = self._normalize_number_key(self._advance().value); gen_comp = False
                 else:
                     gen_key = self._consume_identifier_name(); gen_comp = False
@@ -1252,27 +1249,27 @@ class Parser:
                 props.append(N.Prop(gen_key, N.FnExpr(gen_key, params, body, False, False, True), gen_comp))
                 self._optional('COMMA'); continue
             # key
-            if self._check('LBRACKET'):
+            if self._tt == 'LBRACKET':
                 self._advance(); key = self._expr(); self._expect('RBRACKET'); comp = True
-                if self._check('LPAREN'):
+                if self._tt == 'LPAREN':
                     params, body = self._fn_sig_body()
                     props.append(N.Prop(key, N.FnExpr(None, params, body), True))
                     self._optional('COMMA')
                     continue
-            elif self._check('STRING'):
+            elif self._tt == 'STRING':
                 key = self._advance().value; comp = False
-            elif self._check('NUMBER'):
+            elif self._tt == 'NUMBER':
                 key = self._normalize_number_key(self._advance().value); comp = False
-            elif self._check('ASYNC') or self._is_identifier_name():
+            elif self._tt == 'ASYNC' or self._tt in IDENTIFIER_NAME_TOKENS:
                 ident = self._advance()
                 # async method shorthand: async name(){} or async *name(){}
-                if ident.type == 'ASYNC' and not self._check('LPAREN', 'COLON', 'COMMA', 'RBRACE', 'ASSIGN'):
+                if ident.type == 'ASYNC' and not self._tt in ('LPAREN', 'COLON', 'COMMA', 'RBRACE', 'ASSIGN'):
                     is_gen = self._optional('STAR') is not None
-                    if self._check('LBRACKET'):
+                    if self._tt == 'LBRACKET':
                         self._advance(); am_key = self._expr(); self._expect('RBRACKET'); am_comp = True
-                    elif self._check('STRING'):
+                    elif self._tt == 'STRING':
                         am_key = self._advance().value; am_comp = False
-                    elif self._check('NUMBER'):
+                    elif self._tt == 'NUMBER':
                         am_key = self._normalize_number_key(self._advance().value); am_comp = False
                     else:
                         am_key = self._consume_identifier_name(); am_comp = False
@@ -1280,37 +1277,37 @@ class Parser:
                     props.append(N.Prop(am_key, N.FnExpr(am_key, params, body, False, True, is_gen), am_comp))
                     self._optional('COMMA'); continue
                 # Getter/setter accessor (including computed keys): get [expr](){}
-                if ident.value in ('get', 'set') and (self._is_identifier_name() or self._check('STRING', 'NUMBER', 'LBRACKET')) and not self._check('LPAREN'):
+                if ident.value in ('get', 'set') and (self._tt in IDENTIFIER_NAME_TOKENS or self._tt in ('STRING', 'NUMBER', 'LBRACKET')) and not self._tt == 'LPAREN':
                     accessor_kind = ident.value
-                    if self._check('LBRACKET'):
+                    if self._tt == 'LBRACKET':
                         self._advance(); acc_key_expr = self._expr(); self._expect('RBRACKET')
                         params, body = self._fn_sig_body()
                         props.append({'type': 'Property', 'key': acc_key_expr, 'value': N.FnExpr(None, params, body), 'computed': True, 'kind': accessor_kind})
                         self._optional('COMMA'); continue
-                    elif self._check('STRING'): acc_key = self._advance().value
-                    elif self._check('NUMBER'): acc_key = self._normalize_number_key(self._advance().value)
+                    elif self._tt == 'STRING': acc_key = self._advance().value
+                    elif self._tt == 'NUMBER': acc_key = self._normalize_number_key(self._advance().value)
                     else: acc_key = self._consume_identifier_name()
                     params, body = self._fn_sig_body()
                     props.append({'type': 'Property', 'key': acc_key, 'value': N.FnExpr(acc_key, params, body), 'computed': False, 'kind': accessor_kind})
                     self._optional('COMMA')
                     continue
-                if self._check('LPAREN'):
+                if self._tt == 'LPAREN':
                     # method shorthand
                     params, body = self._fn_sig_body()
                     props.append(N.Prop(ident.value, N.FnExpr(ident.value, params, body), False))
                     self._optional('COMMA'); continue
-                if self._check('ASSIGN'):
+                if self._tt == 'ASSIGN':
                     self._advance()
                     props.append(N.Prop(ident.value, N.AssignExpr('=', N.Id(ident.value), self._assign()), False))
                     self._optional('COMMA'); continue
-                if self._check('COMMA','RBRACE'):
+                if self._tt in ('COMMA','RBRACE'):
                     props.append(N.Prop(ident.value, N.Id(ident.value), False, True))
                     self._optional('COMMA'); continue
                 key = ident.value; comp = False
             else:
                 break
             # value
-            if self._check('COLON'):
+            if self._tt == 'COLON':
                 self._advance(); val = self._assign()
                 props.append(N.Prop(key, val, comp))
             self._optional('COMMA')
@@ -1318,11 +1315,11 @@ class Parser:
         return N.ObjExpr(props)
 
     def _fn_expr(self, async_=False):
-        if self._check('ASYNC'):
+        if self._tt == 'ASYNC':
             self._advance()
             async_ = True
         self._expect('FUNCTION')
         generator = self._optional('STAR') is not None
-        name = self._expect('IDENTIFIER').value if self._check('IDENTIFIER') else None
+        name = self._expect('IDENTIFIER').value if self._tt == 'IDENTIFIER' else None
         params, body = self._fn_sig_body()
         return N.FnExpr(name, params, body, False, async_, generator)
