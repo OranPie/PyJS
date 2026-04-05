@@ -1783,14 +1783,17 @@ class Interpreter:
         def fn(this_val, args, extra_args=None):
             a = arr.value
             if name == 'push':
-                a.extend(args); return JsValue("number", len(a))
+                a.extend(args)
+                _len = len(a)
+                return _JS_SMALL_INTS[_len] if 0 <= _len <= 255 else JsValue("number", _len)
             if name == 'pop':
                 return a.pop() if a else UNDEFINED
             if name == 'shift':
                 return a.pop(0) if a else UNDEFINED
             if name == 'unshift':
                 for i,x in enumerate(args): a.insert(i,x)
-                return JsValue("number", len(a))
+                _len = len(a)
+                return _JS_SMALL_INTS[_len] if 0 <= _len <= 255 else JsValue("number", _len)
             if name == 'indexOf':
                 target = args[0] if args else UNDEFINED
                 start = int(args[1].value) if len(args)>1 else 0
@@ -3562,8 +3565,24 @@ class Interpreter:
         return None
 
     def _exec_while_statement(self, node, env):
-        while self._truthy(self._eval(node["test"], env)):
-            self._check_step_limit()
+        _exec_steps = self._exec_steps
+        _MAX = self.MAX_EXEC_STEPS
+        _test = node["test"]
+        while True:
+            _tv = self._eval(_test, env)
+            _tt = _tv.type
+            if _tt == 'boolean':
+                if not _tv.value: break
+            elif _tt == 'number':
+                if _tv.value == 0 or _tv.value != _tv.value: break
+            elif _tt == 'string':
+                if not _tv.value: break
+            elif _tt == 'undefined' or _tt == 'null':
+                break
+            _exec_steps += 1
+            if _exec_steps > _MAX:
+                self._exec_steps = _exec_steps
+                raise _JSError(self._make_js_error('RangeError', 'Execution step limit exceeded (possible infinite loop)'))
             try:
                 r = self._exec(node["body"], env)
                 if r is not None:
@@ -3578,17 +3597,32 @@ class Interpreter:
                 _lbl = node.get('__label__')
                 if e.label is None or (_lbl and e.label == _lbl): continue
                 raise
+        self._exec_steps = _exec_steps
         return None
 
     def _exec_do_while_statement(self, node, env):
+        _exec_steps = self._exec_steps
+        _MAX = self.MAX_EXEC_STEPS
+        _test = node["test"]
+        def _test_falsy():
+            _tv = self._eval(_test, env)
+            _tt = _tv.type
+            if _tt == 'boolean': return not _tv.value
+            if _tt == 'number': return _tv.value == 0 or _tv.value != _tv.value
+            if _tt == 'string': return not _tv.value
+            if _tt == 'undefined' or _tt == 'null': return True
+            return False
         while True:
-            self._check_step_limit()
+            _exec_steps += 1
+            if _exec_steps > _MAX:
+                self._exec_steps = _exec_steps
+                raise _JSError(self._make_js_error('RangeError', 'Execution step limit exceeded (possible infinite loop)'))
             try:
                 r = self._exec(node["body"], env)
                 if r is not None:
                     if r == _BREAK: break
                     if r == _CONTINUE:
-                        if not self._truthy(self._eval(node["test"], env)): break
+                        if _test_falsy(): break
                         continue
                     return r
             except _JSBreak as e:
@@ -3599,7 +3633,8 @@ class Interpreter:
                 _lbl = node.get('__label__')
                 if e.label is None or (_lbl and e.label == _lbl): pass
                 else: raise
-            if not self._truthy(self._eval(node["test"], env)): break
+            if _test_falsy(): break
+        self._exec_steps = _exec_steps
         return None
 
     def _exec_for_statement(self, node, env):
@@ -3628,10 +3663,24 @@ class Interpreter:
         update_node = node["update"] if has_update else None
         body_node = node["body"]
         _label = node.get('__label__')
+        _exec_steps = self._exec_steps
+        _MAX_EXEC_STEPS = self.MAX_EXEC_STEPS
         while True:
-            if has_test and not self._truthy(self._eval(test_node, loop_env)):
-                break
-            self._check_step_limit()
+            if has_test:
+                _tv = self._eval(test_node, loop_env)
+                _tt = _tv.type
+                if _tt == 'boolean':
+                    if not _tv.value: break
+                elif _tt == 'number':
+                    if _tv.value == 0 or _tv.value != _tv.value: break
+                elif _tt == 'string':
+                    if not _tv.value: break
+                elif _tt == 'undefined' or _tt == 'null':
+                    break
+            _exec_steps += 1
+            if _exec_steps > _MAX_EXEC_STEPS:
+                self._exec_steps = _exec_steps
+                raise _JSError(self._make_js_error('RangeError', 'Execution step limit exceeded (possible infinite loop)'))
             if uses_lex:
                 iter_env = Environment(loop_env)
                 _iter_bindings = iter_env.bindings
@@ -3673,6 +3722,7 @@ class Interpreter:
                     if v in _ib and v in _loop_bindings:
                         _loop_bindings[v][1] = _ib[v][1]
             if has_update: self._eval(update_node, loop_env)
+        self._exec_steps = _exec_steps
         return None
 
     def _exec_for_in_statement(self, node, env):
@@ -4599,6 +4649,15 @@ class Interpreter:
             right = self._eval(node["right"], env)
             self._bind_pattern(left, right, env, 'let', False)
             return right
+        # Fast path: `obj.prop = expr` or `obj[key] = expr`
+        if op == "=" and _ltype == "MemberExpression":
+            if left.get('optional'):
+                raise _JSError(py_to_js('Invalid assignment target'))
+            right = self._eval(node["right"], env)
+            obj = self._eval(left["object"], env)
+            prop = self._eval(left["property"], env) if left["computed"] else left["property"]["name"]
+            self._set_prop(obj, prop, right)
+            return right
         # Fast path: compound assignment on Identifier (+=, -=, etc.)
         # Avoids _resolve_target closure creation + _find scope walk
         if _ltype == "Identifier" and op not in ("&&=", "||=", "??="):
@@ -5519,14 +5578,15 @@ class Interpreter:
             # Bind parameters — fast path for simple Identifier params
             arg_index = 0
             _bindings = call_env.bindings
+            _nargs = len(args)
             for p in params:
                 if p.__class__ is dict:
                     _ptype = p["type"]
                     if _ptype == "RestElement":
-                        rest = args[arg_index:] if arg_index < len(args) else []
+                        rest = args[arg_index:] if arg_index < _nargs else []
                         self._bind_pattern(p["argument"], JsValue("array", list(rest)), call_env, 'var', True)
                         break
-                    val = args[arg_index] if arg_index < len(args) else UNDEFINED
+                    val = args[arg_index] if arg_index < _nargs else UNDEFINED
                     if _ptype == "Identifier":
                         _bindings[p["name"]] = ['var', val]
                     elif _ptype == "AssignmentPattern":
@@ -5540,7 +5600,7 @@ class Interpreter:
                     else:
                         self._bind_pattern(p, val, call_env, 'var', True)
                 else:
-                    val = args[arg_index] if arg_index < len(args) else UNDEFINED
+                    val = args[arg_index] if arg_index < _nargs else UNDEFINED
                     self._bind_pattern(p, val, call_env, 'var', True)
                 arg_index += 1
             promise = self._new_promise() if _is_async else None
