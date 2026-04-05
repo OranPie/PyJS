@@ -647,25 +647,81 @@ class Interpreter:
         _log_event.info("event loop end (%d ticks)", steps)
         return not until_promise or until_promise.value['state'] != 'pending'
 
+    # Class-level cache for global env bindings (shared across instances)
+    _cached_global_bindings = None
+
     # --------------------------------------------------------- global env
     def _global_env(self) -> Environment:
         g = Environment()
         if _TRACE_ACTIVE[0]:
             _log_scope.info("scope create (program)")
 
-        # primitives
-        g.declare('undefined',  UNDEFINED, 'var')
-        g.declare('NaN',        JsValue("number", float('nan')), 'var')
-        g.declare('Infinity',   JsValue("number", float('inf')), 'var')
+        cached = Interpreter._cached_global_bindings
+        if cached is not None:
+            # Fast path: clone cached bindings (avoid re-registering all builtins)
+            _bindings = g.bindings
+            for name, (keyword, value) in cached.items():
+                # 2-level clone: object + nested objects (prototypes) so extensions don't leak
+                if value.type == 'object' and value.value.__class__ is dict:
+                    _new_dict = {}
+                    for k, v in value.value.items():
+                        if v.__class__ is JsValue and v.type == 'object' and v.value.__class__ is dict:
+                            _nested = JsValue('object', dict(v.value))
+                            _nested.extras = v.extras
+                            _new_dict[k] = _nested
+                        else:
+                            _new_dict[k] = v
+                    _clone = JsValue('object', _new_dict)
+                    _clone.extras = value.extras
+                    value = _clone
+                _bindings[name] = [keyword, value]
+            # Re-point self._*_proto to the cloned prototypes from constructor objects
+            # so that identity holds: Array.prototype === Object.getPrototypeOf([])
+            _proto_map = {
+                'Object': '_object_proto', 'Array': '_array_proto',
+                'Function': '_function_proto', 'String': '_string_proto',
+                'Number': '_number_proto', 'Boolean': '_boolean_proto',
+                'RegExp': '_regexp_proto', 'Map': '_map_proto',
+                'Set': '_set_proto', 'WeakMap': '_weakmap_proto',
+                'WeakSet': '_weakset_proto', 'Promise': '_promise_proto',
+                'Symbol': '_symbol_proto',
+            }
+            for ctor_name, attr in _proto_map.items():
+                if ctor_name in _bindings:
+                    ctor_val = _bindings[ctor_name][1]
+                    if ctor_val.value.__class__ is dict:
+                        proto = ctor_val.value.get('prototype')
+                        if proto is not None:
+                            setattr(self, attr, proto)
+            # Re-wire __proto__ chains to use the new cloned _object_proto
+            _op = self._object_proto
+            for attr in ('_array_proto', '_function_proto', '_string_proto',
+                         '_number_proto', '_boolean_proto', '_regexp_proto',
+                         '_map_proto', '_set_proto', '_weakmap_proto',
+                         '_weakset_proto', '_promise_proto', '_bigint_proto',
+                         '_symbol_proto'):
+                getattr(self, attr).value['__proto__'] = _op
+            _op.value['__proto__'] = JS_NULL
+        else:
+            # First call: register all builtins normally
+            # primitives
+            g.declare('undefined',  UNDEFINED, 'var')
+            g.declare('NaN',        JsValue("number", float('nan')), 'var')
+            g.declare('Infinity',   JsValue("number", float('inf')), 'var')
 
-        def intr(fn, name='?'):
-            return self._make_intrinsic(lambda this_val, args, interp: fn(args, interp), name)
+            def intr(fn, name='?'):
+                return self._make_intrinsic(lambda this_val, args, interp: fn(args, interp), name)
 
-        register_core_builtins(self, g, intr)
-        register_object_builtins(self, g, intr)
-        register_advanced_builtins(self, g, intr)
-        register_promise_builtins(self, g, intr)
-        register_typed_builtins(self, g, intr)
+            register_core_builtins(self, g, intr)
+            register_object_builtins(self, g, intr)
+            register_advanced_builtins(self, g, intr)
+            register_promise_builtins(self, g, intr)
+            register_typed_builtins(self, g, intr)
+
+            # Cache the bindings
+            Interpreter._cached_global_bindings = {
+                name: (binding[0], binding[1]) for name, binding in g.bindings.items()
+            }
 
         global_obj = JsValue('object', {})
         g.declare('globalThis', global_obj, 'var')
