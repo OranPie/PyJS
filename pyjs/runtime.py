@@ -1883,15 +1883,22 @@ class Interpreter:
                         _fr, _spn, _np, _cenv = _fam
                         interp._call_depth += 1
                         _prev_env = interp.env
+                        # Pre-create environment and bindings once, reuse per iteration
+                        _ce = Environment(_cenv)
+                        _ce._is_arrow = True
+                        _ce._is_fn_env = True
+                        _b0 = ['var', None]
+                        _b1 = ['var', None] if _np > 1 else None
+                        _b2 = ['var', arr] if _np > 2 else None
                         try:
                             for i, x in enumerate(a):
-                                _ce = Environment(_cenv)
-                                _ce._is_arrow = True
-                                _ce._is_fn_env = True
-                                _b = _ce.bindings
-                                _b[_spn[0]] = ['var', x]
-                                if _np > 1: _b[_spn[1]] = ['var', _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)]
-                                if _np > 2: _b[_spn[2]] = ['var', arr]
+                                _ce.bindings = _fresh = {}
+                                _b0[1] = x
+                                _fresh[_spn[0]] = _b0
+                                if _b1 is not None:
+                                    _b1[1] = _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)
+                                    _fresh[_spn[1]] = _b1
+                                if _b2 is not None: _fresh[_spn[2]] = _b2
                                 interp.env = _ce
                                 if _fr is not None:
                                     try:
@@ -1931,15 +1938,21 @@ class Interpreter:
                         _rap = result.append
                         interp._call_depth += 1
                         _prev_env = interp.env
+                        _ce = Environment(_cenv)
+                        _ce._is_arrow = True
+                        _ce._is_fn_env = True
+                        _b0 = ['var', None]
+                        _b1 = ['var', None] if _np > 1 else None
+                        _b2 = ['var', arr] if _np > 2 else None
                         try:
                             for i, x in enumerate(a):
-                                _ce = Environment(_cenv)
-                                _ce._is_arrow = True
-                                _ce._is_fn_env = True
-                                _b = _ce.bindings
-                                _b[_spn[0]] = ['var', x]
-                                if _np > 1: _b[_spn[1]] = ['var', _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)]
-                                if _np > 2: _b[_spn[2]] = ['var', arr]
+                                _ce.bindings = _fresh = {}
+                                _b0[1] = x
+                                _fresh[_spn[0]] = _b0
+                                if _b1 is not None:
+                                    _b1[1] = _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)
+                                    _fresh[_spn[1]] = _b1
+                                if _b2 is not None: _fresh[_spn[2]] = _b2
                                 interp.env = _ce
                                 if _fr is not None:
                                     try:
@@ -1993,16 +2006,25 @@ class Interpreter:
                     _fr, _spn, _np, _cenv = _fam
                     interp._call_depth += 1
                     _prev_env = interp.env
+                    _ce = Environment(_cenv)
+                    _ce._is_arrow = True
+                    _ce._is_fn_env = True
+                    _b0 = ['var', None]
+                    _b1 = ['var', None] if _np > 1 else None
+                    _b2 = ['var', None] if _np > 2 else None
+                    _b3 = ['var', arr] if _np > 3 else None
                     try:
                         for i in range(start_idx, len(a)):
-                            _ce = Environment(_cenv)
-                            _ce._is_arrow = True
-                            _ce._is_fn_env = True
-                            _b = _ce.bindings
-                            _b[_spn[0]] = ['var', acc]
-                            if _np > 1: _b[_spn[1]] = ['var', a[i]]
-                            if _np > 2: _b[_spn[2]] = ['var', _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)]
-                            if _np > 3: _b[_spn[3]] = ['var', arr]
+                            _ce.bindings = _fresh = {}
+                            _b0[1] = acc
+                            _fresh[_spn[0]] = _b0
+                            if _b1 is not None:
+                                _b1[1] = a[i]
+                                _fresh[_spn[1]] = _b1
+                            if _b2 is not None:
+                                _b2[1] = _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)
+                                _fresh[_spn[2]] = _b2
+                            if _b3 is not None: _fresh[_spn[3]] = _b3
                             interp.env = _ce
                             if _fr is not None:
                                 try:
