@@ -11,9 +11,11 @@ class _JSContinue(Exception):
     def __init__(self, label=None): self.label = label
 
 class _JSReturn(Exception):
+    __slots__ = ('value',)
     def __init__(self, value): self.value = value
 
 class _JSError(Exception):
+    __slots__ = ('value',)
     def __init__(self, value: JsValue): self.value = value
 
 

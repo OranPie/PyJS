@@ -27,11 +27,6 @@ class Environment:
         self._fn_val = None
         self._strict: bool = parent._strict if parent else False
         self._using_stack = None  # list of (val, sym_key, is_async) for `using` declarations
-        if parent is None:
-            _log.info("scope create (global)")
-        else:
-            if _TRACE_ACTIVE[0]:
-                _log.log(TRACE, "scope create (child)")
 
     def declare(self, name, value, keyword='var'):
         if _TRACE_ACTIVE[0]:
@@ -68,9 +63,13 @@ class Environment:
         return None
 
     def get(self, name):
-        if _TRACE_ACTIVE[0]:
-            _log.log(TRACE, "get %s", name)
-        e = self
+        b = self.bindings.get(name)
+        if b is not None:
+            val = b[1]
+            if val is _TDZ_SENTINEL:
+                raise ReferenceError(f"Cannot access '{name}' before initialization")
+            return val
+        e = self.parent
         while e is not None:
             b = e.bindings.get(name)
             if b is not None:
@@ -81,9 +80,13 @@ class Environment:
         raise ReferenceError(f"{name} is not defined")
 
     def set(self, name, value):
-        if _TRACE_ACTIVE[0]:
-            _log.log(TRACE, "set %s", name)
-        e = self
+        b = self.bindings.get(name)
+        if b is not None:
+            if b[0] == 'const' and b[1] is not _TDZ_SENTINEL:
+                raise JSTypeError(f"Assignment to constant variable '{name}'")
+            b[1] = value
+            return
+        e = self.parent
         while e is not None:
             b = e.bindings.get(name)
             if b is not None:
