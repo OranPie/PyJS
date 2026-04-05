@@ -1144,19 +1144,20 @@ class Interpreter:
         if isinstance(pattern, str):
             self._bind_value(pattern, value, env, keyword, declare)
             return
-        if pattern.get('type') == 'Identifier':
+        _ptype = pattern['type']
+        if _ptype == 'Identifier':
             self._bind_value(pattern['name'], value, env, keyword, declare)
             return
-        if pattern.get('type') == 'AssignmentPattern':
+        if _ptype == 'AssignmentPattern':
             next_value = value
             if next_value.type == 'undefined':
                 next_value = self._eval(pattern['right'], env)
             self._bind_pattern(pattern['left'], next_value, env, keyword, declare)
             return
-        if pattern.get('type') == 'RestElement':
+        if _ptype == 'RestElement':
             self._bind_pattern(pattern['argument'], value, env, keyword, declare)
             return
-        if pattern.get('type') == 'MemberExpression':
+        if _ptype == 'MemberExpression':
             obj = self._eval(pattern['object'], env)
             if pattern.get('computed'):
                 key = self._to_key(self._eval(pattern['property'], env))
@@ -1164,7 +1165,7 @@ class Interpreter:
                 key = pattern['property']['name']
             self._set_prop(obj, key, value)
             return
-        if pattern.get('type') == 'ArrayPattern':
+        if _ptype == 'ArrayPattern':
             if self._is_nullish(value):
                 raise _JSError(py_to_js('Cannot destructure null or undefined'))
             items = self._array_like_items(value)
@@ -1176,7 +1177,7 @@ class Interpreter:
                     break
                 self._bind_pattern(item, items[index] if index < len(items) else UNDEFINED, env, keyword, declare)
             return
-        if pattern.get('type') == 'ObjectPattern':
+        if _ptype == 'ObjectPattern':
             if self._is_nullish(value):
                 raise _JSError(py_to_js('Cannot destructure null or undefined'))
             source = value if value.type in ('object', 'array', 'string') else JsValue('object', {})
@@ -1267,7 +1268,8 @@ class Interpreter:
 
     def _get_prop_array(self, obj, key):
         if key == 'length':
-            return JsValue("number", len(obj.value))
+            _len = len(obj.value)
+            return _JS_SMALL_INTS[_len] if 0 <= _len <= 255 else JsValue("number", _len)
         sym_iter_key = SK_ITERATOR
         if key == sym_iter_key:
             arr_ref = obj
@@ -1332,7 +1334,8 @@ class Interpreter:
 
     def _get_prop_string(self, obj, key):
         if key == 'length':
-            return JsValue("number", len(obj.value))
+            _len = len(obj.value)
+            return _JS_SMALL_INTS[_len] if 0 <= _len <= 255 else JsValue("number", _len)
         sym_iter_key = SK_ITERATOR
         if key == sym_iter_key:
             chars = list(obj.value)
@@ -1646,10 +1649,11 @@ class Interpreter:
             if isinstance(target, JsValue):
                 return self._get_prop_object_like(target, key, receiver=this_val)
             return UNDEFINED
-        handler = self._GET_PROP_DISPATCH.get(obj.type)
-        if handler:
-            return handler(obj, key)
-        return UNDEFINED
+        try:
+            handler = self._GET_PROP_DISPATCH[obj.type]
+        except KeyError:
+            return UNDEFINED
+        return handler(obj, key)
 
     def _set_prop(self, obj: JsValue, prop, val: JsValue):
         key = self._to_key(prop)
@@ -3224,25 +3228,26 @@ class Interpreter:
         return None
 
     def _exec_variable_declaration(self, node, env):
+        _kind = node["kind"]
         for d in node["declarations"]:
             val = UNDEFINED
             if d["init"]:
                 val = self._eval(d["init"], env)
-                # ES2015 function name inference: infer name from variable binding
+                # ES2015 function name inference
                 _id = d["id"]
-                if (_id and isinstance(_id, dict) and _id.get("type") == "Identifier"
+                if (isinstance(_id, dict) and _id["type"] == "Identifier"
                         and val.type in ('function', 'intrinsic', 'class')
                         and isinstance(val.value, dict)
                         and not val.value.get("name")):
                     val.value["name"] = _id["name"]
-            _id = d["id"]
-            _vname = _id.get("name", "?") if isinstance(_id, dict) and _id.get("type") == "Identifier" else "<pattern>"
             if _TRACE_ACTIVE[0]:
-                _log_scope.debug("declare %s %s", node["kind"], _vname)
+                _id = d["id"]
+                _vname = _id.get("name", "?") if isinstance(_id, dict) and _id.get("type") == "Identifier" else "<pattern>"
+                _log_scope.debug("declare %s %s", _kind, _vname)
                 if _log_scope.isEnabledFor(TRACE):
                     _log_scope.log(TRACE, "  %s = %s", _vname, self._to_str(val)[:60])
             try:
-                self._bind_pattern(d["id"], val, env, node["kind"], True)
+                self._bind_pattern(d["id"], val, env, _kind, True)
             except JSTypeError as e:
                 raise _JSError(py_to_js(str(e)))
         return None
@@ -3955,8 +3960,9 @@ class Interpreter:
             body.pop('__label__', None)
 
     def _exec_return_statement(self, node, env):
-        if node.get("argument"):
-            raise _JSReturn(self._eval(node["argument"], env))
+        arg = node["argument"]
+        if arg is not None:
+            raise _JSReturn(self._eval(arg, env))
         raise _RETURN_UNDEFINED
 
     def _exec_throw_statement(self, node, env):
@@ -4103,7 +4109,7 @@ class Interpreter:
         args = []
         _append = args.append
         for arg in arg_nodes:
-            if arg.get("type") == "SpreadElement":
+            if arg["type"] == "SpreadElement":
                 value = self._eval(arg, env)
                 it = self._get_js_iterator(value)
                 if it is not None:
@@ -4539,7 +4545,7 @@ class Interpreter:
                     _b = _eb[_name]
                     old = _b[1]
                     nv = self._to_num(old) + (1 if op=="++" else -1)
-                    new = _JS_SMALL_INTS[nv + 1] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
+                    new = _JS_SMALL_INTS[nv] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
                     _b[1] = new
                     return old if not prefix else new
                 _e = _e.parent
@@ -4549,7 +4555,7 @@ class Interpreter:
             prop = self._eval(arg["property"], env) if arg["computed"] else arg["property"]["name"]
             old = self._get_prop(obj, prop)
             nv = self._to_num(old) + (1 if op=="++" else -1)
-            new = _JS_SMALL_INTS[nv + 1] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
+            new = _JS_SMALL_INTS[nv] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
             self._set_prop(obj, prop, new)
             return old if not prefix else new
         return UNDEFINED
@@ -4609,11 +4615,15 @@ class Interpreter:
         obj = self._eval(node["object"], env)
         if node.get("optional") and self._is_nullish(obj):
             return UNDEFINED
-        if obj.type in ('null', 'undefined'):
+        _otype = obj.type
+        if _otype == 'null' or _otype == 'undefined':
             prop_name = node["property"].get("name", "?") if not node["computed"] else "?"
             raise _JSError(self._make_js_error('TypeError',
-                f"Cannot read properties of {obj.type} (reading '{prop_name}')"))
-        prop = self._eval(node["property"], env) if node["computed"] else node["property"]["name"]
+                f"Cannot read properties of {_otype} (reading '{prop_name}')"))
+        if node["computed"]:
+            prop = self._eval(node["property"], env)
+        else:
+            prop = node["property"]["name"]
         return self._get_prop(obj, prop)
 
     def _eval_call_expression(self, node, env):

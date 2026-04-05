@@ -20,13 +20,13 @@ class Environment:
         self.parent = parent
         self.bindings: Dict[str, Any] = {}       # name -> (keyword, JsValue)
         self._this = UNDEFINED
-        self._fn_args: List[JsValue] = []
+        self._fn_args = None
         self._is_arrow: bool = False
         self._is_fn_env: bool = False
         self._generator = None
         self._fn_val = None
         self._strict: bool = parent._strict if parent else False
-        self._using_stack = None  # list of (val, sym_key, is_async) for `using` declarations
+        self._using_stack = None
 
     def declare(self, name, value, keyword='var'):
         if _TRACE_ACTIVE[0]:
