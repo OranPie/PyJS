@@ -1873,7 +1873,37 @@ class Interpreter:
                 if cb:
                     result = []
                     _rap = result.append
-                    if not _TRACE_ACTIVE[0]:
+                    # Try ultra-tight loop for simple arrow callbacks
+                    _fam = None
+                    if cb.type == 'function':
+                        _m = cb.value.get('__meta__')
+                        if _m and _m[0] and _m[6] is not None and _m[7] is not None and not _m[2]:
+                            _fam = (_m[6][0], _m[7], _m[8], cb.value['env'])
+                    if _fam is not None and not _TRACE_ACTIVE[0]:
+                        _fr, _spn, _np, _cenv = _fam
+                        interp._call_depth += 1
+                        _prev_env = interp.env
+                        try:
+                            for i, x in enumerate(a):
+                                _ce = Environment(_cenv)
+                                _ce._is_arrow = True
+                                _ce._is_fn_env = True
+                                _b = _ce.bindings
+                                _b[_spn[0]] = ['var', x]
+                                if _np > 1: _b[_spn[1]] = ['var', _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)]
+                                if _np > 2: _b[_spn[2]] = ['var', arr]
+                                interp.env = _ce
+                                if _fr is not None:
+                                    try:
+                                        _rap(_fr['__eh__'](_fr, _ce))
+                                    except KeyError:
+                                        _rap(interp._eval(_fr, _ce))
+                                else:
+                                    _rap(UNDEFINED)
+                        finally:
+                            interp._call_depth -= 1
+                            interp.env = _prev_env
+                    elif not _TRACE_ACTIVE[0]:
                         interp._call_depth += 1
                         try:
                             for i,x in enumerate(a):
@@ -1890,7 +1920,49 @@ class Interpreter:
             if name == 'filter':
                 cb = args[0] if args else None
                 if cb:
-                    if not _TRACE_ACTIVE[0]:
+                    _fam = None
+                    if cb.type == 'function':
+                        _m = cb.value.get('__meta__')
+                        if _m and _m[0] and _m[6] is not None and _m[7] is not None and not _m[2]:
+                            _fam = (_m[6][0], _m[7], _m[8], cb.value['env'])
+                    if _fam is not None and not _TRACE_ACTIVE[0]:
+                        _fr, _spn, _np, _cenv = _fam
+                        result = []
+                        _rap = result.append
+                        interp._call_depth += 1
+                        _prev_env = interp.env
+                        try:
+                            for i, x in enumerate(a):
+                                _ce = Environment(_cenv)
+                                _ce._is_arrow = True
+                                _ce._is_fn_env = True
+                                _b = _ce.bindings
+                                _b[_spn[0]] = ['var', x]
+                                if _np > 1: _b[_spn[1]] = ['var', _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)]
+                                if _np > 2: _b[_spn[2]] = ['var', arr]
+                                interp.env = _ce
+                                if _fr is not None:
+                                    try:
+                                        _rv = _fr['__eh__'](_fr, _ce)
+                                    except KeyError:
+                                        _rv = interp._eval(_fr, _ce)
+                                else:
+                                    _rv = UNDEFINED
+                                _rtype = _rv.type
+                                if _rtype == 'boolean':
+                                    if _rv.value: _rap(x)
+                                elif _rtype == 'number':
+                                    _nv = _rv.value
+                                    if _nv != 0 and _nv == _nv: _rap(x)
+                                elif _rtype == 'string':
+                                    if _rv.value: _rap(x)
+                                elif _rtype != 'undefined' and _rtype != 'null':
+                                    _rap(x)
+                        finally:
+                            interp._call_depth -= 1
+                            interp.env = _prev_env
+                        return py_to_js(result)
+                    elif not _TRACE_ACTIVE[0]:
                         interp._call_depth += 1
                         try:
                             result = [x for i,x in enumerate(a)
@@ -1912,7 +1984,37 @@ class Interpreter:
                     start_idx = 1
                 else:
                     raise _JSError(py_to_js('Reduce of empty array with no initial value'))
-                if not _TRACE_ACTIVE[0]:
+                _fam = None
+                if cb and cb.type == 'function':
+                    _m = cb.value.get('__meta__')
+                    if _m and _m[0] and _m[6] is not None and _m[7] is not None and not _m[2]:
+                        _fam = (_m[6][0], _m[7], _m[8], cb.value['env'])
+                if _fam is not None and not _TRACE_ACTIVE[0]:
+                    _fr, _spn, _np, _cenv = _fam
+                    interp._call_depth += 1
+                    _prev_env = interp.env
+                    try:
+                        for i in range(start_idx, len(a)):
+                            _ce = Environment(_cenv)
+                            _ce._is_arrow = True
+                            _ce._is_fn_env = True
+                            _b = _ce.bindings
+                            _b[_spn[0]] = ['var', acc]
+                            if _np > 1: _b[_spn[1]] = ['var', a[i]]
+                            if _np > 2: _b[_spn[2]] = ['var', _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)]
+                            if _np > 3: _b[_spn[3]] = ['var', arr]
+                            interp.env = _ce
+                            if _fr is not None:
+                                try:
+                                    acc = _fr['__eh__'](_fr, _ce)
+                                except KeyError:
+                                    acc = interp._eval(_fr, _ce)
+                            else:
+                                acc = UNDEFINED
+                    finally:
+                        interp._call_depth -= 1
+                        interp.env = _prev_env
+                elif not _TRACE_ACTIVE[0]:
                     interp._call_depth += 1
                     try:
                         for i in range(start_idx, len(a)):
