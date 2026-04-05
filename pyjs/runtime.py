@@ -1871,15 +1871,32 @@ class Interpreter:
                 cb = args[0] if args else None
                 if cb:
                     result = []
-                    for i,x in enumerate(a):
-                        result.append(interp._call_js(cb, [x, JsValue("number",i), arr], None))
+                    _rap = result.append
+                    if not _TRACE_ACTIVE[0]:
+                        interp._call_depth += 1
+                        try:
+                            for i,x in enumerate(a):
+                                _rap(interp._call_js_impl(cb, [x, JsValue("number",i), arr], None))
+                        finally:
+                            interp._call_depth -= 1
+                    else:
+                        for i,x in enumerate(a):
+                            _rap(interp._call_js(cb, [x, JsValue("number",i), arr], None))
                     return py_to_js(result)
                 return py_to_js([])
             if name == 'filter':
                 cb = args[0] if args else None
                 if cb:
-                    result = [x for i,x in enumerate(a)
-                              if interp._truthy(interp._call_js(cb,[x,JsValue("number",i),arr],None))]
+                    if not _TRACE_ACTIVE[0]:
+                        interp._call_depth += 1
+                        try:
+                            result = [x for i,x in enumerate(a)
+                                      if interp._truthy(interp._call_js_impl(cb,[x,JsValue("number",i),arr],None))]
+                        finally:
+                            interp._call_depth -= 1
+                    else:
+                        result = [x for i,x in enumerate(a)
+                                  if interp._truthy(interp._call_js(cb,[x,JsValue("number",i),arr],None))]
                     return py_to_js(result)
                 return py_to_js([])
             if name == 'reduce':
@@ -1892,8 +1909,16 @@ class Interpreter:
                     start_idx = 1
                 else:
                     raise _JSError(py_to_js('Reduce of empty array with no initial value'))
-                for i in range(start_idx, len(a)):
-                    acc = interp._call_js(cb, [acc, a[i], JsValue("number",i), arr], None)
+                if not _TRACE_ACTIVE[0]:
+                    interp._call_depth += 1
+                    try:
+                        for i in range(start_idx, len(a)):
+                            acc = interp._call_js_impl(cb, [acc, a[i], JsValue("number",i), arr], None)
+                    finally:
+                        interp._call_depth -= 1
+                else:
+                    for i in range(start_idx, len(a)):
+                        acc = interp._call_js(cb, [acc, a[i], JsValue("number",i), arr], None)
                 return acc
             if name == 'find':
                 cb = args[0] if args else None
@@ -5873,6 +5898,29 @@ class Interpreter:
                 body_stmts = body.get("body", []) if isinstance(body, dict) and body.get("type") == "BlockStatement" else []
                 _fast_return = None
                 _simple_param_names = None
+            # Ultra-fast path: simple arrow with fast-return (e.g., (a, b) => a + b)
+            # Skips: generator check, super_proto, is_new_call, hoisting, strict, promise
+            if _is_arrow and _fast_return is not None and _simple_param_names is not None and not _is_async:
+                _fr_arg = _fast_return[0]
+                call_env = Environment(info["env"])
+                call_env._this = this_val if this_val is not None else UNDEFINED
+                call_env._is_arrow = True
+                call_env._is_fn_env = True
+                _bindings = call_env.bindings
+                _nargs = len(args)
+                _nparam = len(_simple_param_names)
+                if _nargs >= _nparam:
+                    for _idx, _pname in enumerate(_simple_param_names):
+                        _bindings[_pname] = ['var', args[_idx]]
+                else:
+                    for _idx, _pname in enumerate(_simple_param_names):
+                        _bindings[_pname] = ['var', args[_idx] if _idx < _nargs else UNDEFINED]
+                _prev_env = self.env
+                self.env = call_env
+                try:
+                    return self._eval(_fr_arg, call_env) if _fr_arg is not None else UNDEFINED
+                finally:
+                    self.env = _prev_env
             # Generator function — return generator object immediately
             if _is_gen:
                 if _is_async:
