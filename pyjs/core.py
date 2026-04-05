@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any
 
-from .trace import get_logger, TRACE
+from .trace import get_logger, TRACE, _any_enabled as _TRACE_ACTIVE
 
 _log = get_logger("coerce")
 
@@ -26,12 +26,23 @@ _JS_SMALL_INTS: dict = {}  # interned number JsValues for integers -1..255
 _JS_NAN = None
 _JS_POS_INF = None
 _JS_NEG_INF = None
+_JsValue = None  # resolved reference to JsValue class (set by _init_number_cache)
+_UNDEFINED = None  # resolved reference to UNDEFINED singleton
+_JS_NULL_REF = None  # resolved reference to JS_NULL singleton
+_JS_TRUE_REF = None  # resolved reference to JS_TRUE singleton
+_JS_FALSE_REF = None  # resolved reference to JS_FALSE singleton
 
 
 def _init_number_cache():
-    """Populate the small integer cache and special float singletons."""
-    global _JS_NAN, _JS_POS_INF, _JS_NEG_INF
-    JsValue = _js_value_class()
+    """Populate the small integer cache, special float singletons, and resolve class refs."""
+    global _JS_NAN, _JS_POS_INF, _JS_NEG_INF, _JsValue
+    global _UNDEFINED, _JS_NULL_REF, _JS_TRUE_REF, _JS_FALSE_REF
+    from .values import JsValue, UNDEFINED, JS_NULL, JS_TRUE, JS_FALSE
+    _JsValue = JsValue
+    _UNDEFINED = UNDEFINED
+    _JS_NULL_REF = JS_NULL
+    _JS_TRUE_REF = JS_TRUE
+    _JS_FALSE_REF = JS_FALSE
     for i in range(-1, 256):
         _JS_SMALL_INTS[i] = JsValue("number", float(i))
     _JS_NAN = JsValue("number", float('nan'))
@@ -41,86 +52,47 @@ def _init_number_cache():
 
 def py_to_js(val: Any):
     """Convert a Python value to a JsValue."""
-    JsValue = _js_value_class()
-    if isinstance(val, JsValue):
+    if isinstance(val, _JsValue):
         return val
     if val is None:
-        result = JsValue("null", None)
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "py_to_js(%s) → %s", type(val).__name__, result.type)
-        return result
+        return _JS_NULL_REF
     if isinstance(val, bool):
-        result = JsValue("boolean", val)
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "py_to_js(%s) → %s", type(val).__name__, result.type)
-        return result
-    if isinstance(val, int) and not isinstance(val, bool):
-        if _JS_SMALL_INTS and -1 <= val <= 255:
+        return _JS_TRUE_REF if val else _JS_FALSE_REF
+    if isinstance(val, int):
+        if -1 <= val <= 255:
             return _JS_SMALL_INTS[val]
-        result = JsValue("number", float(val))
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "py_to_js(%s) → %s", type(val).__name__, result.type)
-        return result
+        return _JsValue("number", float(val))
     if isinstance(val, float):
-        if _JS_NAN is not None:
-            if math.isnan(val):
-                return _JS_NAN
-            if math.isinf(val):
-                return _JS_POS_INF if val > 0 else _JS_NEG_INF
-            ival = int(val)
-            if val == ival and -1 <= ival <= 255:
-                return _JS_SMALL_INTS[ival]
-        result = JsValue("number", val)
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "py_to_js(%s) → %s", type(val).__name__, result.type)
-        return result
+        if val != val:  # NaN check (faster than math.isnan)
+            return _JS_NAN
+        if math.isinf(val):
+            return _JS_POS_INF if val > 0 else _JS_NEG_INF
+        ival = int(val)
+        if val == ival and -1 <= ival <= 255:
+            return _JS_SMALL_INTS[ival]
+        return _JsValue("number", val)
     if isinstance(val, str):
-        result = JsValue("string", val)
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "py_to_js(%s) → %s", type(val).__name__, result.type)
-        return result
+        return _JsValue("string", val)
     if isinstance(val, list):
-        result = JsValue("array", [py_to_js(v) for v in val])
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "py_to_js(%s) → %s", type(val).__name__, result.type)
-        return result
+        return _JsValue("array", [py_to_js(v) for v in val])
     if isinstance(val, dict):
-        result = JsValue("object", {k: py_to_js(v) for k, v in val.items()})
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "py_to_js(%s) → %s", type(val).__name__, result.type)
-        return result
-    result = JsValue("undefined", None)
-    if _log.isEnabledFor(TRACE):
-        _log.log(TRACE, "py_to_js(%s) → %s", type(val).__name__, result.type)
-    return result
+        return _JsValue("object", {k: py_to_js(v) for k, v in val.items()})
+    return _UNDEFINED
 
 
 def js_to_py(val: 'JsValue'):
     """Convert a JsValue to a plain Python value."""
-    if val.type in ("null", "undefined"):
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "js_to_py(%s) → None", val.type)
-        return None
-    if val.type == "boolean":
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "js_to_py(%s) → bool", val.type)
+    t = val.type
+    if t == "number":
+        return val.value
+    if t == "string":
+        return val.value
+    if t == "boolean":
         return bool(val.value)
-    if val.type == "number":
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "js_to_py(%s) → float", val.type)
-        return val.value
-    if val.type == "string":
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "js_to_py(%s) → str", val.type)
-        return val.value
-    if val.type == "array":
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "js_to_py(%s) → list", val.type)
+    if t in ("null", "undefined"):
+        return None
+    if t == "array":
         return [js_to_py(v) for v in val.value]
-    if val.type == "object":
-        if _log.isEnabledFor(TRACE):
-            _log.log(TRACE, "js_to_py(%s) → dict", val.type)
+    if t == "object":
         return {k: js_to_py(v) for k, v in val.value.items()}
-    if _log.isEnabledFor(TRACE):
-        _log.log(TRACE, "js_to_py(%s) → raw", val.type)
     return val.value

@@ -26,6 +26,7 @@ from .values import (
     SYMBOL_IS_CONCAT_SPREADABLE, SYMBOL_DISPOSE, SYMBOL_ASYNC_DISPOSE,
     _symbol_id_counter, _symbol_registry,
     _js_regex_to_python,
+    SK_ITERATOR, SK_HAS_INSTANCE, SK_ASYNC_ITERATOR,
 )
 
 _log = get_logger("scope")
@@ -498,7 +499,7 @@ def register_advanced_builtins(interp, g, intr):
                     val = _items[_idx[0]]; _idx[0] += 1
                     return JsValue('object', {'value': val, 'done': JS_FALSE})
                 it_obj.value['next'] = i._make_intrinsic(_next, 'MapIterator.next')
-                sym_k = f"@@{SYMBOL_ITERATOR}@@"
+                sym_k = SK_ITERATOR
                 it_obj.value[sym_k] = i._make_intrinsic(lambda tv, a2, intp, it=it_obj: it, '[Symbol.iterator]')
                 i._add_iterator_helpers(it_obj)
                 return it_obj
@@ -506,7 +507,7 @@ def register_advanced_builtins(interp, g, intr):
         map_obj.value['keys'] = _make_map_iter_fn(lambda: [key for key, _ in store])
         map_obj.value['values'] = _make_map_iter_fn(lambda: [value for _, value in store])
         map_obj.value['entries'] = _make_map_iter_fn(lambda: [JsValue('array', [key, value]) for key, value in store])
-        map_obj.value[f"@@{SYMBOL_ITERATOR}@@"] = _make_map_iter_fn(lambda: [JsValue('array', [key, value]) for key, value in store])
+        map_obj.value[SK_ITERATOR] = _make_map_iter_fn(lambda: [JsValue('array', [key, value]) for key, value in store])
         def _map_for_each(args, interp):
             callback = args[0] if args else UNDEFINED
             this_arg = args[1] if len(args) > 1 else UNDEFINED
@@ -571,7 +572,7 @@ def register_advanced_builtins(interp, g, intr):
                     val = _items[_idx[0]]; _idx[0] += 1
                     return JsValue('object', {'value': val, 'done': JS_FALSE})
                 it_obj.value['next'] = i._make_intrinsic(_next, 'SetIterator.next')
-                sym_k = f"@@{SYMBOL_ITERATOR}@@"
+                sym_k = SK_ITERATOR
                 it_obj.value[sym_k] = i._make_intrinsic(lambda tv, a2, intp, it=it_obj: it, '[Symbol.iterator]')
                 i._add_iterator_helpers(it_obj)
                 return it_obj
@@ -579,7 +580,7 @@ def register_advanced_builtins(interp, g, intr):
         set_obj.value['values'] = _make_set_iter_fn(lambda: list(store))
         set_obj.value['keys'] = _make_set_iter_fn(lambda: list(store))
         set_obj.value['entries'] = _make_set_iter_fn(lambda: [JsValue('array', [v, v]) for v in store])
-        set_obj.value[f"@@{SYMBOL_ITERATOR}@@"] = _make_set_iter_fn(lambda: list(store))
+        set_obj.value[SK_ITERATOR] = _make_set_iter_fn(lambda: list(store))
 
         def _set_for_each(args, interp):
             callback = args[0] if args else UNDEFINED

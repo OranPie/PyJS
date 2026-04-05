@@ -24,6 +24,7 @@ from .values import (
     SYMBOL_IS_CONCAT_SPREADABLE,
     _symbol_id_counter, _symbol_registry,
     _js_regex_to_python,
+    SK_ITERATOR, SK_TO_STRING_TAG, SK_HAS_INSTANCE, SK_ASYNC_ITERATOR,
 )
 
 _log = get_logger("scope")
@@ -319,7 +320,7 @@ def register_object_builtins(interp, g, intr):
         if target.type == 'regexp': return py_to_js('[object RegExp]')
         if target.type in ('object',):
             # Check Symbol.toStringTag via full property access (walks proto chain + getters)
-            tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
+            tag_key = SK_TO_STRING_TAG
             tag = interp._get_prop(target, tag_key)
             if tag and isinstance(tag, JsValue) and tag.type == 'string':
                 return py_to_js(f'[object {tag.value}]')
@@ -544,7 +545,7 @@ def register_object_builtins(interp, g, intr):
 
         # Handle async iterables (Symbol.asyncIterator)
         if src.type in ('object', 'function') and isinstance(src.value, dict):
-            sym_async_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+            sym_async_key = SK_ASYNC_ITERATOR
             async_iter_fn = src.value.get(sym_async_key)
             if async_iter_fn and interp._is_callable(async_iter_fn):
                 iterator = interp._call_js(async_iter_fn, [], src)
@@ -929,7 +930,7 @@ def register_object_builtins(interp, g, intr):
             return JsValue('number', float('nan'))
     date_ctor.value['UTC'] = interp._make_intrinsic(_date_utc, 'Date.UTC')
     # Symbol.hasInstance: instanceof Date checks __kind__ == 'Date'
-    _date_hi_key = f"@@{SYMBOL_HAS_INSTANCE}@@"
+    _date_hi_key = SK_HAS_INSTANCE
     def _date_has_instance(this_val, args, interp):
         val = args[0] if args else UNDEFINED
         if val.type == 'object' and isinstance(val.value, dict):

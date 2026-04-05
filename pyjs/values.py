@@ -53,6 +53,21 @@ SYMBOL_ASYNC_DISPOSE      = 13
 _symbol_id_counter = [11]  # incremented for each new Symbol()
 _symbol_registry   = {}    # for Symbol.for()
 
+# Pre-computed @@N@@ symbol key strings for hot-path property access
+SK_ITERATOR           = f"@@{SYMBOL_ITERATOR}@@"
+SK_TO_PRIMITIVE       = f"@@{SYMBOL_TO_PRIMITIVE}@@"
+SK_HAS_INSTANCE       = f"@@{SYMBOL_HAS_INSTANCE}@@"
+SK_TO_STRING_TAG      = f"@@{SYMBOL_TO_STRING_TAG}@@"
+SK_ASYNC_ITERATOR     = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+SK_SPECIES            = f"@@{SYMBOL_SPECIES}@@"
+SK_MATCH              = f"@@{SYMBOL_MATCH}@@"
+SK_REPLACE            = f"@@{SYMBOL_REPLACE}@@"
+SK_SPLIT              = f"@@{SYMBOL_SPLIT}@@"
+SK_SEARCH             = f"@@{SYMBOL_SEARCH}@@"
+SK_IS_CONCAT_SPREADABLE = f"@@{SYMBOL_IS_CONCAT_SPREADABLE}@@"
+SK_DISPOSE            = f"@@{SYMBOL_DISPOSE}@@"
+SK_ASYNC_DISPOSE      = f"@@{SYMBOL_ASYNC_DISPOSE}@@"
+
 # Populate the small-integer / NaN / Inf number cache now that JsValue exists
 from .core import _init_number_cache as _init_nc  # noqa: E402
 _init_nc()

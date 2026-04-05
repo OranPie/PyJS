@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from .core import JSTypeError, js_to_py, py_to_js
+from .core import JSTypeError, js_to_py, py_to_js, _JS_SMALL_INTS, _JS_NAN, _JS_POS_INF, _JS_NEG_INF
 from .plugin import PyJSPlugin, PluginContext
 from .lexer import Lexer
 from .parser import N, Parser
@@ -31,6 +31,10 @@ from .values import (
     SYMBOL_IS_CONCAT_SPREADABLE, SYMBOL_DISPOSE, SYMBOL_ASYNC_DISPOSE,
     _symbol_id_counter, _symbol_registry,
     _js_regex_to_python,
+    SK_ITERATOR, SK_TO_PRIMITIVE, SK_HAS_INSTANCE,
+    SK_TO_STRING_TAG, SK_ASYNC_ITERATOR, SK_SPECIES,
+    SK_MATCH, SK_REPLACE, SK_SPLIT, SK_SEARCH,
+    SK_IS_CONCAT_SPREADABLE, SK_DISPOSE, SK_ASYNC_DISPOSE,
 )
 from .environment import Environment
 from .exceptions import _JSBreak, _JSContinue, _JSReturn, _JSError, flatten_one
@@ -721,11 +725,15 @@ class Interpreter:
     def _truthy(self, v: JsValue) -> bool:
         t = v.type
         if t == 'boolean': return v.value
-        if t == 'number': return v.value != 0 and not (isinstance(v.value, float) and v.value != v.value)
+        if t == 'number': return v.value != 0 and v.value == v.value
         if t == 'string': return len(v.value) > 0
         if t == 'undefined' or t == 'null': return False
         if t == 'bigint': return v.value != 0
         return True  # objects, arrays, functions are truthy
+
+    def _to_bool(self, v: JsValue) -> JsValue:
+        """Convert a JS value to a boolean JsValue (for Boolean() constructor)."""
+        return JS_TRUE if self._truthy(v) else JS_FALSE
 
     def _to_num(self, v: JsValue) -> float:
         t = v.type
@@ -798,7 +806,7 @@ class Interpreter:
                 if isinstance(kind, JsValue) and kind.value == 'Generator':
                     return '[object Generator]'
                 # Check Symbol.toStringTag
-                tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
+                tag_key = SK_TO_STRING_TAG
                 tag = v.value.get(tag_key)
                 if tag and isinstance(tag, JsValue) and tag.type == 'string':
                     return f'[object {tag.value}]'
@@ -816,7 +824,7 @@ class Interpreter:
         if val.type in ('undefined','null','boolean','number','string','bigint','symbol'):
             return val
         # Check Symbol.toPrimitive via full prototype chain
-        sym_key = f"@@{SYMBOL_TO_PRIMITIVE}@@"
+        sym_key = SK_TO_PRIMITIVE
         tp_fn = self._get_prop(val, sym_key) if val.type in ('object','function','intrinsic','class','array') else None
         if tp_fn and tp_fn.type not in ('undefined','null'):
             result = self._call_js(tp_fn, [py_to_js(hint)], val)
@@ -837,7 +845,6 @@ class Interpreter:
         if val.type == 'array':
             return py_to_js(','.join(self._to_str(el) for el in val.value))
         return py_to_js('[object Object]')
-        return js_to_py(v)
 
     def _from_py(self, val):
         return py_to_js(val)
@@ -1027,7 +1034,7 @@ class Interpreter:
             return (_str_next, None)
 
         if value.type in ('object', 'function', 'intrinsic', 'class'):
-            sym_key = f"@@{SYMBOL_ITERATOR}@@"
+            sym_key = SK_ITERATOR
             iter_fn = self._get_prop(value, sym_key)
             if not (iter_fn and self._is_callable(iter_fn)):
                 iter_fn = None
@@ -1051,7 +1058,7 @@ class Interpreter:
     def _get_async_iterator(self, value):
         """Returns a callable () -> Promise<{value, done}> or None."""
         if value.type in ('object', 'function', 'intrinsic', 'class'):
-            sym_async_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+            sym_async_key = SK_ASYNC_ITERATOR
             iter_fn = value.value.get(sym_async_key) if isinstance(value.value, dict) else None
             if iter_fn and self._is_callable(iter_fn):
                 iterator = self._call_js(iter_fn, [], value)
@@ -1257,7 +1264,7 @@ class Interpreter:
     def _get_prop_array(self, obj, key):
         if key == 'length':
             return JsValue("number", len(obj.value))
-        sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+        sym_iter_key = SK_ITERATOR
         if key == sym_iter_key:
             arr_ref = obj
             def _arr_iter_factory(this_val, call_args, interp):
@@ -1281,7 +1288,16 @@ class Interpreter:
             if v is not UNDEFINED:
                 return v
         if key in self.ARRAY_METHODS:
-            return self._arr_method(obj, key)
+            # Cache method intrinsics per-array to avoid re-creating closures
+            if obj.extras is None:
+                obj.extras = {}
+            cache_key = f'__m_{key}'
+            cached = obj.extras.get(cache_key)
+            if cached is not None:
+                return cached
+            method = self._arr_method(obj, key)
+            obj.extras[cache_key] = method
+            return method
         try:
             idx = int(key)
             if 0 <= idx < len(obj.value):
@@ -1294,12 +1310,15 @@ class Interpreter:
         proto_val = self._array_proto.value.get(key)
         if proto_val is not None:
             if isinstance(proto_val, JsValue) and proto_val.type in ('function', 'intrinsic'):
-                # Bind method to this array
-                proto_val_ref = proto_val
-                return self._make_intrinsic(
-                    lambda tv, a, i, fn=proto_val_ref: i._call_js(fn, a, tv),
+                # Cache bound proto method wrapper on the array
+                if obj.extras is None:
+                    obj.extras = {}
+                bound = self._make_intrinsic(
+                    lambda tv, a, i, fn=proto_val: i._call_js(fn, a, tv),
                     key
                 )
+                obj.extras[key] = bound
+                return bound
             return proto_val
         plugin_key = ('array', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
@@ -1310,7 +1329,7 @@ class Interpreter:
     def _get_prop_string(self, obj, key):
         if key == 'length':
             return JsValue("number", len(obj.value))
-        sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+        sym_iter_key = SK_ITERATOR
         if key == sym_iter_key:
             chars = list(obj.value)
             def _str_iter_factory(this_val, call_args, interp):
@@ -1476,7 +1495,7 @@ class Interpreter:
             return self._make_intrinsic(lambda tv, a, i: tv, 'Object.valueOf')
         if key == 'toString' and obj.type == 'object':
             def _obj_to_string(tv, a, interp):
-                tag_key = f"@@{SYMBOL_TO_STRING_TAG}@@"
+                tag_key = SK_TO_STRING_TAG
                 # Use _get_prop to walk prototype chain and invoke getters
                 tag = interp._get_prop(tv, tag_key) if isinstance(tv, JsValue) and tv.type not in ('null','undefined') else UNDEFINED
                 if isinstance(tag, JsValue) and tag.type == 'string':
@@ -1607,7 +1626,8 @@ class Interpreter:
 
     def _get_prop(self, obj: JsValue, prop):
         key = self._to_key(prop)
-        _log_prop.debug("get %s.%s", obj.type, key)
+        if _TRACE_ACTIVE[0]:
+            _log_prop.debug("get %s.%s", obj.type, key)
         if getattr(self, '_global_object', None) is obj and self.genv.has(key):
             return self.genv.get(key)
         if obj.type == 'proxy':
@@ -1630,7 +1650,8 @@ class Interpreter:
 
     def _set_prop(self, obj: JsValue, prop, val: JsValue):
         key = self._to_key(prop)
-        _log_prop.debug("set %s.%s", obj.type, key)
+        if _TRACE_ACTIVE[0]:
+            _log_prop.debug("set %s.%s", obj.type, key)
         if getattr(self, '_global_object', None) is obj and self.genv.has(key):
             self.genv.set(key, val)
             self._sync_global_binding(key, val, self.genv)
@@ -1796,7 +1817,7 @@ class Interpreter:
             if name == 'concat':
                 result = list(a)
                 for item in args:
-                    sym_ics_key = f"@@{SYMBOL_IS_CONCAT_SPREADABLE}@@"
+                    sym_ics_key = SK_IS_CONCAT_SPREADABLE
                     if isinstance(item.value, dict) and sym_ics_key in item.value:
                         is_spreadable = interp._truthy(item.value[sym_ics_key])
                     else:
@@ -2006,7 +2027,7 @@ class Interpreter:
             if name in ('keys', 'values', 'entries'):
                 items = list(a)
                 idx = [0]
-                sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+                sym_iter_key = SK_ITERATOR
                 iter_obj = JsValue('object', {})
                 def _make_iter_next(items=items, idx=idx, kind=name):
                     def _next(tv, nargs, ni):
@@ -2090,7 +2111,7 @@ class Interpreter:
                 lim_jsval = args[1] if len(args) > 1 else UNDEFINED
                 str_jsval = JsValue('string', s)
                 # Symbol.split delegation
-                sym_split_key = f"@@{SYMBOL_SPLIT}@@"
+                sym_split_key = SK_SPLIT
                 if isinstance(sep_arg.value, dict) and sym_split_key in sep_arg.value:
                     method = sep_arg.value[sym_split_key]
                     return interp._call_js(method, [str_jsval, lim_jsval], sep_arg)
@@ -2127,7 +2148,7 @@ class Interpreter:
                 repl_arg = args[1] if len(args) > 1 else UNDEFINED
                 str_jsval = JsValue('string', s)
                 # Symbol.replace delegation
-                sym_replace_key = f"@@{SYMBOL_REPLACE}@@"
+                sym_replace_key = SK_REPLACE
                 if isinstance(pat_arg.value, dict) and sym_replace_key in pat_arg.value:
                     method = pat_arg.value[sym_replace_key]
                     return interp._call_js(method, [str_jsval, repl_arg], pat_arg)
@@ -2290,7 +2311,7 @@ class Interpreter:
                 pat_arg = args[0] if args else UNDEFINED
                 str_jsval = JsValue('string', s)
                 # Symbol.match delegation
-                sym_match_key = f"@@{SYMBOL_MATCH}@@"
+                sym_match_key = SK_MATCH
                 if isinstance(pat_arg.value, dict) and sym_match_key in pat_arg.value:
                     method = pat_arg.value[sym_match_key]
                     return interp._call_js(method, [str_jsval], pat_arg)
@@ -2374,7 +2395,7 @@ class Interpreter:
             if name == 'search':
                 pat_arg = args[0] if args else UNDEFINED
                 # Symbol.search delegation
-                sym_search_key = f"@@{SYMBOL_SEARCH}@@"
+                sym_search_key = SK_SEARCH
                 if isinstance(pat_arg.value, dict) and sym_search_key in pat_arg.value:
                     method = pat_arg.value[sym_search_key]
                     return interp._call_js(method, [JsValue('string', s)], pat_arg)
@@ -2694,7 +2715,7 @@ class Interpreter:
                 raw = _ta_coerce(jsv, _fmt, self)
             struct.pack_into('=' + _fmt, _buf, _off + idx * _itemsize, raw)
 
-        sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+        sym_iter_key = SK_ITERATOR
         if name == sym_iter_key:
             def _iter_factory(this_val, args, interp, _r=_read, _len=length):
                 idx = [0]
@@ -4049,7 +4070,7 @@ class Interpreter:
 
     def _exec(self, node, env=None):
         if env is None: env = self.env
-        if _TRACE_ACTIVE[0] or (_log_exec.level and _log_exec.level <= 10):
+        if _TRACE_ACTIVE[0]:
             _log_exec.debug("exec %s", node["type"])
         handler = self._EXEC_DISPATCH.get(node["type"])
         if handler:
@@ -4081,9 +4102,23 @@ class Interpreter:
 
     def _eval_literal(self, node, env):
         kind = node.get("raw", "undefined")
+        val = node["value"]
+        if val is None:
+            return JS_NULL if kind == "null" else UNDEFINED
         if kind == "bigint":
-            return JsValue('bigint', node["value"])
-        return JsValue(kind, node["value"]) if node["value"] is not None else (JS_NULL if kind=="null" else UNDEFINED)
+            return JsValue('bigint', val)
+        if kind == "number":
+            # Use cached singletons for common numbers
+            if isinstance(val, float):
+                if val != val:
+                    return _JS_NAN
+                ival = int(val)
+                if val == ival and -1 <= ival <= 255:
+                    return _JS_SMALL_INTS[ival]
+            return JsValue('number', val)
+        if kind == "boolean":
+            return JS_TRUE if val else JS_FALSE
+        return JsValue(kind, val)
 
     def _eval_regex_literal(self, node, env):
         return self._make_regexp_val(node["source"], node.get("flags", ""))
@@ -4248,20 +4283,39 @@ class Interpreter:
         # Fast path: number op number (the overwhelmingly common case)
         if l.type == 'number' and r.type == 'number':
             lv, rv = l.value, r.value
-            if op == '+': return JsValue('number', lv + rv)
-            if op == '-': return JsValue('number', lv - rv)
-            if op == '*': return JsValue('number', lv * rv)
+            if op == '+':
+                result = lv + rv
+                ival = int(result)
+                if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
+                return JsValue('number', result)
+            if op == '-':
+                result = lv - rv
+                ival = int(result)
+                if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
+                return JsValue('number', result)
+            if op == '*':
+                result = lv * rv
+                ival = int(result)
+                if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
+                return JsValue('number', result)
             if op == '/':
                 if rv == 0:
-                    if lv == 0 or (isinstance(lv, float) and lv != lv):
-                        return JsValue('number', float('nan'))
-                    return JsValue('number', math.copysign(float('inf'), lv))
-                return JsValue('number', lv / rv)
+                    if lv == 0 or lv != lv:
+                        return _JS_NAN
+                    return _JS_POS_INF if lv > 0 else _JS_NEG_INF
+                result = lv / rv
+                ival = int(result)
+                if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
+                return JsValue('number', result)
             if op == '%':
-                if rv == 0 or (isinstance(lv, float) and lv != lv):
-                    return JsValue('number', float('nan'))
+                if rv == 0 or lv != lv:
+                    return _JS_NAN
                 return JsValue('number', math.fmod(lv, rv))
-            if op == '**': return JsValue('number', lv ** rv)
+            if op == '**':
+                result = lv ** rv
+                ival = int(result)
+                if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
+                return JsValue('number', result)
             if op == '<':  return JS_TRUE if lv < rv else JS_FALSE
             if op == '>':  return JS_TRUE if lv > rv else JS_FALSE
             if op == '<=': return JS_TRUE if lv <= rv else JS_FALSE
@@ -4315,7 +4369,7 @@ class Interpreter:
         if op == "instanceof":
             # ES spec: check Symbol.hasInstance first
             if r.type in ("function", "intrinsic", "class") and isinstance(r.value, dict):
-                _hi_key = f"@@{SYMBOL_HAS_INSTANCE}@@"
+                _hi_key = SK_HAS_INSTANCE
                 _hi_fn = r.value.get(_hi_key)
                 if isinstance(_hi_fn, JsValue) and _hi_fn.type in ('function', 'intrinsic'):
                     result = self._call_js(_hi_fn, [l], r)
@@ -4773,7 +4827,7 @@ class Interpreter:
 
     def _eval(self, node, env=None):
         if env is None: env = self.env
-        if _TRACE_ACTIVE[0] or (_log_eval.level and _log_eval.level <= 10):
+        if _TRACE_ACTIVE[0]:
             _log_eval.debug("eval %s", node["type"])
         handler = self._EVAL_DISPATCH.get(node["type"])
         if handler:
@@ -4926,7 +4980,7 @@ class Interpreter:
                         return UNDEFINED, True
                     i = idx[0]; idx[0] += 1
                     mapped = self._call_js(fn, [val, py_to_js(i)], None)
-                    sub_it = self._get_prop(mapped, f"@@{SYMBOL_ITERATOR}@@")
+                    sub_it = self._get_prop(mapped, SK_ITERATOR)
                     if isinstance(sub_it, JsValue) and sub_it.type in ('function', 'intrinsic'):
                         it_obj = self._call_js(sub_it, [], mapped)
                         if isinstance(it_obj, JsValue) and 'next' in it_obj.value:
@@ -5016,7 +5070,7 @@ class Interpreter:
         iter_obj.value['find'] = _make_intr(_find, 'Iterator.find')
         iter_obj.value['reduce'] = _make_intr(_reduce, 'Iterator.reduce')
 
-        sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+        sym_iter_key = SK_ITERATOR
         if sym_iter_key not in iter_obj.value:
             iter_obj.value[sym_iter_key] = self._make_intrinsic(
                 lambda tv, a, i: iter_obj, '[Symbol.iterator]')
@@ -5052,7 +5106,7 @@ class Interpreter:
             val = items[idx[0]]; idx[0] += 1
             return self._resolved_promise(JsValue('object', {'value': val, 'done': JS_FALSE}))
         gen_obj.value['next'] = self._make_intrinsic(_next, 'AsyncIterator.next')
-        sym_async_iter_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+        sym_async_iter_key = SK_ASYNC_ITERATOR
         gen_obj.value[sym_async_iter_key] = self._make_intrinsic(lambda tv, a, i: gen_obj, '[Symbol.asyncIterator]')
         self._add_async_iterator_helpers(gen_obj)
         return gen_obj
@@ -5101,7 +5155,7 @@ class Interpreter:
             result = []
             for i, el in enumerate(items):
                 mapped = _await_val(self._call_js(fn, [el, py_to_js(i)], None))
-                async_iter_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+                async_iter_key = SK_ASYNC_ITERATOR
                 if mapped.type == 'object' and async_iter_key in mapped.value:
                     result.extend(self._drain_async_iter(mapped))
                 else:
@@ -5170,7 +5224,7 @@ class Interpreter:
         gen_obj.value['find'] = _make_intr(_find, 'AsyncIterator.find')
         gen_obj.value['reduce'] = _make_intr(_reduce, 'AsyncIterator.reduce')
 
-        sym_async_iter_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+        sym_async_iter_key = SK_ASYNC_ITERATOR
         if sym_async_iter_key not in gen_obj.value:
             gen_obj.value[sym_async_iter_key] = self._make_intrinsic(
                 lambda tv, a, i: gen_obj, '[Symbol.asyncIterator]')
@@ -5179,7 +5233,7 @@ class Interpreter:
 
     def _make_generator_obj(self, fn_val, args, this_val=None):
         gen = JsGenerator(fn_val, args, self, this_val)
-        sym_iter_key = f"@@{SYMBOL_ITERATOR}@@"
+        sym_iter_key = SK_ITERATOR
         def _gen_next(tv, a, i):
             _val = a[0] if a else UNDEFINED
             if _log_async.isEnabledFor(TRACE):
@@ -5208,7 +5262,7 @@ class Interpreter:
 
     def _make_async_generator_obj(self, fn_val, args, this_val=None):
         gen = JsAsyncGenerator(fn_val, args, self, this_val)
-        sym_async_iter_key = f"@@{SYMBOL_ASYNC_ITERATOR}@@"
+        sym_async_iter_key = SK_ASYNC_ITERATOR
         gen_obj = JsValue('object', {
             '__kind__': JsValue('string', 'AsyncGenerator'),
             '__gen__': gen,
@@ -5221,35 +5275,42 @@ class Interpreter:
         return gen_obj
 
     def _call_js(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):
-        _log_call.debug("call %s (new=%s, nargs=%d)", fn_val.type, is_new_call, len(args))
-        fn_name = "<anonymous>"
-        if fn_val.type in ("function", "intrinsic") and isinstance(fn_val.value, dict):
-            fn_name = fn_val.value.get("name") or "<anonymous>"
-        elif fn_val.type == "class" and isinstance(fn_val.value, dict):
-            fn_name = fn_val.value.get("name") or "<class>"
-        if _log_call.isEnabledFor(TRACE):
-            arg_strs = [self._to_str(a)[:40] for a in args[:4]]
-            _log_call.log(TRACE, "→ %s(%s)", fn_name, ", ".join(arg_strs))
-        push_depth()
+        _tracing = _TRACE_ACTIVE[0]
+        if _tracing:
+            _log_call.debug("call %s (new=%s, nargs=%d)", fn_val.type, is_new_call, len(args))
         self._call_depth += 1
         if self._call_depth > self.MAX_CALL_DEPTH:
             self._call_depth -= 1
-            pop_depth()
             raise _JSError(self._make_js_error('RangeError', 'Maximum call stack size exceeded'))
-        # Push JS call stack frame for error.stack traces
-        frame = {'name': fn_name, 'file': self._module_file or '<anonymous>', 'line': 0}
-        self._js_call_stack.append(frame)
-        _call_result = None
-        try:
-            _call_result = self._call_js_impl(fn_val, args, this_val, extra_args, is_new_call)
-            return _call_result
-        finally:
-            if self._js_call_stack and self._js_call_stack[-1] is frame:
-                self._js_call_stack.pop()
-            self._call_depth -= 1
+        if _tracing:
+            fn_name = "<anonymous>"
+            if fn_val.type in ("function", "intrinsic") and isinstance(fn_val.value, dict):
+                fn_name = fn_val.value.get("name") or "<anonymous>"
+            elif fn_val.type == "class" and isinstance(fn_val.value, dict):
+                fn_name = fn_val.value.get("name") or "<class>"
             if _log_call.isEnabledFor(TRACE):
-                _log_call.log(TRACE, "← %s = %s", fn_name, self._to_str(_call_result)[:80] if _call_result is not None else "undefined")
-            pop_depth()
+                arg_strs = [self._to_str(a)[:40] for a in args[:4]]
+                _log_call.log(TRACE, "→ %s(%s)", fn_name, ", ".join(arg_strs))
+            push_depth()
+            frame = {'name': fn_name, 'file': self._module_file or '<anonymous>', 'line': 0}
+            self._js_call_stack.append(frame)
+            _call_result = None
+            try:
+                _call_result = self._call_js_impl(fn_val, args, this_val, extra_args, is_new_call)
+                return _call_result
+            finally:
+                if self._js_call_stack and self._js_call_stack[-1] is frame:
+                    self._js_call_stack.pop()
+                self._call_depth -= 1
+                if _log_call.isEnabledFor(TRACE):
+                    _log_call.log(TRACE, "← %s = %s", fn_name, self._to_str(_call_result)[:80] if _call_result is not None else "undefined")
+                pop_depth()
+        else:
+            # Fast path: no tracing overhead
+            try:
+                return self._call_js_impl(fn_val, args, this_val, extra_args, is_new_call)
+            finally:
+                self._call_depth -= 1
 
     def _call_js_impl(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):
         if fn_val.type == 'proxy':
