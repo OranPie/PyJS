@@ -3756,6 +3756,18 @@ class Interpreter:
                 if _test_op == '>=': return _val >= _test_limit
                 if _test_op == '!=': return _val != _test_limit
                 return _val != _test_limit  # !==
+        # Pre-compute single-statement body optimization
+        _single_body_stmt = None
+        if body_node.__class__ is dict and body_node.get("type") == "BlockStatement":
+            _bstmts = body_node["body"]
+            if len(_bstmts) == 1:
+                try:
+                    _si = body_node['__scope_info__']
+                except KeyError:
+                    _si = Interpreter._compute_block_scope_info(_bstmts)
+                    body_node['__scope_info__'] = _si
+                if not _si[1]:  # needs_env == False
+                    _single_body_stmt = _bstmts[0]
         while True:
             if has_test:
                 if _inline_test is not None:
@@ -3785,7 +3797,7 @@ class Interpreter:
             else:
                 iter_env = loop_env
             try:
-                r = self._exec(body_node, iter_env)
+                r = self._exec(_single_body_stmt if _single_body_stmt is not None else body_node, iter_env)
                 if r is not None:
                     if r == _BREAK: break
                     if r == _CONTINUE:
@@ -4259,11 +4271,17 @@ class Interpreter:
         if not arg_nodes:
             return []
         _eval = self._eval
+        _nargs = len(arg_nodes)
         # Fast path: single arg, no spread (overwhelmingly common)
-        if len(arg_nodes) == 1:
+        if _nargs == 1:
             a0 = arg_nodes[0]
             if a0["type"] != "SpreadElement":
                 return [_eval(a0, env)]
+        elif _nargs == 2:
+            a0 = arg_nodes[0]
+            a1 = arg_nodes[1]
+            if a0["type"] != "SpreadElement" and a1["type"] != "SpreadElement":
+                return [_eval(a0, env), _eval(a1, env)]
         args = []
         _append = args.append
         for arg in arg_nodes:
@@ -4478,7 +4496,31 @@ class Interpreter:
             if isinstance(target.value, dict) and priv_name in target.value:
                 return JS_TRUE
             return JS_FALSE
-        l = self._eval(node["left"], env)
+        # Inline left operand eval for Identifier/Literal (saves a function call)
+        _left_node = node["left"]
+        try:
+            l = _left_node['__jv__']
+        except KeyError:
+            _lnt = _left_node["type"]
+            if _lnt == "Identifier":
+                _lname = _left_node["name"]
+                _bindings = env.bindings
+                if _lname in _bindings:
+                    _b = _bindings[_lname]
+                    l = _b[1]
+                else:
+                    _e = env.parent
+                    l = None
+                    while _e is not None:
+                        _eb = _e.bindings
+                        if _lname in _eb:
+                            l = _eb[_lname][1]
+                            break
+                        _e = _e.parent
+                    if l is None:
+                        raise _JSError(self._make_js_error('ReferenceError', f"{_lname} is not defined"))
+            else:
+                l = self._eval(_left_node, env)
         if op == "||":
             # Inline _truthy
             _lt = l.type
@@ -4511,7 +4553,31 @@ class Interpreter:
             if l.type != 'undefined' and l.type != 'null':
                 return l
             return self._eval(node["right"], env)
-        r = self._eval(node["right"], env)
+        # Inline right operand eval for Identifier/Literal (saves a function call)
+        _right_node = node["right"]
+        try:
+            r = _right_node['__jv__']
+        except KeyError:
+            _rnt = _right_node["type"]
+            if _rnt == "Identifier":
+                _rname = _right_node["name"]
+                _bindings = env.bindings
+                if _rname in _bindings:
+                    _b = _bindings[_rname]
+                    r = _b[1]
+                else:
+                    _e = env.parent
+                    r = None
+                    while _e is not None:
+                        _eb = _e.bindings
+                        if _rname in _eb:
+                            r = _eb[_rname][1]
+                            break
+                        _e = _e.parent
+                    if r is None:
+                        raise _JSError(self._make_js_error('ReferenceError', f"{_rname} is not defined"))
+            else:
+                r = self._eval(_right_node, env)
         # Fast path: number op number (the overwhelmingly common case)
         if l.type == 'number' and r.type == 'number':
             lv, rv = l.value, r.value
@@ -4805,7 +4871,26 @@ class Interpreter:
             # Name inference for functions
             if right.type in ('function', 'intrinsic', 'class') and right.value.__class__ is dict and not right.value.get("name"):
                 right.value["name"] = _name
-            env.set(_name, right)
+            # Inlined env.set for speed (avoids method call + scope chain walk overhead)
+            _bindings = env.bindings
+            if _name in _bindings:
+                _b = _bindings[_name]
+                if _b[0] == 'const' and _b[1] is not _TDZ_SENTINEL:
+                    raise JSTypeError(f"Assignment to constant variable '{_name}'")
+                _b[1] = right
+            else:
+                _e = env.parent
+                while _e is not None:
+                    _eb = _e.bindings
+                    if _name in _eb:
+                        _b = _eb[_name]
+                        if _b[0] == 'const' and _b[1] is not _TDZ_SENTINEL:
+                            raise JSTypeError(f"Assignment to constant variable '{_name}'")
+                        _b[1] = right
+                        break
+                    _e = _e.parent
+                else:
+                    raise _JSError(self._make_js_error('ReferenceError', f"{_name} is not defined"))
             if env is self.genv and self._global_object is not None and _name != 'globalThis':
                 self._global_object.value[_name] = right
             return right
@@ -4963,10 +5048,27 @@ class Interpreter:
                 this_val = obj
         elif callee_type == "Identifier":
             _cname = callee_node["name"]
-            try:
-                callee = env.get(_cname)
-            except ReferenceError as re:
-                raise _JSError(self._make_js_error('ReferenceError', str(re)))
+            # Inlined env.get for speed (avoids method call overhead)
+            _bindings = env.bindings
+            if _cname in _bindings:
+                _b = _bindings[_cname]
+                if _b[1] is _TDZ_SENTINEL:
+                    raise _JSError(self._make_js_error('ReferenceError', f"Cannot access '{_cname}' before initialization"))
+                callee = _b[1]
+            else:
+                _e = env.parent
+                callee = None
+                while _e is not None:
+                    _eb = _e.bindings
+                    if _cname in _eb:
+                        _b = _eb[_cname]
+                        if _b[1] is _TDZ_SENTINEL:
+                            raise _JSError(self._make_js_error('ReferenceError', f"Cannot access '{_cname}' before initialization"))
+                        callee = _b[1]
+                        break
+                    _e = _e.parent
+                if callee is None:
+                    raise _JSError(self._make_js_error('ReferenceError', f"{_cname} is not defined"))
             if callee.type == 'object' and '__super_ctor__' in callee.value:
                 super_ctor = callee.value['__super_ctor__']
                 this_val = callee.value.get('__super_this__', UNDEFINED)
@@ -5785,7 +5887,7 @@ class Interpreter:
             call_env._is_arrow = _is_arrow
             call_env._is_fn_env = True
             if not _is_arrow:
-                call_env._fn_args = list(args)
+                call_env._fn_args = args
                 call_env._fn_val = fn_val
             if is_new_call:
                 call_env.declare('__new_target__', fn_val, 'const')
@@ -5801,8 +5903,14 @@ class Interpreter:
             _nargs = len(args)
             if _simple_param_names is not None:
                 # All params are simple Identifiers — direct binding, no type checks
-                for _idx, _pname in enumerate(_simple_param_names):
-                    _bindings[_pname] = ['var', args[_idx] if _idx < _nargs else UNDEFINED]
+                _nparam = len(_simple_param_names)
+                if _nargs >= _nparam:
+                    # Common case: enough args for all params — skip bounds check
+                    for _idx, _pname in enumerate(_simple_param_names):
+                        _bindings[_pname] = ['var', args[_idx]]
+                else:
+                    for _idx, _pname in enumerate(_simple_param_names):
+                        _bindings[_pname] = ['var', args[_idx] if _idx < _nargs else UNDEFINED]
             else:
                 arg_index = 0
                 for p in params:
