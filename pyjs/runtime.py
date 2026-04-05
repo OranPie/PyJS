@@ -4755,7 +4755,10 @@ class Interpreter:
                     if l is None:
                         raise _JSError(self._make_js_error('ReferenceError', f"{_lname} is not defined"))
             else:
-                l = self._eval(_left_node, env)
+                try:
+                    l = _left_node['__eh__'](_left_node, env)
+                except KeyError:
+                    l = self._eval(_left_node, env)
         if op == "||":
             # Inline _truthy
             _lt = l.type
@@ -4769,7 +4772,11 @@ class Interpreter:
             elif _lt in ('object', 'array', 'function', 'intrinsic', 'symbol', 'regexp', 'bigint'):
                 return l
             # falsy — evaluate right
-            return self._eval(node["right"], env)
+            _rn = node["right"]
+            try:
+                return _rn['__eh__'](_rn, env)
+            except KeyError:
+                return self._eval(_rn, env)
         if op == "&&":
             # Inline _truthy (inverted)
             _lt = l.type
@@ -4783,11 +4790,19 @@ class Interpreter:
             elif _lt in ('undefined', 'null'):
                 return l
             # truthy — evaluate right
-            return self._eval(node["right"], env)
+            _rn = node["right"]
+            try:
+                return _rn['__eh__'](_rn, env)
+            except KeyError:
+                return self._eval(_rn, env)
         if op == "??":
             if l.type != 'undefined' and l.type != 'null':
                 return l
-            return self._eval(node["right"], env)
+            _rn = node["right"]
+            try:
+                return _rn['__eh__'](_rn, env)
+            except KeyError:
+                return self._eval(_rn, env)
         # Inline right operand eval for Identifier/Literal (saves a function call)
         _right_node = node["right"]
         try:
@@ -4812,7 +4827,10 @@ class Interpreter:
                     if r is None:
                         raise _JSError(self._make_js_error('ReferenceError', f"{_rname} is not defined"))
             else:
-                r = self._eval(_right_node, env)
+                try:
+                    r = _right_node['__eh__'](_right_node, env)
+                except KeyError:
+                    r = self._eval(_right_node, env)
         # Fast path: number op number (the overwhelmingly common case)
         if l.type == 'number' and r.type == 'number':
             lv, rv = l.value, r.value
