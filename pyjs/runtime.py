@@ -4609,14 +4609,15 @@ class Interpreter:
         op = node["operator"]
         if arg["type"] == "Identifier":
             _name = arg["name"]
-            # Inline env.get + env.set for speed
             _e = env
             while _e is not None:
                 _eb = _e.bindings
                 if _name in _eb:
                     _b = _eb[_name]
                     old = _b[1]
-                    nv = self._to_num(old) + (1 if op=="++" else -1)
+                    _delta = 1 if op == "++" else -1
+                    # Inline _to_num for number type (most common in loops)
+                    nv = (old.value + _delta) if old.type == 'number' else (self._to_num(old) + _delta)
                     new = _JS_SMALL_INTS[nv] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
                     _b[1] = new
                     return old if not prefix else new
@@ -4626,7 +4627,8 @@ class Interpreter:
             obj = self._eval(arg["object"], env)
             prop = self._eval(arg["property"], env) if arg["computed"] else arg["property"]["name"]
             old = self._get_prop(obj, prop)
-            nv = self._to_num(old) + (1 if op=="++" else -1)
+            _delta = 1 if op == "++" else -1
+            nv = (old.value + _delta) if old.type == 'number' else (self._to_num(old) + _delta)
             new = _JS_SMALL_INTS[nv] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
             self._set_prop(obj, prop, new)
             return old if not prefix else new
@@ -4754,6 +4756,14 @@ class Interpreter:
                     return obj.value[_idx]
         else:
             prop = node["property"]["name"]
+            # Fast path: arr.length — most accessed non-computed property on arrays
+            if prop == 'length' and _otype == 'array':
+                _len = len(obj.value)
+                return _JS_SMALL_INTS[_len] if 0 <= _len <= 255 else JsValue("number", _len)
+            # Fast path: str.length
+            if prop == 'length' and _otype == 'string':
+                _len = len(obj.value)
+                return _JS_SMALL_INTS[_len] if 0 <= _len <= 255 else JsValue("number", _len)
         return self._get_prop(obj, prop)
 
     def _eval_call_expression(self, node, env):
@@ -4796,6 +4806,9 @@ class Interpreter:
             node['__optional__'] = _opt
         if _opt and self._is_nullish(callee):
             return UNDEFINED
+        # Inline intrinsic call (avoids _call_js → _call_js_impl dispatch for ~50% of calls)
+        if callee.type == 'intrinsic':
+            return callee.value["fn"](this_val, args, self)
         return self._call_js(callee, args, this_val)
 
     def _eval_new_expression(self, node, env):
