@@ -5671,7 +5671,31 @@ class Interpreter:
                                         and _cb[0].get("type") == "ReturnStatement"):
                                     _cons_ret_arg = _cb[0].get("argument")
                         if _cons_ret_arg is not None:
-                            _if_return_return = (_s0["test"], _cons_ret_arg, _s1.get("argument"))
+                            _ir_test_node = _s0["test"]
+                            _ir_fall_arg = _s1.get("argument")
+                            # Detect fast test: ident OP literal(number)
+                            _ir_fast_test = None
+                            if (_ir_test_node.__class__ is dict
+                                    and _ir_test_node.get("type") == "BinaryExpression"):
+                                _tl = _ir_test_node.get("left")
+                                _tr = _ir_test_node.get("right")
+                                _top = _ir_test_node.get("operator")
+                                if (_tl.__class__ is dict and _tl.get("type") == "Identifier"
+                                        and _tr.__class__ is dict and _tr.get("type") == "Literal"
+                                        and _top in ('<', '>', '<=', '>=', '===', '!==', '==', '!=')):
+                                    _tr_jv = _tr.get('__jv__')
+                                    if _tr_jv is None:
+                                        _tr_jv = py_to_js(_tr["value"])
+                                        _tr['__jv__'] = _tr_jv
+                                    if _tr_jv.type == 'number':
+                                        _ir_fast_test = (_top, _tl["name"], _tr_jv.value)
+                            # Detect fast consequent: return ident (param lookup)
+                            _ir_fast_cons = None
+                            if (_cons_ret_arg.__class__ is dict
+                                    and _cons_ret_arg.get("type") == "Identifier"):
+                                _ir_fast_cons = _cons_ret_arg["name"]
+                            _if_return_return = (_ir_test_node, _cons_ret_arg, _ir_fall_arg,
+                                                 _ir_fast_test, _ir_fast_cons)
         # Pre-compute simple param names: tuple of names if all params are plain Identifiers or strings
         _simple_param_names = None
         if _params:
@@ -6310,33 +6334,59 @@ class Interpreter:
                         result = UNDEFINED
                 elif _if_return_return is not None:
                     # Pattern: { if (test) return e1; return e2; }
-                    # Eliminates _exec, _exec_block_statement, _exec_if_statement,
-                    # _exec_return_statement, and _JSReturn exception entirely
-                    _ir_test, _ir_cons_arg, _ir_fall_arg = _if_return_return
-                    _tv = self._eval(_ir_test, call_env)
-                    _tt = _tv.type
-                    if _tt == 'boolean':
-                        _truthy = _tv.value
-                    elif _tt == 'number':
-                        _v = _tv.value
-                        _truthy = _v != 0 and _v == _v
-                    elif _tt == 'string':
-                        _truthy = len(_tv.value) > 0
-                    elif _tt == 'undefined' or _tt == 'null':
-                        _truthy = False
+                    _ir_test, _ir_cons_arg, _ir_fall_arg, _ir_fast_test, _ir_fast_cons = _if_return_return
+                    if _ir_fast_test is not None:
+                        # Ultra-fast test: ident OP literal(number)
+                        _ft_op, _ft_name, _ft_rval = _ir_fast_test
+                        _ft_lv = _bindings[_ft_name][1]
+                        if _ft_lv.type == 'number':
+                            _ln = _ft_lv.value
+                            if _ft_op == '<=':   _truthy = _ln <= _ft_rval
+                            elif _ft_op == '<':  _truthy = _ln < _ft_rval
+                            elif _ft_op == '>=': _truthy = _ln >= _ft_rval
+                            elif _ft_op == '>':  _truthy = _ln > _ft_rval
+                            elif _ft_op == '===': _truthy = _ln == _ft_rval
+                            elif _ft_op == '!==': _truthy = _ln != _ft_rval
+                            elif _ft_op == '==':  _truthy = _ln == _ft_rval
+                            else: _truthy = _ln != _ft_rval  # !=
+                        else:
+                            # Non-number left operand — fall back to general eval
+                            _tv = self._eval(_ir_test, call_env)
+                            _tt = _tv.type
+                            if _tt == 'boolean': _truthy = _tv.value
+                            elif _tt == 'number':
+                                _v = _tv.value; _truthy = _v != 0 and _v == _v
+                            elif _tt == 'string': _truthy = len(_tv.value) > 0
+                            elif _tt == 'undefined' or _tt == 'null': _truthy = False
+                            else: _truthy = True
                     else:
-                        _truthy = True
+                        _tv = self._eval(_ir_test, call_env)
+                        _tt = _tv.type
+                        if _tt == 'boolean': _truthy = _tv.value
+                        elif _tt == 'number':
+                            _v = _tv.value; _truthy = _v != 0 and _v == _v
+                        elif _tt == 'string': _truthy = len(_tv.value) > 0
+                        elif _tt == 'undefined' or _tt == 'null': _truthy = False
+                        else: _truthy = True
                     if _truthy:
-                        _ret_arg = _ir_cons_arg
+                        if _ir_fast_cons is not None:
+                            # Ultra-fast consequent: return ident (direct binding lookup)
+                            result = _bindings[_ir_fast_cons][1]
+                        elif _ir_cons_arg is not None:
+                            try:
+                                result = _ir_cons_arg['__eh__'](_ir_cons_arg, call_env)
+                            except KeyError:
+                                result = self._eval(_ir_cons_arg, call_env)
+                        else:
+                            result = UNDEFINED
                     else:
-                        _ret_arg = _ir_fall_arg
-                    if _ret_arg is not None:
-                        try:
-                            result = _ret_arg['__eh__'](_ret_arg, call_env)
-                        except KeyError:
-                            result = self._eval(_ret_arg, call_env)
-                    else:
-                        result = UNDEFINED
+                        if _ir_fall_arg is not None:
+                            try:
+                                result = _ir_fall_arg['__eh__'](_ir_fall_arg, call_env)
+                            except KeyError:
+                                result = self._eval(_ir_fall_arg, call_env)
+                        else:
+                            result = UNDEFINED
                 elif _body_inline:
                     # Inline body: skip _exec(body) + _exec_block_statement dispatch
                     for s in body_stmts:
