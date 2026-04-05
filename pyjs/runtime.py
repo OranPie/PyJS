@@ -793,18 +793,18 @@ class Interpreter:
         if _vtype == 'promise':   return '[object Promise]'
         if _vtype == 'proxy':     return self._to_str(v.value.target)
         if _vtype in ('object', 'function', 'intrinsic', 'class'):
-            if isinstance(v.value, dict):
+            if v.value.__class__ is dict:
                 err_type = v.value.get('__error_type__')
-                if isinstance(err_type, JsValue) and err_type.type == 'string':
+                if err_type.__class__ is JsValue and err_type.type == 'string':
                     msg = v.value.get('message')
-                    msg_str = msg.value if isinstance(msg, JsValue) else ''
+                    msg_str = msg.value if msg.__class__ is JsValue else ''
                     return f"{err_type.value}: {msg_str}"
                 kind = v.value.get('__kind__')
-                if isinstance(kind, JsValue) and kind.value == 'Generator':
+                if kind.__class__ is JsValue and kind.value == 'Generator':
                     return '[object Generator]'
                 tag_key = SK_TO_STRING_TAG
                 tag = v.value.get(tag_key)
-                if tag and isinstance(tag, JsValue) and tag.type == 'string':
+                if tag and tag.__class__ is JsValue and tag.type == 'string':
                     return f'[object {tag.value}]'
                 prim = self._to_primitive(v, 'string')
                 if prim.type not in ('object', 'function', 'intrinsic', 'class', 'array'):
@@ -1099,14 +1099,14 @@ class Interpreter:
     def _get_proto(self, obj: JsValue):
         if obj.type in ('object', 'function', 'intrinsic', 'class'):
             proto = obj.value.get('__proto__')
-            if isinstance(proto, JsValue):
+            if proto.__class__ is JsValue:
                 if proto.type in ('object', 'function', 'intrinsic', 'class'):
                     return proto
                 if proto.type == 'null':
                     return JS_NULL  # explicit null prototype
             # Fall through to built-in protos for known kinds
             kind = obj.value.get('__kind__')
-            if isinstance(kind, JsValue) and kind.type == 'string':
+            if kind.__class__ is JsValue and kind.type == 'string':
                 kv = kind.value
                 if kv == 'Map': return self._map_proto
                 if kv == 'Set': return self._set_proto
@@ -1119,7 +1119,7 @@ class Interpreter:
             # Array subclasses store their prototype in extras.__proto__
             if obj.extras:
                 sub_proto = obj.extras.get('__proto__')
-                if isinstance(sub_proto, JsValue) and sub_proto.type == 'object':
+                if sub_proto.__class__ is JsValue and sub_proto.type == 'object':
                     return sub_proto
             return self._array_proto
         if obj.type == 'string': return self._string_proto
@@ -1270,6 +1270,13 @@ class Interpreter:
         if key == 'length':
             _len = len(obj.value)
             return _JS_SMALL_INTS[_len] if 0 <= _len <= 255 else JsValue("number", _len)
+        # Fast path: numeric index (most common in loops) — check before method dispatch
+        try:
+            idx = int(key)
+            if 0 <= idx < len(obj.value):
+                return obj.value[idx]
+        except (ValueError, OverflowError):
+            pass
         sym_iter_key = SK_ITERATOR
         if key == sym_iter_key:
             arr_ref = obj
@@ -1304,12 +1311,6 @@ class Interpreter:
             method = self._arr_method(obj, key)
             obj.extras[cache_key] = method
             return method
-        try:
-            idx = int(key)
-            if 0 <= idx < len(obj.value):
-                return obj.value[idx]
-        except ValueError:
-            pass
         if obj.extras and key in obj.extras:
             return obj.extras[key]
         # Check Array.prototype for user-added methods
@@ -1386,12 +1387,12 @@ class Interpreter:
     def _get_prop_object_like(self, obj, key, receiver=None):
         if receiver is None:
             receiver = obj
-        obj_type = obj.value.get('__type__') if isinstance(obj.value, dict) else None
-        if isinstance(obj_type, JsValue) and obj_type.value == 'WeakRef':
+        obj_type = obj.value.get('__type__') if obj.value.__class__ is dict else None
+        if obj_type.__class__ is JsValue and obj_type.value == 'WeakRef':
             if key == 'deref':
                 target = obj.value.get('__target__', UNDEFINED)
                 return self._make_intrinsic(lambda tv, a, i, t=target: t, 'WeakRef.deref')
-        _obj_type_str = obj_type.value if isinstance(obj_type, JsValue) else obj_type
+        _obj_type_str = obj_type.value if obj_type.__class__ is JsValue else obj_type
         if _obj_type_str == 'TypedArray':
             return self._typed_array_get_prop(obj, key)
         if _obj_type_str == 'DataView':
@@ -1399,7 +1400,7 @@ class Interpreter:
         if _obj_type_str == 'ArrayBuffer':
             return self._arraybuffer_get_prop(obj, key)
         kind = obj.value.get('__kind__')
-        if isinstance(kind, JsValue) and kind.type == 'string':
+        if kind.__class__ is JsValue and kind.type == 'string':
             if kind.value == 'Map' and key == 'size':
                 size_fn = obj.value.get('__size_fn__')
                 return self._call_js(size_fn, [], obj) if size_fn else JsValue('number', 0)
@@ -1407,17 +1408,16 @@ class Interpreter:
                 size_fn = obj.value.get('__size_fn__')
                 return self._call_js(size_fn, [], obj) if size_fn else JsValue('number', 0)
         if obj.type in ('function', 'intrinsic') and key == 'name':
-            raw_name = obj.value.get('name', '') if isinstance(obj.value, dict) else ''
-            # If `name` was overridden with a static method (a JsValue), return it directly
-            if isinstance(raw_name, JsValue):
+            raw_name = obj.value.get('name', '') if obj.value.__class__ is dict else ''
+            if raw_name.__class__ is JsValue:
                 return raw_name
-            return JsValue('string', raw_name if isinstance(raw_name, str) else '')
+            return JsValue('string', raw_name if raw_name.__class__ is str else '')
         if obj.type == 'function' and key == 'length':
-            node = obj.value.get('node', {}) if isinstance(obj.value, dict) else {}
-            params = node.get('params', []) if isinstance(node, dict) else []
+            node = obj.value.get('node', {}) if obj.value.__class__ is dict else {}
+            params = node.get('params', []) if node.__class__ is dict else []
             count = 0
             for p in params:
-                if isinstance(p, dict) and p.get('type') in ('RestElement', 'AssignmentPattern'):
+                if p.__class__ is dict and p.get('type') in ('RestElement', 'AssignmentPattern'):
                     break
                 count += 1
             return JsValue('number', float(count))
@@ -1455,9 +1455,9 @@ class Interpreter:
                 return JsValue('string', f'function {n}() {{ [native code] }}')
             return self._make_intrinsic(_fn_tostring, 'Function.toString')
         current = obj
-        while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
+        while current.__class__ is JsValue and current.type in ('object', 'function', 'intrinsic', 'class'):
             # Array.prototype: dispatch built-in methods to the receiver (supports `super.push` etc.)
-            if isinstance(current.value, dict) and current.value.get('__is_array_proto__') is JS_TRUE:
+            if current.value.__class__ is dict and current.value.get('__is_array_proto__') is JS_TRUE:
                 if key in self.ARRAY_METHODS:
                     return self._arr_method(receiver, key)
                 if key == 'length':
@@ -1675,17 +1675,17 @@ class Interpreter:
         if obj.type == 'object' and '__super_target__' in obj.value:
             target = obj.value.get('__super_target__')
             this_val = obj.value.get('__super_this__', target)
-            if isinstance(target, JsValue):
+            if target.__class__ is JsValue:
                 # Walk target proto chain for setter
                 current = target
-                while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
+                while current.__class__ is JsValue and current.type in ('object', 'function', 'intrinsic', 'class'):
                     setter_key = f"__set__{key}"
                     if setter_key in current.value:
                         self._call_js(current.value[setter_key], [val], this_val)
                         return
                     current = self._get_proto(current)
                 # No setter found — set directly on __super_this__
-                if isinstance(this_val, JsValue) and this_val.type in ('object', 'function', 'intrinsic', 'class'):
+                if this_val.__class__ is JsValue and this_val.type in ('object', 'function', 'intrinsic', 'class'):
                     this_val.value[key] = val
             return
         if obj.type == 'array':
@@ -3545,7 +3545,12 @@ class Interpreter:
         return result
 
     def _exec_expression_statement(self, node, env):
-        self._eval(node["expression"], env)
+        # Inline _eval dispatch to avoid one method call layer
+        expr = node["expression"]
+        try:
+            expr['__eh__'](expr, env)
+        except KeyError:
+            self._eval(expr, env)
         return None
 
     def _exec_if_statement(self, node, env):
@@ -3676,7 +3681,7 @@ class Interpreter:
         seen = set()
         if right.type == "object":
             cur = right
-            while isinstance(cur, JsValue) and cur.type == 'object':
+            while cur.__class__ is JsValue and cur.type == 'object':
                 # Collect own enumerable keys for this level (including accessor properties)
                 level_int_keys = []
                 level_str_keys = []
@@ -4419,15 +4424,15 @@ class Interpreter:
             return JS_TRUE if self._cmp(op, l, r) else JS_FALSE
         if op == "instanceof":
             # ES spec: check Symbol.hasInstance first
-            if r.type in ("function", "intrinsic", "class") and isinstance(r.value, dict):
+            if r.type in ("function", "intrinsic", "class") and r.value.__class__ is dict:
                 _hi_key = SK_HAS_INSTANCE
                 _hi_fn = r.value.get(_hi_key)
-                if isinstance(_hi_fn, JsValue) and _hi_fn.type in ('function', 'intrinsic'):
+                if _hi_fn.__class__ is JsValue and _hi_fn.type in ('function', 'intrinsic'):
                     result = self._call_js(_hi_fn, [l], r)
                     return JS_TRUE if self._truthy(result) else JS_FALSE
             _error_ctor_names = {'Error','TypeError','RangeError','SyntaxError','ReferenceError','URIError','EvalError','AggregateError'}
             # Check built-in globals stored as objects (Array, Object, Function, Promise, Map, Set, etc.)
-            if r.type == 'object' and isinstance(r.value, dict):
+            if r.type == 'object' and r.value.__class__ is dict:
                 _g = self.genv
                 _kind_ctors = {'Map', 'Set', 'WeakMap', 'WeakSet'}
                 for _gname in ('Array','Object','Function','Promise','RegExp','Map','Set','WeakMap','WeakSet'):
@@ -4438,17 +4443,17 @@ class Interpreter:
                         if _gname == 'Promise': return JS_TRUE if l.type == 'promise' else JS_FALSE
                         if _gname == 'RegExp': return JS_TRUE if l.type == 'regexp' else JS_FALSE
                         if _gname in _kind_ctors:
-                            if l.type == 'object' and isinstance(l.value, dict):
+                            if l.type == 'object' and l.value.__class__ is dict:
                                 kind_v = l.value.get('__kind__')
-                                kind_s = kind_v.value if isinstance(kind_v, JsValue) else kind_v
+                                kind_s = kind_v.value if kind_v.__class__ is JsValue else kind_v
                                 return JS_TRUE if kind_s == _gname else JS_FALSE
                             return JS_FALSE
             if r.type in ("function","intrinsic","class"):
-                ctor_name = r.value.get("name") if isinstance(r.value, dict) else None
-                if isinstance(ctor_name, str) and ctor_name in _error_ctor_names:
+                ctor_name = r.value.get("name") if r.value.__class__ is dict else None
+                if ctor_name.__class__ is str and ctor_name in _error_ctor_names:
                     if l.type == 'object':
                         err_type = l.value.get('__error_type__')
-                        if isinstance(err_type, JsValue) and err_type.type == 'string':
+                        if err_type.__class__ is JsValue and err_type.type == 'string':
                             if ctor_name == 'Error' or err_type.value == ctor_name:
                                 return JS_TRUE
                     return JS_FALSE
@@ -4460,12 +4465,12 @@ class Interpreter:
                     'Array': ('array',),
                     'Object': ('object','array','function','intrinsic','class','promise','regexp'),
                 }
-                if isinstance(ctor_name, str) and ctor_name in _func_builtin_map:
+                if ctor_name.__class__ is str and ctor_name in _func_builtin_map:
                     allowed = _func_builtin_map[ctor_name]
                     if allowed is None:
-                        if l.type == 'object' and isinstance(l.value, dict):
+                        if l.type == 'object' and l.value.__class__ is dict:
                             kind_v = l.value.get('__kind__')
-                            kind_s = kind_v.value if isinstance(kind_v, JsValue) else kind_v
+                            kind_s = kind_v.value if kind_v.__class__ is JsValue else kind_v
                             return JS_TRUE if kind_s == ctor_name else JS_FALSE
                         return JS_FALSE
                     return JS_TRUE if l.type in allowed else JS_FALSE
@@ -4474,7 +4479,7 @@ class Interpreter:
                     lp = self._get_proto(l)
                     while lp:
                         if lp is proto: return JS_TRUE
-                        lp = self._get_proto(lp) if isinstance(lp, JsValue) else None
+                        lp = self._get_proto(lp) if lp.__class__ is JsValue else None
             return JS_FALSE
         if op == "in":
             key = self._to_str(l)
@@ -4487,7 +4492,7 @@ class Interpreter:
                 target = proxy.target
             if target.type in ("object", "function", "intrinsic", "class"):
                 cur = target
-                while isinstance(cur, JsValue) and cur.type in ('object', 'function', 'intrinsic', 'class'):
+                while cur.__class__ is JsValue and cur.type in ('object', 'function', 'intrinsic', 'class'):
                     if key in cur.value or f"__get__{key}" in cur.value or f"__set__{key}" in cur.value:
                         return JS_TRUE
                     cur = self._get_proto(cur)
@@ -4509,7 +4514,7 @@ class Interpreter:
                     return JS_TRUE
                 # Walk array prototype for inherited properties (like push, pop, etc.)
                 cur = self._get_proto(target)
-                while isinstance(cur, JsValue) and cur.type in ('object', 'function', 'intrinsic', 'class'):
+                while cur.__class__ is JsValue and cur.type in ('object', 'function', 'intrinsic', 'class'):
                     if key in cur.value or f"__get__{key}" in cur.value:
                         return JS_TRUE
                     cur = self._get_proto(cur)
@@ -4594,6 +4599,44 @@ class Interpreter:
             right = self._eval(node["right"], env)
             self._bind_pattern(left, right, env, 'let', False)
             return right
+        # Fast path: compound assignment on Identifier (+=, -=, etc.)
+        # Avoids _resolve_target closure creation + _find scope walk
+        if _ltype == "Identifier" and op not in ("&&=", "||=", "??="):
+            _name = left["name"]
+            right = self._eval(node["right"], env)
+            _e = env
+            while _e is not None:
+                _eb = _e.bindings
+                if _name in _eb:
+                    _b = _eb[_name]
+                    if _b[0] == 'const':
+                        raise JSTypeError(f"Assignment to constant variable '{_name}'")
+                    old = _b[1]
+                    # Inline += for number+number (overwhelmingly common in loops)
+                    if op == "+=":
+                        if old.type == 'number' and right.type == 'number':
+                            result = old.value + right.value
+                            ival = int(result)
+                            new_value = _JS_SMALL_INTS[ival] if (result == ival and -1 <= ival <= 255) else JsValue("number", result)
+                        elif old.type == 'string' or right.type == 'string':
+                            new_value = JsValue("string", self._to_str(old) + self._to_str(right))
+                        else:
+                            new_value = self._do_assign_op(op, old, right)
+                    elif op == "-=":
+                        if old.type == 'number' and right.type == 'number':
+                            result = old.value - right.value
+                            ival = int(result)
+                            new_value = _JS_SMALL_INTS[ival] if (result == ival and -1 <= ival <= 255) else JsValue("number", result)
+                        else:
+                            new_value = self._do_assign_op(op, old, right)
+                    else:
+                        new_value = self._do_assign_op(op, old, right)
+                    _b[1] = new_value
+                    if _e is self.genv and self._global_object is not None and _name != 'globalThis':
+                        self._global_object.value[_name] = new_value
+                    return new_value
+                _e = _e.parent
+            raise _JSError(self._make_js_error('ReferenceError', f"{_name} is not defined"))
         getter, setter = self._resolve_target(left, env)
         old = getter()
         if op == "&&=":
@@ -4637,6 +4680,12 @@ class Interpreter:
                 f"Cannot read properties of {_otype} (reading '{prop_name}')"))
         if node["computed"]:
             prop = self._eval(node["property"], env)
+            # Fast path: array[number] — direct index, skip _get_prop/_to_key chain
+            if _otype == 'array' and prop.type == 'number':
+                _idx_f = prop.value
+                _idx = int(_idx_f)
+                if _idx == _idx_f and 0 <= _idx < len(obj.value):
+                    return obj.value[_idx]
         else:
             prop = node["property"]["name"]
         return self._get_prop(obj, prop)
@@ -4949,10 +4998,16 @@ class Interpreter:
         _body = node["body"]
         # Pre-extract body statements for hoisting/strict caching
         _body_stmts = _body.get("body", []) if isinstance(_body, dict) and _body.get("type") == "BlockStatement" else []
+        # Detect single-return bodies: {return expr} — skip _exec + exception for these
+        _fast_return = None
+        if (len(_body_stmts) == 1
+                and _body_stmts[0].__class__ is dict
+                and _body_stmts[0].get("type") == "ReturnStatement"):
+            _fast_return = (_body_stmts[0].get("argument"),)
         fn_val = JsValue("function", {
             "node": node, "env": closure_env, "name": node.get("id") or "",
             # Pre-computed metadata to avoid repeated .get() in _call_js_impl
-            "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts),
+            "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts, _fast_return),
         })
         if not _is_arrow and not _is_gen:
             proto = JsValue("object", {"constructor": fn_val})
@@ -5429,7 +5484,7 @@ class Interpreter:
             # Use pre-computed metadata if available (from _make_fn)
             meta = info.get("__meta__")
             if meta is not None:
-                _is_arrow, _is_gen, _is_async, params, body, body_stmts = meta
+                _is_arrow, _is_gen, _is_async, params, body, body_stmts, _fast_return = meta
             else:
                 node = info["node"]
                 _is_arrow = bool(node.get("arrow"))
@@ -5438,6 +5493,7 @@ class Interpreter:
                 params = node.get("params", [])
                 body = node["body"]
                 body_stmts = body.get("body", []) if isinstance(body, dict) and body.get("type") == "BlockStatement" else []
+                _fast_return = None
             # Generator function — return generator object immediately
             if _is_gen:
                 if _is_async:
@@ -5509,8 +5565,13 @@ class Interpreter:
                     call_env._strict = True
             try:
                 self.env = call_env
-                self._exec(body, call_env)
-                result = UNDEFINED
+                if _fast_return is not None:
+                    # Single-return fast path: skip _exec + _JSReturn exception
+                    _fr_arg = _fast_return[0]
+                    result = self._eval(_fr_arg, call_env) if _fr_arg is not None else UNDEFINED
+                else:
+                    self._exec(body, call_env)
+                    result = UNDEFINED
             except _JSReturn as e:
                 result = e.value
             except _JSError as exc:
