@@ -3632,9 +3632,8 @@ class Interpreter:
                 _iter_bindings = iter_env.bindings
                 _loop_bindings = loop_env.bindings
                 for v in lex_vars:
-                    b = _loop_bindings.get(v)
-                    if b is not None:
-                        _iter_bindings[v] = ['let', b[1]]
+                    if v in _loop_bindings:
+                        _iter_bindings[v] = ['let', _loop_bindings[v][1]]
             else:
                 iter_env = loop_env
             try:
@@ -3643,11 +3642,10 @@ class Interpreter:
                     if r == _BREAK: break
                     if r == _CONTINUE:
                         if uses_lex:
+                            _ib = iter_env.bindings
                             for v in lex_vars:
-                                b = iter_env.bindings.get(v)
-                                if b is not None:
-                                    lb = _loop_bindings.get(v)
-                                    if lb is not None: lb[1] = b[1]
+                                if v in _ib and v in _loop_bindings:
+                                    _loop_bindings[v][1] = _ib[v][1]
                         if has_update: self._eval(update_node, loop_env)
                         continue
                     return r
@@ -3657,20 +3655,18 @@ class Interpreter:
             except _JSContinue as e:
                 if e.label is None or (_label and e.label == _label):
                     if uses_lex:
+                        _ib = iter_env.bindings
                         for v in lex_vars:
-                            b = iter_env.bindings.get(v)
-                            if b is not None:
-                                lb = _loop_bindings.get(v)
-                                if lb is not None: lb[1] = b[1]
+                            if v in _ib and v in _loop_bindings:
+                                _loop_bindings[v][1] = _ib[v][1]
                     if has_update: self._eval(update_node, loop_env)
                     continue
                 raise
             if uses_lex:
+                _ib = iter_env.bindings
                 for v in lex_vars:
-                    b = iter_env.bindings.get(v)
-                    if b is not None:
-                        lb = _loop_bindings.get(v)
-                        if lb is not None: lb[1] = b[1]
+                    if v in _ib and v in _loop_bindings:
+                        _loop_bindings[v][1] = _ib[v][1]
             if has_update: self._eval(update_node, loop_env)
         return None
 
@@ -4175,10 +4171,23 @@ class Interpreter:
                     return args_obj
                 e = e.parent
             return py_to_js([])
-        try:
-            return env.get(name)
-        except ReferenceError as re:
-            raise _JSError(self._make_js_error('ReferenceError', str(re)))
+        # Inlined env.get for speed (avoids method call overhead)
+        _bindings = env.bindings
+        if name in _bindings:
+            b = _bindings[name]
+            if b[1] is _TDZ_SENTINEL:
+                raise _JSError(self._make_js_error('ReferenceError', f"Cannot access '{name}' before initialization"))
+            return b[1]
+        e = env.parent
+        while e is not None:
+            _b = e.bindings
+            if name in _b:
+                b = _b[name]
+                if b[1] is _TDZ_SENTINEL:
+                    raise _JSError(self._make_js_error('ReferenceError', f"Cannot access '{name}' before initialization"))
+                return b[1]
+            e = e.parent
+        raise _JSError(self._make_js_error('ReferenceError', f"{name} is not defined"))
 
     def _eval_this_expression(self, node, env):
         e = env
@@ -4308,13 +4317,12 @@ class Interpreter:
                 return JS_TRUE
             return JS_FALSE
         l = self._eval(node["left"], env)
-        if op in ("||","&&"):
-            if op == "||":
-                if self._truthy(l): return l
-                return self._eval(node["right"], env)
-            else:
-                if not self._truthy(l): return l
-                return self._eval(node["right"], env)
+        if op == "||":
+            if self._truthy(l): return l
+            return self._eval(node["right"], env)
+        if op == "&&":
+            if not self._truthy(l): return l
+            return self._eval(node["right"], env)
         r = self._eval(node["right"], env)
         # Fast path: number op number (the overwhelmingly common case)
         if l.type == 'number' and r.type == 'number':
