@@ -75,7 +75,8 @@ class Lexer:
 
     def _match(self, ch):
         if self.i < self.length and self.s[self.i] == ch:
-            self._nxt(); return True
+            self.i += 1; self.col += 1
+            return True
         return False
 
     def _mk(self, tt, val, sc, sl):
