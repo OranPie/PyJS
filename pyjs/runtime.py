@@ -5643,6 +5643,35 @@ class Interpreter:
                 and _body_stmts[0].__class__ is dict
                 and _body_stmts[0].get("type") == "ReturnStatement"):
             _fast_return = (_body_stmts[0].get("argument"),)
+        # Pre-compute whether body can be inlined (no block scope needed)
+        _body_inline = False
+        _if_return_return = None
+        if _body_stmts and _fast_return is None:
+            try:
+                _scope_info = _body['__scope_info__']
+            except KeyError:
+                _scope_info = Interpreter._compute_block_scope_info(_body_stmts)
+                _body['__scope_info__'] = _scope_info
+            if not _scope_info[1]:  # needs_env == False
+                _body_inline = True
+                # Detect { if (test) return e1; return e2; } pattern
+                if len(_body_stmts) == 2:
+                    _s0, _s1 = _body_stmts
+                    if (_s0.__class__ is dict and _s0.get("type") == "IfStatement"
+                            and _s0.get("alternate") is None
+                            and _s1.__class__ is dict and _s1.get("type") == "ReturnStatement"):
+                        _cons = _s0.get("consequent")
+                        _cons_ret_arg = None
+                        if _cons.__class__ is dict:
+                            if _cons.get("type") == "ReturnStatement":
+                                _cons_ret_arg = _cons.get("argument")
+                            elif _cons.get("type") == "BlockStatement":
+                                _cb = _cons.get("body", [])
+                                if (len(_cb) == 1 and _cb[0].__class__ is dict
+                                        and _cb[0].get("type") == "ReturnStatement"):
+                                    _cons_ret_arg = _cb[0].get("argument")
+                        if _cons_ret_arg is not None:
+                            _if_return_return = (_s0["test"], _cons_ret_arg, _s1.get("argument"))
         # Pre-compute simple param names: tuple of names if all params are plain Identifiers or strings
         _simple_param_names = None
         if _params:
@@ -5662,7 +5691,8 @@ class Interpreter:
             "node": node, "env": closure_env, "name": node.get("id") or "",
             # Pre-computed metadata to avoid repeated .get() in _call_js_impl
             "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts, _fast_return, _simple_param_names,
-                         len(_simple_param_names) if _simple_param_names is not None else 0),
+                         len(_simple_param_names) if _simple_param_names is not None else 0,
+                         _body_inline, _if_return_return),
         })
         if not _is_arrow and not _is_gen:
             proto = JsValue("object", {"constructor": fn_val})
@@ -6139,7 +6169,7 @@ class Interpreter:
             # Use pre-computed metadata if available (from _make_fn)
             try:
                 meta = info["__meta__"]
-                _is_arrow, _is_gen, _is_async, params, body, body_stmts, _fast_return, _simple_param_names, _nparam = meta
+                _is_arrow, _is_gen, _is_async, params, body, body_stmts, _fast_return, _simple_param_names, _nparam, _body_inline, _if_return_return = meta
             except KeyError:
                 node = info["node"]
                 _is_arrow = bool(node.get("arrow"))
@@ -6278,6 +6308,40 @@ class Interpreter:
                             result = self._eval(_fr_arg, call_env)
                     else:
                         result = UNDEFINED
+                elif _if_return_return is not None:
+                    # Pattern: { if (test) return e1; return e2; }
+                    # Eliminates _exec, _exec_block_statement, _exec_if_statement,
+                    # _exec_return_statement, and _JSReturn exception entirely
+                    _ir_test, _ir_cons_arg, _ir_fall_arg = _if_return_return
+                    _tv = self._eval(_ir_test, call_env)
+                    _tt = _tv.type
+                    if _tt == 'boolean':
+                        _truthy = _tv.value
+                    elif _tt == 'number':
+                        _v = _tv.value
+                        _truthy = _v != 0 and _v == _v
+                    elif _tt == 'string':
+                        _truthy = len(_tv.value) > 0
+                    elif _tt == 'undefined' or _tt == 'null':
+                        _truthy = False
+                    else:
+                        _truthy = True
+                    if _truthy:
+                        _ret_arg = _ir_cons_arg
+                    else:
+                        _ret_arg = _ir_fall_arg
+                    if _ret_arg is not None:
+                        try:
+                            result = _ret_arg['__eh__'](_ret_arg, call_env)
+                        except KeyError:
+                            result = self._eval(_ret_arg, call_env)
+                    else:
+                        result = UNDEFINED
+                elif _body_inline:
+                    # Inline body: skip _exec(body) + _exec_block_statement dispatch
+                    for s in body_stmts:
+                        self._exec(s, call_env)
+                    result = UNDEFINED
                 else:
                     self._exec(body, call_env)
                     result = UNDEFINED
