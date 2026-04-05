@@ -3720,19 +3720,25 @@ class Interpreter:
         _label = node.get('__label__')
         _exec_steps = self._exec_steps
         _MAX_EXEC_STEPS = self.MAX_EXEC_STEPS
-        # Detect and cache inline test pattern: identifier < literal (number)
+        # Detect and cache inline test pattern
         _inline_test = None
+        _inline_test_dynamic = None
         if has_test and test_node is not None:
             _tt = test_node.get("type")
             if _tt == "BinaryExpression":
                 _tl = test_node.get("left")
                 _tr = test_node.get("right")
                 _top = test_node.get("operator")
-                if (_tl and _tr and _top in ('<', '<=', '>', '>=', '!=', '!==') and
-                        _tl.get("type") == "Identifier" and
-                        _tr.get("type") == "Literal" and
-                        isinstance(_tr.get("value"), (int, float))):
-                    _inline_test = (_tl["name"], _top, _tr["value"])
+                if _tl and _tr and _top in ('<', '<=', '>', '>=', '!=', '!==') and _tl.get("type") == "Identifier":
+                    if (_tr.get("type") == "Literal" and isinstance(_tr.get("value"), (int, float))):
+                        # Pattern: identifier OP literal(number)
+                        _inline_test = (_tl["name"], _top, _tr["value"])
+                    elif (_tr.get("type") == "MemberExpression" and
+                          not _tr.get("computed") and
+                          _tr.get("property", {}).get("name") == "length" and
+                          _tr.get("object", {}).get("type") == "Identifier"):
+                        # Pattern: i < arr.length — dynamic test with cached bindings
+                        _inline_test_dynamic = (_tl["name"], _top, _tr["object"]["name"])
         # Inline i++ update: directly increment binding, skip _eval dispatch
         _loop_bindings = loop_env.bindings
         if _update_ident is not None:
@@ -3786,8 +3792,53 @@ class Interpreter:
                 if _test_op == '>=': return _val >= _test_limit
                 if _test_op == '!=': return _val != _test_limit
                 return _val != _test_limit  # !==
+        # Dynamic test: `ident OP ident.length` (e.g., i < arr.length)
+        elif _inline_test_dynamic is not None:
+            _dtv, _dto, _dta = _inline_test_dynamic
+            _dt_cached_var = [None]  # cached binding for loop var
+            _dt_cached_arr = [None]  # cached binding for array var
+            def _do_test():
+                # Get loop variable value
+                _cb = _dt_cached_var[0]
+                if _cb is not None:
+                    _val = _cb[1].value
+                else:
+                    _e = loop_env
+                    while _e is not None:
+                        _eb = _e.bindings
+                        if _dtv in _eb:
+                            _b = _eb[_dtv]
+                            _dt_cached_var[0] = _b
+                            _val = _b[1].value
+                            break
+                        _e = _e.parent
+                    else:
+                        return False
+                # Get array.length
+                _ca = _dt_cached_arr[0]
+                if _ca is not None:
+                    _arr_val = _ca[1]
+                else:
+                    _e = loop_env
+                    while _e is not None:
+                        _eb = _e.bindings
+                        if _dta in _eb:
+                            _dt_cached_arr[0] = _eb[_dta]
+                            _arr_val = _eb[_dta][1]
+                            break
+                        _e = _e.parent
+                    else:
+                        return False
+                _limit = len(_arr_val.value) if _arr_val.type in ('array', 'string') else 0
+                if _dto == '<': return _val < _limit
+                if _dto == '<=': return _val <= _limit
+                if _dto == '>': return _val > _limit
+                if _dto == '>=': return _val >= _limit
+                if _dto == '!=': return _val != _limit
+                return _val != _limit  # !==
         # Pre-compute single-statement body optimization
         _single_body_stmt = None
+        _single_body_expr = None  # deeper inline: skip both _exec and _exec_expression_statement
         if body_node.__class__ is dict and body_node.get("type") == "BlockStatement":
             _bstmts = body_node["body"]
             if len(_bstmts) == 1:
@@ -3798,9 +3849,14 @@ class Interpreter:
                     body_node['__scope_info__'] = _si
                 if not _si[1]:  # needs_env == False
                     _single_body_stmt = _bstmts[0]
+                    # If the single stmt is ExpressionStatement, extract the expression
+                    # to skip _exec → _exec_expression_statement → _eval chain
+                    if (_single_body_stmt.__class__ is dict and
+                            _single_body_stmt.get("type") == "ExpressionStatement"):
+                        _single_body_expr = _single_body_stmt["expression"]
         while True:
             if has_test:
-                if _inline_test is not None:
+                if _inline_test is not None or _inline_test_dynamic is not None:
                     if not _do_test(): break
                 else:
                     _tv = self._eval(test_node, loop_env)
@@ -3827,7 +3883,17 @@ class Interpreter:
             else:
                 iter_env = loop_env
             try:
-                r = self._exec(_single_body_stmt if _single_body_stmt is not None else body_node, iter_env)
+                if _single_body_expr is not None:
+                    # Ultra-fast: ExpressionStatement body → skip _exec + _exec_expression_statement
+                    try:
+                        _single_body_expr['__eh__'](_single_body_expr, iter_env)
+                    except KeyError:
+                        self._eval(_single_body_expr, iter_env)
+                    r = None
+                elif _single_body_stmt is not None:
+                    r = self._exec(_single_body_stmt, iter_env)
+                else:
+                    r = self._exec(body_node, iter_env)
                 if r is not None:
                     if r == _BREAK: break
                     if r == _CONTINUE:
@@ -4306,12 +4372,23 @@ class Interpreter:
         if _nargs == 1:
             a0 = arg_nodes[0]
             if a0["type"] != "SpreadElement":
-                return [_eval(a0, env)]
+                # Inline _eval dispatch for the single arg
+                try:
+                    return [a0['__eh__'](a0, env)]
+                except KeyError:
+                    return [_eval(a0, env)]
         elif _nargs == 2:
             a0 = arg_nodes[0]
             a1 = arg_nodes[1]
             if a0["type"] != "SpreadElement" and a1["type"] != "SpreadElement":
-                return [_eval(a0, env), _eval(a1, env)]
+                try:
+                    _v0 = a0['__eh__'](a0, env)
+                except KeyError:
+                    _v0 = _eval(a0, env)
+                try:
+                    return [_v0, a1['__eh__'](a1, env)]
+                except KeyError:
+                    return [_v0, _eval(a1, env)]
         args = []
         _append = args.append
         for arg in arg_nodes:
@@ -5067,7 +5144,32 @@ class Interpreter:
         args = self._eval_arguments(node["arguments"], env)
         this_val = UNDEFINED
         if callee_type == "MemberExpression":
-            obj = self._eval(callee_node["object"], env)
+            # Inline _eval for object when it's an Identifier (most common: arr.push, obj.method)
+            _obj_node = callee_node["object"]
+            if _obj_node["type"] == "Identifier":
+                _oname = _obj_node["name"]
+                _bindings = env.bindings
+                if _oname in _bindings:
+                    _b = _bindings[_oname]
+                    if _b[1] is _TDZ_SENTINEL:
+                        raise _JSError(self._make_js_error('ReferenceError', f"Cannot access '{_oname}' before initialization"))
+                    obj = _b[1]
+                else:
+                    _e = env.parent
+                    obj = None
+                    while _e is not None:
+                        _eb = _e.bindings
+                        if _oname in _eb:
+                            _b = _eb[_oname]
+                            if _b[1] is _TDZ_SENTINEL:
+                                raise _JSError(self._make_js_error('ReferenceError', f"Cannot access '{_oname}' before initialization"))
+                            obj = _b[1]
+                            break
+                        _e = _e.parent
+                    if obj is None:
+                        raise _JSError(self._make_js_error('ReferenceError', f"{_oname} is not defined"))
+            else:
+                obj = self._eval(_obj_node, env)
             try:
                 _me_opt = callee_node['__me_opt__']
             except KeyError:
@@ -5413,14 +5515,26 @@ class Interpreter:
                 and _body_stmts[0].__class__ is dict
                 and _body_stmts[0].get("type") == "ReturnStatement"):
             _fast_return = (_body_stmts[0].get("argument"),)
-        # Pre-compute simple param names: tuple of names if all params are plain Identifiers
+        # Pre-compute simple param names: tuple of names if all params are plain Identifiers or strings
         _simple_param_names = None
-        if _params and all(p.__class__ is dict and p.get("type") == "Identifier" for p in _params):
-            _simple_param_names = tuple(p["name"] for p in _params)
+        if _params:
+            _all_simple = True
+            _names = []
+            for p in _params:
+                if p.__class__ is str:
+                    _names.append(p)
+                elif p.__class__ is dict and p.get("type") == "Identifier":
+                    _names.append(p["name"])
+                else:
+                    _all_simple = False
+                    break
+            if _all_simple:
+                _simple_param_names = tuple(_names)
         fn_val = JsValue("function", {
             "node": node, "env": closure_env, "name": node.get("id") or "",
             # Pre-computed metadata to avoid repeated .get() in _call_js_impl
-            "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts, _fast_return, _simple_param_names),
+            "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts, _fast_return, _simple_param_names,
+                         len(_simple_param_names) if _simple_param_names is not None else 0),
         })
         if not _is_arrow and not _is_gen:
             proto = JsValue("object", {"constructor": fn_val})
@@ -5897,7 +6011,7 @@ class Interpreter:
             # Use pre-computed metadata if available (from _make_fn)
             try:
                 meta = info["__meta__"]
-                _is_arrow, _is_gen, _is_async, params, body, body_stmts, _fast_return, _simple_param_names = meta
+                _is_arrow, _is_gen, _is_async, params, body, body_stmts, _fast_return, _simple_param_names, _nparam = meta
             except KeyError:
                 node = info["node"]
                 _is_arrow = bool(node.get("arrow"))
@@ -5908,6 +6022,7 @@ class Interpreter:
                 body_stmts = body.get("body", []) if isinstance(body, dict) and body.get("type") == "BlockStatement" else []
                 _fast_return = None
                 _simple_param_names = None
+                _nparam = 0
             # Ultra-fast path: simple arrow with fast-return (e.g., (a, b) => a + b)
             # Skips: generator check, super_proto, is_new_call, hoisting, strict, promise
             if _is_arrow and _fast_return is not None and _simple_param_names is not None and not _is_async:
@@ -5918,7 +6033,6 @@ class Interpreter:
                 call_env._is_fn_env = True
                 _bindings = call_env.bindings
                 _nargs = len(args)
-                _nparam = len(_simple_param_names)
                 if _nargs >= _nparam:
                     for _idx, _pname in enumerate(_simple_param_names):
                         _bindings[_pname] = ['var', args[_idx]]
@@ -5967,7 +6081,6 @@ class Interpreter:
             _nargs = len(args)
             if _simple_param_names is not None:
                 # All params are simple Identifiers — direct binding, no type checks
-                _nparam = len(_simple_param_names)
                 if _nargs >= _nparam:
                     # Common case: enough args for all params — skip bounds check
                     for _idx, _pname in enumerate(_simple_param_names):
@@ -5999,7 +6112,11 @@ class Interpreter:
                             self._bind_pattern(p, val, call_env, 'var', True)
                     else:
                         val = args[arg_index] if arg_index < _nargs else UNDEFINED
-                        self._bind_pattern(p, val, call_env, 'var', True)
+                        # String param (e.g., from concise arrow) — direct binding
+                        if p.__class__ is str:
+                            _bindings[p] = ['var', val]
+                        else:
+                            self._bind_pattern(p, val, call_env, 'var', True)
                     arg_index += 1
             promise = self._new_promise() if _is_async else None
             # Hoist var declarations (cached on body node)
