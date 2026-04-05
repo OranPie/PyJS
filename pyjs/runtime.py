@@ -3560,7 +3560,19 @@ class Interpreter:
 
     def _exec_if_statement(self, node, env):
         test = self._eval(node["test"], env)
-        if self._truthy(test):
+        _tt = test.type
+        if _tt == 'boolean':
+            _truthy = test.value
+        elif _tt == 'number':
+            _v = test.value
+            _truthy = _v != 0 and _v == _v
+        elif _tt == 'string':
+            _truthy = len(test.value) > 0
+        elif _tt == 'undefined' or _tt == 'null':
+            _truthy = False
+        else:
+            _truthy = True
+        if _truthy:
             return self._exec(node["consequent"], env)
         elif node.get("alternate"):
             return self._exec(node["alternate"], env)
@@ -4730,7 +4742,20 @@ class Interpreter:
 
     def _eval_conditional_expression(self, node, env):
         test = self._eval(node["test"], env)
-        return self._eval(node["consequent"] if self._truthy(test) else node["alternate"], env)
+        # Inline _truthy for common types
+        _tt = test.type
+        if _tt == 'boolean':
+            _truthy = test.value
+        elif _tt == 'number':
+            _v = test.value
+            _truthy = _v != 0 and _v == _v
+        elif _tt == 'string':
+            _truthy = len(test.value) > 0
+        elif _tt == 'undefined' or _tt == 'null':
+            _truthy = False
+        else:
+            _truthy = True
+        return self._eval(node["consequent"] if _truthy else node["alternate"], env)
 
     def _eval_member_expression(self, node, env):
         obj = self._eval(node["object"], env)
