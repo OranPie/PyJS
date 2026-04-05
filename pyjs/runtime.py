@@ -3690,6 +3690,19 @@ class Interpreter:
         _label = node.get('__label__')
         _exec_steps = self._exec_steps
         _MAX_EXEC_STEPS = self.MAX_EXEC_STEPS
+        # Detect and cache inline test pattern: identifier < literal (number)
+        _inline_test = None
+        if has_test and test_node is not None:
+            _tt = test_node.get("type")
+            if _tt == "BinaryExpression":
+                _tl = test_node.get("left")
+                _tr = test_node.get("right")
+                _top = test_node.get("operator")
+                if (_tl and _tr and _top in ('<', '<=', '>', '>=', '!=', '!==') and
+                        _tl.get("type") == "Identifier" and
+                        _tr.get("type") == "Literal" and
+                        isinstance(_tr.get("value"), (int, float))):
+                    _inline_test = (_tl["name"], _top, _tr["value"])
         # Inline i++ update: directly increment binding, skip _eval dispatch
         _loop_bindings = loop_env.bindings
         if _update_ident is not None:
@@ -3717,18 +3730,47 @@ class Interpreter:
         elif has_update:
             def _do_update():
                 self._eval(update_node, loop_env)
+        # Inline test condition for simple `ident OP literal(number)` patterns
+        if _inline_test is not None:
+            _test_var, _test_op, _test_limit = _inline_test
+            _test_cached = [None]  # mutable cell for cached binding
+            def _do_test():
+                _cb = _test_cached[0]
+                if _cb is not None:
+                    _val = _cb[1].value
+                else:
+                    _e = loop_env
+                    while _e is not None:
+                        _eb = _e.bindings
+                        if _test_var in _eb:
+                            _b = _eb[_test_var]
+                            _test_cached[0] = _b
+                            _val = _b[1].value
+                            break
+                        _e = _e.parent
+                    else:
+                        return False
+                if _test_op == '<': return _val < _test_limit
+                if _test_op == '<=': return _val <= _test_limit
+                if _test_op == '>': return _val > _test_limit
+                if _test_op == '>=': return _val >= _test_limit
+                if _test_op == '!=': return _val != _test_limit
+                return _val != _test_limit  # !==
         while True:
             if has_test:
-                _tv = self._eval(test_node, loop_env)
-                _tt = _tv.type
-                if _tt == 'boolean':
-                    if not _tv.value: break
-                elif _tt == 'number':
-                    if _tv.value == 0 or _tv.value != _tv.value: break
-                elif _tt == 'string':
-                    if not _tv.value: break
-                elif _tt == 'undefined' or _tt == 'null':
-                    break
+                if _inline_test is not None:
+                    if not _do_test(): break
+                else:
+                    _tv = self._eval(test_node, loop_env)
+                    _tt = _tv.type
+                    if _tt == 'boolean':
+                        if not _tv.value: break
+                    elif _tt == 'number':
+                        if _tv.value == 0 or _tv.value != _tv.value: break
+                    elif _tt == 'string':
+                        if not _tv.value: break
+                    elif _tt == 'undefined' or _tt == 'null':
+                        break
             _exec_steps += 1
             if _exec_steps > _MAX_EXEC_STEPS:
                 self._exec_steps = _exec_steps
