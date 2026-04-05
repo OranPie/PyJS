@@ -313,36 +313,39 @@ class Lexer:
     # -- main tokenize loop -------------------------------------------------
     def tokenize(self) -> List[Token]:
         toks: List[Token] = []
+        _s = self.s
+        _len = self.length
         while True:
             self._skip()
-            if self._end():
+            if self.i >= _len:
                 toks.append(self._mk('EOF', None, self.col, self.line))
                 return toks
             sc, sl = self.col, self.line
-            c = self._ch()
-            if c.isdigit() or (c == '.' and self._peek(1).isdigit()):
+            c = _s[self.i]
+            if c.isdigit() or (c == '.' and self.i + 1 < _len and _s[self.i + 1].isdigit()):
                 toks.append(self._read_number()); continue
             if c.isalpha() or c in ('_', '$'):
                 toks.append(self._read_ident()); continue
-            if c == '#' and not self._end() and (self._peek(1).isalpha() or self._peek(1) == '_'):
+            if c == '#' and self.i + 1 < _len and (_s[self.i + 1].isalpha() or _s[self.i + 1] == '_'):
                 self._nxt()  # skip '#'
                 name_start = self.i
-                while not self._end() and (self._ch().isalnum() or self._ch() in ('_', '$')):
+                while self.i < _len and (_s[self.i].isalnum() or _s[self.i] in ('_', '$')):
                     self._nxt()
-                toks.append(self._mk('PRIVATE_NAME', '#' + self.s[name_start:self.i], sc, sl))
+                toks.append(self._mk('PRIVATE_NAME', '#' + _s[name_start:self.i], sc, sl))
                 continue
             if c in ('"',"'"):
                 toks.append(self._read_string(c)); continue
             if c == '`':
                 toks.append(self._read_template()); continue
-            if c == '=' and self._peek(1) == '>':
+            if c == '=' and self.i + 1 < _len and _s[self.i + 1] == '>':
                 self._nxt(); self._nxt()
                 toks.append(self._mk('ARROW','=>',sc,sl)); continue
             self._nxt()
             if c in _SIMPLE_TOKENS:
                 toks.append(self._mk(_SIMPLE_TOKENS[c], c, sc, sl)); continue
             if c == '.':
-                if self._peek(0)==self._peek(1)=='.':
+                _i = self.i
+                if _i < _len and _i + 1 < _len and _s[_i] == '.' and _s[_i + 1] == '.':
                     self._nxt(); self._nxt()
                     toks.append(self._mk('ELLIPSIS','...',sc,sl))
                 else:
