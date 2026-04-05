@@ -1295,7 +1295,8 @@ class Interpreter:
                 return iterator
             return self._make_intrinsic(_arr_iter_factory, '[Symbol.iterator]')
         # Subclass prototype overrides take priority over built-in ARRAY_METHODS
-        sub_proto = obj.extras.get("__proto__") if obj.extras else None
+        _extras = obj.extras
+        sub_proto = _extras["__proto__"] if _extras and "__proto__" in _extras else None
         if isinstance(sub_proto, JsValue) and sub_proto.type == "object":
             v = self._get_prop_object_like(sub_proto, key, receiver=obj)
             if v is not UNDEFINED:
@@ -1314,8 +1315,9 @@ class Interpreter:
         if obj.extras and key in obj.extras:
             return obj.extras[key]
         # Check Array.prototype for user-added methods
-        proto_val = self._array_proto.value.get(key)
-        if proto_val is not None:
+        _ap = self._array_proto.value
+        if key in _ap:
+            proto_val = _ap[key]
             if isinstance(proto_val, JsValue) and proto_val.type in ('function', 'intrinsic'):
                 # Cache bound proto method wrapper on the array
                 if obj.extras is None:
@@ -4730,7 +4732,12 @@ class Interpreter:
 
     def _eval_member_expression(self, node, env):
         obj = self._eval(node["object"], env)
-        if node.get("optional") and self._is_nullish(obj):
+        try:
+            _opt = node['__me_opt__']
+        except KeyError:
+            _opt = node.get("optional", False)
+            node['__me_opt__'] = _opt
+        if _opt and self._is_nullish(obj):
             return UNDEFINED
         _otype = obj.type
         if _otype == 'null' or _otype == 'undefined':
@@ -4765,13 +4772,11 @@ class Interpreter:
             else:
                 this_val = obj
         elif callee_type == "Identifier":
-            # Fast path: direct identifier call — inline env.get
             _cname = callee_node["name"]
             try:
                 callee = env.get(_cname)
             except ReferenceError as re:
                 raise _JSError(self._make_js_error('ReferenceError', str(re)))
-            # Handle super() constructor call
             if callee.type == 'object' and '__super_ctor__' in callee.value:
                 super_ctor = callee.value['__super_ctor__']
                 this_val = callee.value.get('__super_this__', UNDEFINED)
@@ -4784,7 +4789,12 @@ class Interpreter:
                 this_val = callee.value.get('__super_this__', UNDEFINED)
                 self._call_js(super_ctor, args, this_val)
                 return this_val
-        if node.get("optional") and self._is_nullish(callee):
+        try:
+            _opt = node['__optional__']
+        except KeyError:
+            _opt = node.get("optional", False)
+            node['__optional__'] = _opt
+        if _opt and self._is_nullish(callee):
             return UNDEFINED
         return self._call_js(callee, args, this_val)
 
@@ -5541,10 +5551,10 @@ class Interpreter:
         if _fntype == "function":
             info = fn_val.value
             # Use pre-computed metadata if available (from _make_fn)
-            meta = info.get("__meta__")
-            if meta is not None:
+            try:
+                meta = info["__meta__"]
                 _is_arrow, _is_gen, _is_async, params, body, body_stmts, _fast_return = meta
-            else:
+            except KeyError:
                 node = info["node"]
                 _is_arrow = bool(node.get("arrow"))
                 _is_gen = bool(node.get("generator_"))
@@ -5571,7 +5581,10 @@ class Interpreter:
                 call_env._fn_val = fn_val
             if is_new_call:
                 call_env.declare('__new_target__', fn_val, 'const')
-            super_proto = info.get('super_proto')
+            try:
+                super_proto = info['super_proto']
+            except KeyError:
+                super_proto = None
             if super_proto.__class__ is JsValue:
                 super_ctor = info.get('superClass')
                 call_env.declare('super', self._make_super_proxy(super_proto, call_env._this, super_ctor), 'const')
