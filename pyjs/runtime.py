@@ -4178,11 +4178,12 @@ class Interpreter:
     def _eval_arguments(self, arg_nodes, env):
         if not arg_nodes:
             return []
+        _eval = self._eval
         args = []
         _append = args.append
         for arg in arg_nodes:
             if arg["type"] == "SpreadElement":
-                value = self._eval(arg, env)
+                value = _eval(arg, env)
                 it = self._get_js_iterator(value)
                 if it is not None:
                     while True:
@@ -4195,7 +4196,7 @@ class Interpreter:
                 else:
                     _append(value)
             else:
-                _append(self._eval(arg, env))
+                _append(_eval(arg, env))
         return args
 
     # --------------------------------------------------------- evaluation
@@ -4834,6 +4835,16 @@ class Interpreter:
         # Inline intrinsic call (avoids _call_js → _call_js_impl dispatch for ~50% of calls)
         if callee.type == 'intrinsic':
             return callee.value["fn"](this_val, args, self)
+        # Inline _call_js depth tracking for function calls (avoids one method call layer)
+        if not _TRACE_ACTIVE[0]:
+            self._call_depth += 1
+            if self._call_depth > self.MAX_CALL_DEPTH:
+                self._call_depth -= 1
+                raise _JSError(self._make_js_error('RangeError', 'Maximum call stack size exceeded'))
+            try:
+                return self._call_js_impl(callee, args, this_val)
+            finally:
+                self._call_depth -= 1
         return self._call_js(callee, args, this_val)
 
     def _eval_new_expression(self, node, env):
