@@ -1865,7 +1865,8 @@ class Interpreter:
                 cb = args[0] if args else None
                 if cb:
                     for i,x in enumerate(a):
-                        interp._call_js(cb, [x, JsValue("number",i), arr], None)
+                        _idx_jv = _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)
+                        interp._call_js(cb, [x, _idx_jv, arr], None)
                 return UNDEFINED
             if name == 'map':
                 cb = args[0] if args else None
@@ -1876,12 +1877,14 @@ class Interpreter:
                         interp._call_depth += 1
                         try:
                             for i,x in enumerate(a):
-                                _rap(interp._call_js_impl(cb, [x, JsValue("number",i), arr], None))
+                                _idx_jv = _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)
+                                _rap(interp._call_js_impl(cb, [x, _idx_jv, arr], None))
                         finally:
                             interp._call_depth -= 1
                     else:
                         for i,x in enumerate(a):
-                            _rap(interp._call_js(cb, [x, JsValue("number",i), arr], None))
+                            _idx_jv = _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)
+                            _rap(interp._call_js(cb, [x, _idx_jv, arr], None))
                     return py_to_js(result)
                 return py_to_js([])
             if name == 'filter':
@@ -1891,12 +1894,12 @@ class Interpreter:
                         interp._call_depth += 1
                         try:
                             result = [x for i,x in enumerate(a)
-                                      if interp._truthy(interp._call_js_impl(cb,[x,JsValue("number",i),arr],None))]
+                                      if interp._truthy(interp._call_js_impl(cb,[x, _JS_SMALL_INTS[i] if i <= 255 else JsValue("number",i),arr],None))]
                         finally:
                             interp._call_depth -= 1
                     else:
                         result = [x for i,x in enumerate(a)
-                                  if interp._truthy(interp._call_js(cb,[x,JsValue("number",i),arr],None))]
+                                  if interp._truthy(interp._call_js(cb,[x, _JS_SMALL_INTS[i] if i <= 255 else JsValue("number",i),arr],None))]
                     return py_to_js(result)
                 return py_to_js([])
             if name == 'reduce':
@@ -1913,12 +1916,14 @@ class Interpreter:
                     interp._call_depth += 1
                     try:
                         for i in range(start_idx, len(a)):
-                            acc = interp._call_js_impl(cb, [acc, a[i], JsValue("number",i), arr], None)
+                            _idx_jv = _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)
+                            acc = interp._call_js_impl(cb, [acc, a[i], _idx_jv, arr], None)
                     finally:
                         interp._call_depth -= 1
                 else:
                     for i in range(start_idx, len(a)):
-                        acc = interp._call_js(cb, [acc, a[i], JsValue("number",i), arr], None)
+                        _idx_jv = _JS_SMALL_INTS[i] if i <= 255 else JsValue("number", i)
+                        acc = interp._call_js(cb, [acc, a[i], _idx_jv, arr], None)
                 return acc
             if name == 'find':
                 cb = args[0] if args else None
@@ -5063,7 +5068,12 @@ class Interpreter:
         this_val = UNDEFINED
         if callee_type == "MemberExpression":
             obj = self._eval(callee_node["object"], env)
-            if callee_node.get("optional") and self._is_nullish(obj):
+            try:
+                _me_opt = callee_node['__me_opt__']
+            except KeyError:
+                _me_opt = callee_node.get("optional", False)
+                callee_node['__me_opt__'] = _me_opt
+            if _me_opt and self._is_nullish(obj):
                 return UNDEFINED
             prop = self._eval(callee_node["property"], env) if callee_node["computed"] else callee_node["property"]["name"]
             callee = self._get_prop(obj, prop)
@@ -5918,7 +5928,13 @@ class Interpreter:
                 _prev_env = self.env
                 self.env = call_env
                 try:
-                    return self._eval(_fr_arg, call_env) if _fr_arg is not None else UNDEFINED
+                    if _fr_arg is not None:
+                        # Inline _eval dispatch for one less function call
+                        try:
+                            return _fr_arg['__eh__'](_fr_arg, call_env)
+                        except KeyError:
+                            return self._eval(_fr_arg, call_env)
+                    return UNDEFINED
                 finally:
                     self.env = _prev_env
             # Generator function — return generator object immediately
@@ -6010,7 +6026,13 @@ class Interpreter:
                 if _fast_return is not None:
                     # Single-return fast path: skip _exec + _JSReturn exception
                     _fr_arg = _fast_return[0]
-                    result = self._eval(_fr_arg, call_env) if _fr_arg is not None else UNDEFINED
+                    if _fr_arg is not None:
+                        try:
+                            result = _fr_arg['__eh__'](_fr_arg, call_env)
+                        except KeyError:
+                            result = self._eval(_fr_arg, call_env)
+                    else:
+                        result = UNDEFINED
                 else:
                     self._exec(body, call_env)
                     result = UNDEFINED
