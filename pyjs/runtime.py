@@ -171,23 +171,7 @@ class Interpreter:
 
 
     def _make_intrinsic(self, fn, name='?'):
-        _self = self  # capture interpreter for closure
-        def wrapper(this_val, args, interp):
-            try:
-                return fn(this_val, args, interp)
-            except (_JSReturn, _JSError, _JSBreak, _JSContinue):
-                raise
-            except TypeError as exc:
-                raise _JSError(_self._make_js_error('TypeError', str(exc)))
-            except ValueError as exc:
-                raise _JSError(_self._make_js_error('RangeError', str(exc)))
-            except (KeyError, IndexError) as exc:
-                raise _JSError(_self._make_js_error('ReferenceError', str(exc)))
-            except OverflowError as exc:
-                raise _JSError(_self._make_js_error('RangeError', str(exc)))
-            except Exception as exc:
-                raise _JSError(_self._make_js_error('Error', str(exc)))
-        return JsValue("intrinsic", {"fn": wrapper, "name": name})
+        return JsValue("intrinsic", {"fn": fn, "name": name})
 
     def _is_callable(self, value):
         return isinstance(value, JsValue) and value.type in ('function', 'intrinsic')
@@ -210,7 +194,7 @@ class Interpreter:
             raise _JSError(self._make_js_error('SyntaxError', f'Invalid regular expression: {exc}'))
 
         def _make_intr(fn, name):
-            return self._make_intrinsic(lambda tv, args, interp: fn(tv, args, interp), name)
+            return self._make_intrinsic(fn, name)
 
         def _regexp_test(this_re, args, interp):
             text = interp._to_str(args[0]) if args else ''
@@ -486,7 +470,7 @@ class Interpreter:
         plugin_key = ('promise', name)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
-            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), name)
+            return self._make_intrinsic(handler, name)
         return UNDEFINED
 
     def _promise_all(self, values):
@@ -1334,7 +1318,7 @@ class Interpreter:
         plugin_key = ('array', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
-            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+            return self._make_intrinsic(handler, key)
         return UNDEFINED
 
     def _get_prop_string(self, obj, key):
@@ -1376,7 +1360,7 @@ class Interpreter:
         plugin_key = ('string', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
-            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+            return self._make_intrinsic(handler, key)
         return UNDEFINED
 
     def _get_prop_promise(self, obj, key):
@@ -1385,7 +1369,7 @@ class Interpreter:
         plugin_key = ('promise', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
-            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+            return self._make_intrinsic(handler, key)
         return UNDEFINED
 
     def _get_prop_object_like(self, obj, key, receiver=None):
@@ -1568,7 +1552,7 @@ class Interpreter:
         plugin_key = ('object', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
-            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+            return self._make_intrinsic(handler, key)
         return UNDEFINED
 
     def _get_prop_number(self, obj, key):
@@ -1585,7 +1569,7 @@ class Interpreter:
         plugin_key = ('number', key)
         if self._plugin_methods and plugin_key in self._plugin_methods:
             handler = self._plugin_methods[plugin_key]
-            return self._make_intrinsic(lambda tv, a, i, h=handler: h(tv, a, i), key)
+            return self._make_intrinsic(handler, key)
         return UNDEFINED
 
     def _get_prop_symbol(self, obj, key):
@@ -5459,7 +5443,18 @@ class Interpreter:
             return UNDEFINED
         # Inline intrinsic call (avoids _call_js → _call_js_impl dispatch for ~50% of calls)
         if callee.type == 'intrinsic':
-            return callee.value["fn"](this_val, args, self)
+            try:
+                return callee.value["fn"](this_val, args, self)
+            except (_JSReturn, _JSError, _JSBreak, _JSContinue):
+                raise
+            except TypeError as exc:
+                raise _JSError(self._make_js_error('TypeError', str(exc)))
+            except (ValueError, OverflowError) as exc:
+                raise _JSError(self._make_js_error('RangeError', str(exc)))
+            except (KeyError, IndexError) as exc:
+                raise _JSError(self._make_js_error('ReferenceError', str(exc)))
+            except Exception as exc:
+                raise _JSError(self._make_js_error('Error', str(exc)))
         # Inline _call_js depth tracking for function calls (avoids one method call layer)
         if not _TRACE_ACTIVE[0]:
             self._call_depth += 1
@@ -6291,7 +6286,18 @@ class Interpreter:
                     return self._call_js(trap, [proxy.target, this_val if this_val is not None else UNDEFINED, JsValue('array', args)], UNDEFINED)
             return self._call_js(proxy.target, args, this_val, extra_args, is_new_call)
         if _fntype == "intrinsic":
-            return fn_val.value["fn"](this_val, args, self)
+            try:
+                return fn_val.value["fn"](this_val, args, self)
+            except (_JSReturn, _JSError, _JSBreak, _JSContinue):
+                raise
+            except TypeError as exc:
+                raise _JSError(self._make_js_error('TypeError', str(exc)))
+            except (ValueError, OverflowError) as exc:
+                raise _JSError(self._make_js_error('RangeError', str(exc)))
+            except (KeyError, IndexError) as exc:
+                raise _JSError(self._make_js_error('ReferenceError', str(exc)))
+            except Exception as exc:
+                raise _JSError(self._make_js_error('Error', str(exc)))
         if _fntype == "function":
             info = fn_val.value
             # Use pre-computed metadata if available (from _make_fn)
