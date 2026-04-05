@@ -1245,20 +1245,22 @@ class Interpreter:
     # --------------------------------------------------------- property helpers
     def _get_desc(self, obj, key):
         """Return the raw descriptor dict for key on obj, or None."""
-        if not isinstance(getattr(obj, 'value', None), dict):
+        _v = obj.value
+        if _v.__class__ is not dict:
             return None
-        descs = obj.value.get('__descs__')
+        descs = _v.get('__descs__')
         if descs is None:
             return None
         return descs.get(key)
 
     def _set_desc(self, obj, key, desc_dict):
         """Store the raw descriptor dict for key on obj."""
-        if not isinstance(getattr(obj, 'value', None), dict):
+        _v = obj.value
+        if _v.__class__ is not dict:
             return
-        if '__descs__' not in obj.value:
-            obj.value['__descs__'] = {}
-        obj.value['__descs__'][key] = desc_dict
+        if '__descs__' not in _v:
+            _v['__descs__'] = {}
+        _v['__descs__'][key] = desc_dict
 
     def _is_enumerable(self, obj, key):
         desc = self._get_desc(obj, key)
@@ -1297,7 +1299,7 @@ class Interpreter:
         # Subclass prototype overrides take priority over built-in ARRAY_METHODS
         _extras = obj.extras
         sub_proto = _extras["__proto__"] if _extras and "__proto__" in _extras else None
-        if isinstance(sub_proto, JsValue) and sub_proto.type == "object":
+        if sub_proto.__class__ is JsValue and sub_proto.type == "object":
             v = self._get_prop_object_like(sub_proto, key, receiver=obj)
             if v is not UNDEFINED:
                 return v
@@ -1318,7 +1320,7 @@ class Interpreter:
         _ap = self._array_proto.value
         if key in _ap:
             proto_val = _ap[key]
-            if isinstance(proto_val, JsValue) and proto_val.type in ('function', 'intrinsic'):
+            if proto_val.__class__ is JsValue and proto_val.type in ('function', 'intrinsic'):
                 # Cache bound proto method wrapper on the array
                 if obj.extras is None:
                     obj.extras = {}
@@ -1366,7 +1368,7 @@ class Interpreter:
         # Check String.prototype for user-added methods
         proto_val = self._string_proto.value.get(key)
         if proto_val is not None:
-            if isinstance(proto_val, JsValue) and proto_val.type in ('function', 'intrinsic'):
+            if proto_val.__class__ is JsValue and proto_val.type in ('function', 'intrinsic'):
                 proto_val_ref = proto_val
                 return self._make_intrinsic(
                     lambda tv, a, i, fn=proto_val_ref: i._call_js(fn, a, tv), key)
@@ -1575,7 +1577,7 @@ class Interpreter:
         # Check Number.prototype for user-added methods
         proto_val = self._number_proto.value.get(key)
         if proto_val is not None:
-            if isinstance(proto_val, JsValue) and proto_val.type in ('function', 'intrinsic'):
+            if proto_val.__class__ is JsValue and proto_val.type in ('function', 'intrinsic'):
                 proto_val_ref = proto_val
                 return self._make_intrinsic(
                     lambda tv, a, i, fn=proto_val_ref: i._call_js(fn, a, tv), key)
@@ -1706,9 +1708,9 @@ class Interpreter:
                     obj.extras[key] = val
         elif obj.type in ('object', 'function', 'intrinsic', 'class'):
             # TypedArray numeric index write
-            if isinstance(obj.value, dict):
+            if obj.value.__class__ is dict:
                 _obj_type_v = obj.value.get('__type__')
-                _obj_type_s = _obj_type_v.value if isinstance(_obj_type_v, JsValue) else _obj_type_v
+                _obj_type_s = _obj_type_v.value if _obj_type_v.__class__ is JsValue else _obj_type_v
                 if _obj_type_s == 'TypedArray':
                     try:
                         idx = int(key)
@@ -1734,7 +1736,7 @@ class Interpreter:
                         pass
             # Check for setter in proto chain
             current = obj
-            while isinstance(current, JsValue) and current.type in ('object', 'function', 'intrinsic', 'class'):
+            while current.__class__ is JsValue and current.type in ('object', 'function', 'intrinsic', 'class'):
                 setter_key = f"__set__{key}"
                 if setter_key in current.value:
                     self._call_js(current.value[setter_key], [val], obj)
@@ -3314,7 +3316,7 @@ class Interpreter:
         if cached is not None:
             return cached
         names = []
-        if not isinstance(node, dict):
+        if node.__class__ is not dict:
             return names
         tp = node.get("type")
         # Stop at function boundaries
@@ -3325,24 +3327,26 @@ class Interpreter:
                 Interpreter._extract_binding_names(d.get("id"), names)
             return names
         # Recurse into statement bodies
+        _cvn = Interpreter._collect_var_names
         for key in ("body", "consequent", "alternate", "block", "handler", "finalizer",
                      "cases", "declarations", "init", "update"):
             child = node.get(key)
-            if isinstance(child, list):
+            if child.__class__ is list:
                 for item in child:
-                    if isinstance(item, dict):
-                        names.extend(Interpreter._collect_var_names(item))
-            elif isinstance(child, dict):
-                names.extend(Interpreter._collect_var_names(child))
+                    if item.__class__ is dict:
+                        names.extend(_cvn(item))
+            elif child.__class__ is dict:
+                names.extend(_cvn(child))
         node['__vn__'] = names
         return names
 
     @staticmethod
     def _extract_binding_names(pattern, names):
         """Extract variable names from a binding pattern (Identifier, ObjectPattern, ArrayPattern)."""
-        if isinstance(pattern, str):
+        _cls = pattern.__class__
+        if _cls is str:
             names.append(pattern)
-        elif isinstance(pattern, dict):
+        elif _cls is dict:
             tp = pattern.get("type")
             if tp == "Identifier":
                 names.append(pattern["name"])
@@ -3352,7 +3356,7 @@ class Interpreter:
             elif tp == "ArrayPattern":
                 for elem in pattern.get("elements", []):
                     if elem is not None:
-                        Interpreter._extract_binding_names(elem.get("argument", elem) if isinstance(elem, dict) and elem.get("type") == "RestElement" else elem, names)
+                        Interpreter._extract_binding_names(elem.get("argument", elem) if elem.__class__ is dict and elem.get("type") == "RestElement" else elem, names)
             elif tp == "AssignmentPattern":
                 Interpreter._extract_binding_names(pattern.get("left"), names)
             elif tp == "RestElement":

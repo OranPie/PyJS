@@ -52,17 +52,18 @@ def _init_number_cache():
 
 def py_to_js(val: Any):
     """Convert a Python value to a JsValue."""
-    if isinstance(val, _JsValue):
+    _cls = val.__class__
+    if _cls is _JsValue:
         return val
     if val is None:
         return _JS_NULL_REF
-    if isinstance(val, bool):
+    if _cls is bool:
         return _JS_TRUE_REF if val else _JS_FALSE_REF
-    if isinstance(val, int):
+    if _cls is int:
         if -1 <= val <= 255:
             return _JS_SMALL_INTS[val]
         return _JsValue("number", float(val))
-    if isinstance(val, float):
+    if _cls is float:
         if val != val:  # NaN check (faster than math.isnan)
             return _JS_NAN
         if math.isinf(val):
@@ -71,11 +72,11 @@ def py_to_js(val: Any):
         if val == ival and -1 <= ival <= 255:
             return _JS_SMALL_INTS[ival]
         return _JsValue("number", val)
-    if isinstance(val, str):
+    if _cls is str:
         return _JsValue("string", val)
-    if isinstance(val, list):
+    if _cls is list:
         return _JsValue("array", [py_to_js(v) for v in val])
-    if isinstance(val, dict):
+    if _cls is dict:
         return _JsValue("object", {k: py_to_js(v) for k, v in val.items()})
     return _UNDEFINED
 
