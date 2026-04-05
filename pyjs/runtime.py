@@ -5787,94 +5787,94 @@ class Interpreter:
 
     # --------------------------------------------------------- function creation / calling
     def _make_fn(self, node, closure_env):
-        _is_arrow = bool(node.get("arrow"))
-        _is_gen = bool(node.get("generator_"))
-        _is_async = bool(node.get("async_"))
-        _params = node.get("params", [])
-        _body = node["body"]
-        # Pre-extract body statements for hoisting/strict caching
-        _body_stmts = _body.get("body", []) if isinstance(_body, dict) and _body.get("type") == "BlockStatement" else []
-        # Detect single-return bodies: {return expr} — skip _exec + exception for these
-        _fast_return = None
-        if (len(_body_stmts) == 1
-                and _body_stmts[0].__class__ is dict
-                and _body_stmts[0].get("type") == "ReturnStatement"):
-            _fast_return = (_body_stmts[0].get("argument"),)
-        # Pre-compute whether body can be inlined (no block scope needed)
-        _body_inline = False
-        _if_return_return = None
-        if _body_stmts and _fast_return is None:
-            try:
-                _scope_info = _body['__scope_info__']
-            except KeyError:
-                _scope_info = Interpreter._compute_block_scope_info(_body_stmts)
-                _body['__scope_info__'] = _scope_info
-            if not _scope_info[1]:  # needs_env == False
-                _body_inline = True
-                # Detect { if (test) return e1; return e2; } pattern
-                if len(_body_stmts) == 2:
-                    _s0, _s1 = _body_stmts
-                    if (_s0.__class__ is dict and _s0.get("type") == "IfStatement"
-                            and _s0.get("alternate") is None
-                            and _s1.__class__ is dict and _s1.get("type") == "ReturnStatement"):
-                        _cons = _s0.get("consequent")
-                        _cons_ret_arg = None
-                        if _cons.__class__ is dict:
-                            if _cons.get("type") == "ReturnStatement":
-                                _cons_ret_arg = _cons.get("argument")
-                            elif _cons.get("type") == "BlockStatement":
-                                _cb = _cons.get("body", [])
-                                if (len(_cb) == 1 and _cb[0].__class__ is dict
-                                        and _cb[0].get("type") == "ReturnStatement"):
-                                    _cons_ret_arg = _cb[0].get("argument")
-                        if _cons_ret_arg is not None:
-                            _ir_test_node = _s0["test"]
-                            _ir_fall_arg = _s1.get("argument")
-                            # Detect fast test: ident OP literal(number)
-                            _ir_fast_test = None
-                            if (_ir_test_node.__class__ is dict
-                                    and _ir_test_node.get("type") == "BinaryExpression"):
-                                _tl = _ir_test_node.get("left")
-                                _tr = _ir_test_node.get("right")
-                                _top = _ir_test_node.get("operator")
-                                if (_tl.__class__ is dict and _tl.get("type") == "Identifier"
-                                        and _tr.__class__ is dict and _tr.get("type") == "Literal"
-                                        and _top in ('<', '>', '<=', '>=', '===', '!==', '==', '!=')):
-                                    _tr_jv = _tr.get('__jv__')
-                                    if _tr_jv is None:
-                                        _tr_jv = py_to_js(_tr["value"])
-                                        _tr['__jv__'] = _tr_jv
-                                    if _tr_jv.type == 'number':
-                                        _ir_fast_test = (_top, _tl["name"], _tr_jv.value)
-                            # Detect fast consequent: return ident (param lookup)
-                            _ir_fast_cons = None
-                            if (_cons_ret_arg.__class__ is dict
-                                    and _cons_ret_arg.get("type") == "Identifier"):
-                                _ir_fast_cons = _cons_ret_arg["name"]
-                            _if_return_return = (_ir_test_node, _cons_ret_arg, _ir_fall_arg,
-                                                 _ir_fast_test, _ir_fast_cons)
-        # Pre-compute simple param names: tuple of names if all params are plain Identifiers or strings
-        _simple_param_names = None
-        if _params:
-            _all_simple = True
-            _names = []
-            for p in _params:
-                if p.__class__ is str:
-                    _names.append(p)
-                elif p.__class__ is dict and p.get("type") == "Identifier":
-                    _names.append(p["name"])
-                else:
-                    _all_simple = False
-                    break
-            if _all_simple:
-                _simple_param_names = tuple(_names)
+        # Cache metadata on the AST node — pure computation, depends only on node shape
+        try:
+            _meta = node['__fn_meta__']
+        except KeyError:
+            _is_arrow = bool(node.get("arrow"))
+            _is_gen = bool(node.get("generator_"))
+            _is_async = bool(node.get("async_"))
+            _params = node.get("params", [])
+            _body = node["body"]
+            _body_stmts = _body.get("body", []) if isinstance(_body, dict) and _body.get("type") == "BlockStatement" else []
+            _fast_return = None
+            if (len(_body_stmts) == 1
+                    and _body_stmts[0].__class__ is dict
+                    and _body_stmts[0].get("type") == "ReturnStatement"):
+                _fast_return = (_body_stmts[0].get("argument"),)
+            _body_inline = False
+            _if_return_return = None
+            if _body_stmts and _fast_return is None:
+                try:
+                    _scope_info = _body['__scope_info__']
+                except KeyError:
+                    _scope_info = Interpreter._compute_block_scope_info(_body_stmts)
+                    _body['__scope_info__'] = _scope_info
+                if not _scope_info[1]:
+                    _body_inline = True
+                    if len(_body_stmts) == 2:
+                        _s0, _s1 = _body_stmts
+                        if (_s0.__class__ is dict and _s0.get("type") == "IfStatement"
+                                and _s0.get("alternate") is None
+                                and _s1.__class__ is dict and _s1.get("type") == "ReturnStatement"):
+                            _cons = _s0.get("consequent")
+                            _cons_ret_arg = None
+                            if _cons.__class__ is dict:
+                                if _cons.get("type") == "ReturnStatement":
+                                    _cons_ret_arg = _cons.get("argument")
+                                elif _cons.get("type") == "BlockStatement":
+                                    _cb = _cons.get("body", [])
+                                    if (len(_cb) == 1 and _cb[0].__class__ is dict
+                                            and _cb[0].get("type") == "ReturnStatement"):
+                                        _cons_ret_arg = _cb[0].get("argument")
+                            if _cons_ret_arg is not None:
+                                _ir_test_node = _s0["test"]
+                                _ir_fall_arg = _s1.get("argument")
+                                _ir_fast_test = None
+                                if (_ir_test_node.__class__ is dict
+                                        and _ir_test_node.get("type") == "BinaryExpression"):
+                                    _tl = _ir_test_node.get("left")
+                                    _tr = _ir_test_node.get("right")
+                                    _top = _ir_test_node.get("operator")
+                                    if (_tl.__class__ is dict and _tl.get("type") == "Identifier"
+                                            and _tr.__class__ is dict and _tr.get("type") == "Literal"
+                                            and _top in ('<', '>', '<=', '>=', '===', '!==', '==', '!=')):
+                                        _tr_jv = _tr.get('__jv__')
+                                        if _tr_jv is None:
+                                            _tr_jv = py_to_js(_tr["value"])
+                                            _tr['__jv__'] = _tr_jv
+                                        if _tr_jv.type == 'number':
+                                            _ir_fast_test = (_top, _tl["name"], _tr_jv.value)
+                                _ir_fast_cons = None
+                                if (_cons_ret_arg.__class__ is dict
+                                        and _cons_ret_arg.get("type") == "Identifier"):
+                                    _ir_fast_cons = _cons_ret_arg["name"]
+                                _if_return_return = (_ir_test_node, _cons_ret_arg, _ir_fall_arg,
+                                                     _ir_fast_test, _ir_fast_cons)
+            _simple_param_names = None
+            if _params:
+                _all_simple = True
+                _names = []
+                for p in _params:
+                    if p.__class__ is str:
+                        _names.append(p)
+                    elif p.__class__ is dict and p.get("type") == "Identifier":
+                        _names.append(p["name"])
+                    else:
+                        _all_simple = False
+                        break
+                if _all_simple:
+                    _simple_param_names = tuple(_names)
+            _meta = (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts, _fast_return, _simple_param_names,
+                     len(_simple_param_names) if _simple_param_names is not None else 0,
+                     _body_inline, _if_return_return)
+            node['__fn_meta__'] = _meta
+
         fn_val = JsValue("function", {
             "node": node, "env": closure_env, "name": node.get("id") or "",
-            # Pre-computed metadata to avoid repeated .get() in _call_js_impl
-            "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts, _fast_return, _simple_param_names,
-                         len(_simple_param_names) if _simple_param_names is not None else 0,
-                         _body_inline, _if_return_return),
+            "__meta__": _meta,
         })
+        _is_arrow, _is_gen = _meta[0], _meta[1]
         if not _is_arrow and not _is_gen:
             proto = JsValue("object", {"constructor": fn_val})
             self._set_desc(proto, "constructor", {'enumerable': False, 'writable': True, 'configurable': True})

@@ -72,6 +72,21 @@ class N:
 # convenience aliases
 CallExpr = lambda callee, args, line=0, optional=False: N._n("CallExpression", callee=callee, arguments=args, line=line, optional=optional)
 
+# Pratt parser precedence table: token_type → (precedence, is_logical)
+# Replaces 12 recursive descent levels with one loop.
+_PREC = {
+    'NULLISH': (1, True), 'OR': (2, True), 'AND': (3, True),
+    'BIT_OR': (4, False), 'BIT_XOR': (5, False), 'BIT_AND': (6, False),
+    '==': (7, False), '!=': (7, False), '===': (7, False), '!==': (7, False),
+    'LT': (8, False), 'GT': (8, False), 'LTE': (8, False), 'GTE': (8, False),
+    'INSTANCEOF': (8, False), 'IN': (8, False),
+    'LSHIFT': (9, False), 'RSHIFT': (9, False), 'URSHIFT': (9, False),
+    'PLUS': (10, False), 'MINUS': (10, False),
+    'STAR': (11, False), 'SLASH': (11, False), 'MOD': (11, False),
+    'EXP': (12, False),
+}
+_PREC_get = _PREC.get
+
 # ============================================================================
 #  Parser
 # ============================================================================
@@ -844,7 +859,7 @@ class Parser:
         return node
 
     def _ternary(self):
-        test = self._nullish()
+        test = self._binary(1)
         if self._check('QUESTION'):
             self._advance()
             cons = self._assign()
@@ -853,91 +868,30 @@ class Parser:
             return N.CondExpr(test, alt, cons)
         return test
 
-    def _nullish(self):
-        left = self._or()
-        while self._check('NULLISH'):
-            self._advance(); left = N.LogExpr('??', left, self._or())
-        return left
-
-    def _or(self):
-        left = self._and()
-        while self._check('OR'):
-            self._advance(); left = N.LogExpr('||', left, self._and())
-        return left
-
-    def _and(self):
-        left = self._bit_or()
-        while self._check('AND'):
-            self._advance(); left = N.LogExpr('&&', left, self._bit_or())
-        return left
-
-    def _bit_or(self):
-        left = self._bit_xor()
-        while self._check('BIT_OR'):
-            self._advance(); left = N.BinExpr('|', left, self._bit_xor())
-        return left
-
-    def _bit_xor(self):
-        left = self._bit_and()
-        while self._check('BIT_XOR'):
-            self._advance(); left = N.BinExpr('^', left, self._bit_and())
-        return left
-
-    def _bit_and(self):
-        left = self._equality()
-        while self._check('BIT_AND'):
-            self._advance(); left = N.BinExpr('&', left, self._equality())
-        return left
-
-    def _equality(self):
-        left = self._rel()
-        while self._check('==','!=','===','!=='):
-            op = self._advance().value; left = N.BinExpr(op, left, self._rel())
-        return left
-
-    def _rel(self):
-        # Private field brand check: #name in obj  (ES2022)
-        if self._check('PRIVATE_NAME'):
-            priv_tok = self._peek(1)   # peek at next token (after PRIVATE_NAME)
-            if priv_tok and priv_tok.type == 'IN':
-                priv_name = self._advance().value   # consume #name
-                self._advance()                      # consume 'in'
-                right = self._shift()
+    def _binary(self, min_prec):
+        """Pratt precedence-climbing parser for all binary/logical operators."""
+        # ES2022 private field brand check: #name in obj
+        if self._tt == 'PRIVATE_NAME':
+            nxt = self.toks[min(self.pos + 1, len(self.toks) - 1)]
+            if nxt.type == 'IN':
+                priv_name = self._advance().value
+                self._advance()
+                right = self._binary(9)
                 return N.BinExpr('private_in', N._n('PrivateIdentifier', name=priv_name), right)
-        left = self._shift()
-        while self._check('LT','GT','LTE','GTE','INSTANCEOF'):
-            op = self._advance().value
-            if op == 'instanceof':
-                right = self._shift()
-            else:
-                right = self._shift()
-            left = N.BinExpr(op, left, right)
-        if self._check('IN'):
-            self._advance(); left = N.BinExpr('in', left, self._shift())
-        return left
-
-    def _shift(self):
-        left = self._add()
-        while self._check('LSHIFT','RSHIFT','URSHIFT'):
-            op = self._advance().value; left = N.BinExpr(op, left, self._add())
-        return left
-
-    def _add(self):
-        left = self._mul()
-        while self._check('PLUS','MINUS'):
-            op = self._advance().value; left = N.BinExpr(op, left, self._mul())
-        return left
-
-    def _mul(self):
-        left = self._exp()
-        while self._check('STAR','SLASH','MOD'):
-            op = self._advance().value; left = N.BinExpr(op, left, self._exp())
-        return left
-
-    def _exp(self):
         left = self._unary()
-        if self._check('EXP'):
-            self._advance(); left = N.BinExpr('**', left, self._exp())   # right-assoc
+        _tt = self._tt
+        info = _PREC_get(_tt)
+        while info is not None and info[0] >= min_prec:
+            prec, is_log = info
+            op = self._advance().value
+            # ** is right-associative; all others left-associative
+            right = self._binary(prec if _tt == 'EXP' else prec + 1)
+            if is_log:
+                left = N.LogExpr(op, left, right)
+            else:
+                left = N.BinExpr(op, left, right)
+            _tt = self._tt
+            info = _PREC_get(_tt)
         return left
 
     def _unary(self):
