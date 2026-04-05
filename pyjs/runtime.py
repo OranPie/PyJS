@@ -5299,10 +5299,62 @@ class Interpreter:
         elif _nargs_node == 1:
             _a0 = _arg_nodes[0]
             if _a0["type"] != "SpreadElement":
+                args = None
+                # Inline simple binary arg: ident OP number_literal (e.g., n-1)
                 try:
-                    args = [_a0['__eh__'](_a0, env)]
+                    _sa = node['__sa__']
                 except KeyError:
-                    args = [self._eval(_a0, env)]
+                    _sa = False
+                    if _a0.get("type") == "BinaryExpression":
+                        _sal = _a0.get("left")
+                        _sar = _a0.get("right")
+                        if (_sal and _sal.get("type") == "Identifier" and
+                                _sar and _sar.get("type") == "Literal" and _sar.get("raw") == "number"):
+                            _sa = (_a0["operator"], _sal["name"], _sar["value"])
+                    node['__sa__'] = _sa
+                if _sa:
+                    _sa_op, _sa_name, _sa_rval = _sa
+                    _bindings = env.bindings
+                    if _sa_name in _bindings:
+                        _b = _bindings[_sa_name]
+                        if _b[1] is _TDZ_SENTINEL:
+                            raise _JSError(self._make_js_error('ReferenceError', f"Cannot access '{_sa_name}' before initialization"))
+                        _sa_lv = _b[1]
+                    else:
+                        _e = env.parent
+                        _sa_lv = None
+                        while _e is not None:
+                            _eb = _e.bindings
+                            if _sa_name in _eb:
+                                _b = _eb[_sa_name]
+                                if _b[1] is _TDZ_SENTINEL:
+                                    raise _JSError(self._make_js_error('ReferenceError', f"Cannot access '{_sa_name}' before initialization"))
+                                _sa_lv = _b[1]
+                                break
+                            _e = _e.parent
+                        if _sa_lv is None:
+                            raise _JSError(self._make_js_error('ReferenceError', f"{_sa_name} is not defined"))
+                    if _sa_lv.type == 'number':
+                        _sa_lval = _sa_lv.value
+                        if _sa_op == '-':
+                            _sa_r = _sa_lval - _sa_rval
+                        elif _sa_op == '+':
+                            _sa_r = _sa_lval + _sa_rval
+                        elif _sa_op == '*':
+                            _sa_r = _sa_lval * _sa_rval
+                        else:
+                            _sa_r = None
+                        if _sa_r is not None:
+                            _sa_i = int(_sa_r)
+                            if _sa_r == _sa_i and -1 <= _sa_i <= 255:
+                                args = [_JS_SMALL_INTS[_sa_i]]
+                            else:
+                                args = [JsValue("number", _sa_r)]
+                if args is None:
+                    try:
+                        args = [_a0['__eh__'](_a0, env)]
+                    except KeyError:
+                        args = [self._eval(_a0, env)]
             else:
                 args = self._eval_arguments(_arg_nodes, env)
         elif _nargs_node == 2:
@@ -6267,7 +6319,9 @@ class Interpreter:
                 call_env._is_fn_env = True
                 _bindings = call_env.bindings
                 _nargs = _nargs_hint if _nargs_hint >= 0 else len(args)
-                if _nargs >= _nparam:
+                if _nparam == 1:
+                    _bindings[_simple_param_names[0]] = ['var', args[0] if _nargs >= 1 else UNDEFINED]
+                elif _nargs >= _nparam:
                     for _idx, _pname in enumerate(_simple_param_names):
                         _bindings[_pname] = ['var', args[_idx]]
                 else:
@@ -6303,19 +6357,19 @@ class Interpreter:
                 call_env._fn_val = fn_val
             if is_new_call:
                 call_env.declare('__new_target__', fn_val, 'const')
-            try:
+            if 'super_proto' in info:
                 super_proto = info['super_proto']
-            except KeyError:
-                super_proto = None
-            if super_proto.__class__ is JsValue:
-                super_ctor = info.get('superClass')
-                call_env.declare('super', self._make_super_proxy(super_proto, call_env._this, super_ctor), 'const')
+                if super_proto.__class__ is JsValue:
+                    super_ctor = info.get('superClass')
+                    call_env.declare('super', self._make_super_proxy(super_proto, call_env._this, super_ctor), 'const')
             # Bind parameters — fast path for all-Identifier params
             _bindings = call_env.bindings
             _nargs = _nargs_hint if _nargs_hint >= 0 else len(args)
             if _simple_param_names is not None:
                 # All params are simple Identifiers — direct binding, no type checks
-                if _nargs >= _nparam:
+                if _nparam == 1:
+                    _bindings[_simple_param_names[0]] = ['var', args[0] if _nargs >= 1 else UNDEFINED]
+                elif _nargs >= _nparam:
                     # Common case: enough args for all params — skip bounds check
                     for _idx, _pname in enumerate(_simple_param_names):
                         _bindings[_pname] = ['var', args[_idx]]
