@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List
 
-from .trace import get_logger, TRACE
+from .trace import get_logger, TRACE, _any_enabled as _TRACE_ACTIVE
 
 _log = get_logger("lexer")
 
@@ -14,6 +14,18 @@ class Token:
     line: int
     col: int
     end_col: int = 0
+
+_SIMPLE_TOKENS = {
+    '(':'LPAREN',  ')':'RPAREN',  '{':'LBRACE',  '}':'RBRACE',
+    '[':'LBRACKET',']':'RBRACKET', ';':'SEMICOLON',',':'COMMA',
+    ':':'COLON',   '~':'TILDE',
+}
+
+_NO_REGEX_PREV = frozenset({
+    'IDENTIFIER', 'NUMBER', 'STRING', 'BIGINT',
+    'RPAREN', 'RBRACKET', 'INCREMENT', 'DECREMENT',
+    'TRUE', 'FALSE', 'NULL', 'UNDEFINED',
+})
 
 # ============================================================================
 #  Lexer
@@ -67,69 +79,124 @@ class Lexer:
 
     def _mk(self, tt, val, sc, sl):
         tok = Token(tt, val, sl, sc, self.col)
-        if _log.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log.log(TRACE, "token %s %r (line %d)", tt, str(val)[:40] if val is not None else '', sl)
         return tok
 
     # -- skip whitespace / comments ----------------------------------------
     def _skip(self):
-        while not self._end():
-            c = self._ch()
-            if c in ' \t\r\n':
-                self._nxt()
-            elif c == '/' and self._peek(1) == '/':
-                while not self._end() and self._ch() != '\n':
-                    self._nxt()
-            elif c == '/' and self._peek(1) == '*':
-                self._nxt(); self._nxt()
-                while not self._end():
-                    if self._ch() == '*' and self._peek(1) == '/':
-                        self._nxt(); self._nxt(); break
-                    self._nxt()
+        _s = self.s
+        _len = self.length
+        i = self.i
+        _col = self.col
+        _line = self.line
+        while i < _len:
+            c = _s[i]
+            if c == ' ' or c == '\t' or c == '\r':
+                i += 1
+                _col += 1
+            elif c == '\n':
+                i += 1
+                _line += 1
+                _col = 1
+            elif c == '/' and i + 1 < _len:
+                c2 = _s[i + 1]
+                if c2 == '/':
+                    i += 2
+                    while i < _len and _s[i] != '\n':
+                        i += 1
+                    _col = 1  # next char is \n or EOF
+                elif c2 == '*':
+                    i += 2
+                    _col += 2
+                    while i < _len:
+                        ch = _s[i]
+                        if ch == '*' and i + 1 < _len and _s[i + 1] == '/':
+                            i += 2
+                            _col += 2
+                            break
+                        if ch == '\n':
+                            _line += 1
+                            _col = 1
+                        else:
+                            _col += 1
+                        i += 1
+                else:
+                    break
             else:
                 break
+        self.i = i
+        self.col = _col
+        self.line = _line
 
     # -- readers -----------------------------------------------------------
     def _read_number(self):
         sc, sl = self.col, self.line
+        _s = self.s
+        _len = self.length
         start = self.i
-        if self._ch() == '0' and self._peek(1) in 'xXoObB':
-            self._nxt(); self._nxt()
-            while not self._end() and (self._ch() in '0123456789abcdefABCDEF' or self._ch() == '_'):
-                self._nxt()
-            raw = self.s[start:self.i].replace('_', '')
+        i = start
+        if _s[i] == '0' and i + 1 < _len and _s[i + 1] in 'xXoObB':
+            i += 2
+            while i < _len and (_s[i] in '0123456789abcdefABCDEF' or _s[i] == '_'):
+                i += 1
+            self.col += i - start
+            self.i = i
+            raw = _s[start:i].replace('_', '')
             return self._mk('NUMBER', int(raw, 0), sc, sl)
-        while not self._end() and (self._ch().isdigit() or self._ch() == '_'):
-            self._nxt()
-        if not self._end() and self._ch() == '.' and self._peek(1).isdigit():
-            self._nxt()
-            while not self._end() and (self._ch().isdigit() or self._ch() == '_'):
-                self._nxt()
-        if not self._end() and self._ch() in 'eE':
-            self._nxt()
-            if not self._end() and self._ch() in '+-':
-                self._nxt()
-            while not self._end() and (self._ch().isdigit() or self._ch() == '_'):
-                self._nxt()
-        raw = self.s[start:self.i]
+        while i < _len and (_s[i].isdigit() or _s[i] == '_'):
+            i += 1
+        if i < _len and _s[i] == '.' and i + 1 < _len and _s[i + 1].isdigit():
+            i += 1
+            while i < _len and (_s[i].isdigit() or _s[i] == '_'):
+                i += 1
+        if i < _len and _s[i] in 'eE':
+            i += 1
+            if i < _len and _s[i] in '+-':
+                i += 1
+            while i < _len and (_s[i].isdigit() or _s[i] == '_'):
+                i += 1
+        self.col += i - start
+        self.i = i
+        raw = _s[start:i]
         clean = raw.replace('_', '')
-        if not self._end() and self._ch() == 'n' and '.' not in clean and 'e' not in clean.lower():
-            self._nxt()  # consume 'n'
+        if i < _len and _s[i] == 'n' and '.' not in clean and 'e' not in clean.lower():
+            self.i = i + 1
+            self.col += 1
             return self._mk('BIGINT', int(clean), sc, sl)
         return self._mk('NUMBER', float(clean), sc, sl)
 
     def _read_ident(self):
         sc, sl = self.col, self.line
+        _s = self.s
+        _len = self.length
         start = self.i
-        while not self._end() and (self._ch().isalnum() or self._ch() in ('_', '$')):
-            self._nxt()
-        w = self.s[start:self.i]
+        i = start
+        while i < _len:
+            c = _s[i]
+            if c.isalnum() or c == '_' or c == '$':
+                i += 1
+            else:
+                break
+        self.col += i - start
+        self.i = i
+        w = _s[start:i]
         if w in self.KEYWORDS:
             return self._mk(w.upper(), w, sc, sl)
         return self._mk('IDENTIFIER', w, sc, sl)
 
     def _read_string(self, q):
         sc, sl = self.col, self.line
+        _s = self.s
+        _len = self.length
+        start = self.i + 1  # after opening quote
+        # Fast path: scan for closing quote without escape
+        j = _s.find(q, start)
+        if j != -1 and '\\' not in _s[start:j] and '\n' not in _s[start:j]:
+            self.i = j + 1
+            self.col += j + 1 - (start - 1)
+            return self._mk('STRING', _s[start:j], sc, sl)
+        # Slow path: handle escapes
         self._nxt()                                    # skip opening quote
         buf = []
         while not self._end() and self._ch() != q:
@@ -250,7 +317,6 @@ class Lexer:
             self._skip()
             if self._end():
                 toks.append(self._mk('EOF', None, self.col, self.line))
-                _log.debug("tokenized %d tokens (%d lines)", len(toks), self.line)
                 return toks
             sc, sl = self.col, self.line
             c = self._ch()
@@ -273,13 +339,8 @@ class Lexer:
                 self._nxt(); self._nxt()
                 toks.append(self._mk('ARROW','=>',sc,sl)); continue
             self._nxt()
-            simple = {
-                '(':'LPAREN',  ')':'RPAREN',  '{':'LBRACE',  '}':'RBRACE',
-                '[':'LBRACKET',']':'RBRACKET', ';':'SEMICOLON',',':'COMMA',
-                ':':'COLON',   '~':'TILDE',
-            }
-            if c in simple:
-                toks.append(self._mk(simple[c], c, sc, sl)); continue
+            if c in _SIMPLE_TOKENS:
+                toks.append(self._mk(_SIMPLE_TOKENS[c], c, sc, sl)); continue
             if c == '.':
                 if self._peek(0)==self._peek(1)=='.':
                     self._nxt(); self._nxt()
@@ -339,12 +400,7 @@ class Lexer:
                 if self._match('='): toks.append(self._mk('ASSIGN_DIV','/=',sc,sl))
                 else:
                     prev_type = toks[-1].type if toks else None
-                    _no_regex = {
-                        'IDENTIFIER', 'NUMBER', 'STRING', 'BIGINT',
-                        'RPAREN', 'RBRACKET', 'INCREMENT', 'DECREMENT',
-                        'TRUE', 'FALSE', 'NULL', 'UNDEFINED',
-                    }
-                    if prev_type in _no_regex:
+                    if prev_type in _NO_REGEX_PREV:
                         toks.append(self._mk('SLASH','/',sc,sl))
                     else:
                         toks.append(self._read_regex(sc, sl))

@@ -311,20 +311,23 @@ class Interpreter:
             'args': list(args or []),
         }
         _fn_name = fn.value.get("name", "<anonymous>") if isinstance(fn, JsValue) and isinstance(fn.value, dict) else "<fn>"
-        if repeat:
-            _log_timer.debug("setInterval(%s, %dms) → id=%s", _fn_name, task['delay'], timer_id)
-        else:
-            _log_timer.debug("setTimeout(%s, %dms) → id=%s", _fn_name, task['delay'], timer_id)
+        if _TRACE_ACTIVE[0]:
+            if repeat:
+                _log_timer.debug("setInterval(%s, %dms) → id=%s", _fn_name, task['delay'], timer_id)
+            else:
+                _log_timer.debug("setTimeout(%s, %dms) → id=%s", _fn_name, task['delay'], timer_id)
         self._active_timers[timer_id] = task
         self._push_timer(task, self._clock + task['delay'])
         return timer_id
 
     def _clear_timer(self, timer_id):
-        _log_timer.debug("clearTimer(id=%s)", timer_id)
+        if _TRACE_ACTIVE[0]:
+            _log_timer.debug("clearTimer(id=%s)", timer_id)
         self._active_timers.pop(timer_id, None)
 
     def _new_promise(self):
-        _log_promise.debug("create promise")
+        if _TRACE_ACTIVE[0]:
+            _log_promise.debug("create promise")
         return JsValue('promise', {'state': 'pending', 'value': UNDEFINED, 'handlers': []})
 
     def _resolved_promise(self, value):
@@ -370,7 +373,8 @@ class Interpreter:
         return promise
 
     def _resolve_promise(self, promise, value):
-        _log_promise.debug("resolve promise (state=%s)", promise.value['state'])
+        if _TRACE_ACTIVE[0]:
+            _log_promise.debug("resolve promise (state=%s)", promise.value['state'])
         if promise.value['state'] != 'pending':
             return promise
         if value is promise:
@@ -381,7 +385,8 @@ class Interpreter:
         return self._settle_promise(promise, 'fulfilled', value)
 
     def _reject_promise(self, promise, value):
-        _log_promise.debug("reject promise")
+        if _TRACE_ACTIVE[0]:
+            _log_promise.debug("reject promise")
         return self._settle_promise(promise, 'rejected', value)
 
     def _chain_promise(self, source, next_promise, on_fulfilled=UNDEFINED, on_rejected=UNDEFINED):
@@ -4431,7 +4436,6 @@ class Interpreter:
                     id_node = d["id"]
                     if isinstance(id_node, dict) and id_node.get("type") == "Identifier":
                         name = id_node["name"]
-                        _log_module.debug("export %s", name)
                         try:
                             self._module_exports[name] = env.get(name)
                         except ReferenceError:
@@ -4439,7 +4443,6 @@ class Interpreter:
             elif decl["type"] in ("FunctionDeclaration", "ClassDeclaration"):
                 name = decl.get("id")
                 if name:
-                    _log_module.debug("export %s", name)
                     try:
                         self._module_exports[name] = env.get(name)
                     except ReferenceError:
@@ -4482,7 +4485,6 @@ class Interpreter:
         else:
             val = self._eval(decl, env)
         self._module_exports["default"] = val
-        _log_module.debug("export default")
         return None
 
     _EXEC_DISPATCH = None  # initialized in _init_dispatch_tables
@@ -5636,9 +5638,9 @@ class Interpreter:
     def _eval_await_expression(self, node, env):
         awaited = self._eval(node["argument"], env)
         if awaited.type != 'promise':
-            _log_async.debug("await (non-promise, immediate)")
             return awaited
-        _log_async.debug("await (promise state=%s)", awaited.value.get('state', '?'))
+        if _TRACE_ACTIVE[0]:
+            _log_async.debug("await (promise state=%s)", awaited.value.get('state', '?'))
         if not self._run_event_loop(awaited):
             raise _JSError(py_to_js('Awaited promise did not settle'))
         if awaited.value['state'] == 'rejected':
@@ -5677,7 +5679,6 @@ class Interpreter:
         if gen is None:
             raise _JSError(py_to_js('yield used outside generator'))
         if node.get('delegate'):
-            _log_async.debug("yield* (delegate)")
             it = self._get_js_iterator(arg)
             last = UNDEFINED
             if it is not None:

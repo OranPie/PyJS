@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List
 
 from .lexer import Lexer, Token
-from .trace import get_logger, TRACE
+from .trace import get_logger, TRACE, _any_enabled as _TRACE_ACTIVE
 
 _log = get_logger("parser")
 
@@ -90,7 +90,7 @@ class Parser:
         return t
 
     def _check(self, *types):
-        return self._cur().type in types
+        return self.toks[self.pos].type in types
 
     def _expect(self, tt, msg=""):
         if self._cur().type == tt:
@@ -223,7 +223,7 @@ class Parser:
     # -- statements ---------------------------------------------------------
     def _stmt(self):
         t = self._cur().type
-        if _log.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log.log(TRACE, "node %s", t)
         if t in ('VAR','LET','CONST'):        return self._var_decl()
         if t == 'IF':                         return self._if()
@@ -462,7 +462,7 @@ class Parser:
         return N.TryStmt(blk, handler, finalizer)
 
     def _fn_decl(self, async_=False):
-        if _log.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log.log(TRACE, "node FunctionDeclaration")
         if self._check('ASYNC'):
             self._advance()
@@ -577,7 +577,7 @@ class Parser:
         return N.ClassDecl(name or '<anonymous>', super_, members, decorators=[])
 
     def _class_decl(self, decorators=None):
-        if _log.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log.log(TRACE, "node ClassDeclaration")
         self._advance()
         name = self._expect('IDENTIFIER').value
