@@ -774,24 +774,26 @@ class Interpreter:
     }
 
     def _to_str(self, v: JsValue) -> str:
-        simple = self._TO_STR_SIMPLE.get(v.type)
-        if simple is not None:
-            return simple
-        lam = self._TO_STR_LAMBDA.get(v.type)
-        if lam:
-            return lam(v)
-        if v.type == 'number':
+        _vtype = v.type
+        if _vtype == 'string':
+            return v.value
+        if _vtype == 'number':
             n = v.value
-            if math.isnan(n): return 'NaN'
+            if n != n: return 'NaN'  # NaN check (faster than math.isnan)
             if math.isinf(n): return 'Infinity' if n>0 else '-Infinity'
             if n == int(n) and abs(n) < 1e21: return str(int(n))
             return str(n)
-        if v.type == 'array':     return ','.join(self._to_str(e) for e in v.value)
-        if v.type == 'promise':   return '[object Promise]'
-        if v.type == 'proxy':     return self._to_str(v.value.target)
-        if v.type in ('object', 'function', 'intrinsic', 'class'):
+        simple = self._TO_STR_SIMPLE.get(_vtype)
+        if simple is not None:
+            return simple
+        lam = self._TO_STR_LAMBDA.get(_vtype)
+        if lam:
+            return lam(v)
+        if _vtype == 'array':     return ','.join(self._to_str(e) for e in v.value)
+        if _vtype == 'promise':   return '[object Promise]'
+        if _vtype == 'proxy':     return self._to_str(v.value.target)
+        if _vtype in ('object', 'function', 'intrinsic', 'class'):
             if isinstance(v.value, dict):
-                # Error objects → "ErrorType: message"
                 err_type = v.value.get('__error_type__')
                 if isinstance(err_type, JsValue) and err_type.type == 'string':
                     msg = v.value.get('message')
@@ -800,16 +802,14 @@ class Interpreter:
                 kind = v.value.get('__kind__')
                 if isinstance(kind, JsValue) and kind.value == 'Generator':
                     return '[object Generator]'
-                # Check Symbol.toStringTag
                 tag_key = SK_TO_STRING_TAG
                 tag = v.value.get(tag_key)
                 if tag and isinstance(tag, JsValue) and tag.type == 'string':
                     return f'[object {tag.value}]'
-                # Check Symbol.toPrimitive / toString via prototype
                 prim = self._to_primitive(v, 'string')
                 if prim.type not in ('object', 'function', 'intrinsic', 'class', 'array'):
                     return self._to_str(prim)
-            if v.type in ('function', 'intrinsic', 'class'):
+            if _vtype in ('function', 'intrinsic', 'class'):
                 return f'function {v.value.get("name","")}() {{ [native code] }}'
             return '[object Object]'
         return str(v.value)
@@ -942,7 +942,7 @@ class Interpreter:
     def _to_key(self, value):
         if value.__class__ is str:
             return value
-        if isinstance(value, JsValue):
+        if value.__class__ is JsValue:
             vtype = value.type
             if vtype == 'string':
                 return value.value
@@ -1141,7 +1141,7 @@ class Interpreter:
     def _bind_pattern(self, pattern, value, env, keyword='var', declare=True):
         if pattern is None:
             return
-        if isinstance(pattern, str):
+        if pattern.__class__ is str:
             self._bind_value(pattern, value, env, keyword, declare)
             return
         _ptype = pattern['type']
@@ -1632,7 +1632,7 @@ class Interpreter:
         }
 
     def _get_prop(self, obj: JsValue, prop):
-        key = self._to_key(prop)
+        key = prop if prop.__class__ is str else self._to_key(prop)
         if _TRACE_ACTIVE[0]:
             _log_prop.debug("get %s.%s", obj.type, key)
         if self._global_object is obj and self.genv.has(key):
@@ -1656,7 +1656,7 @@ class Interpreter:
         return handler(obj, key)
 
     def _set_prop(self, obj: JsValue, prop, val: JsValue):
-        key = self._to_key(prop)
+        key = prop if prop.__class__ is str else self._to_key(prop)
         if _TRACE_ACTIVE[0]:
             _log_prop.debug("set %s.%s", obj.type, key)
         if self._global_object is obj and self.genv.has(key):
@@ -3235,9 +3235,9 @@ class Interpreter:
                 val = self._eval(d["init"], env)
                 # ES2015 function name inference
                 _id = d["id"]
-                if (isinstance(_id, dict) and _id["type"] == "Identifier"
+                if (_id.__class__ is dict and _id["type"] == "Identifier"
                         and val.type in ('function', 'intrinsic', 'class')
-                        and isinstance(val.value, dict)
+                        and val.value.__class__ is dict
                         and not val.value.get("name")):
                     val.value["name"] = _id["name"]
             if _TRACE_ACTIVE[0]:
@@ -4094,10 +4094,17 @@ class Interpreter:
         if env is None: env = self.env
         if _TRACE_ACTIVE[0]:
             _log_exec.debug("exec %s", node["type"])
+        # Fast path: use cached handler if available
         try:
-            return self._EXEC_DISPATCH[node["type"]](node, env)
+            return node['__sh__'](node, env)
         except KeyError:
-            return None
+            ntype = node["type"]
+            try:
+                handler = self._EXEC_DISPATCH[ntype]
+            except KeyError:
+                return None
+            node['__sh__'] = handler
+            return handler(node, env)
 
     def _eval_arguments(self, arg_nodes, env):
         if not arg_nodes:
@@ -4576,7 +4583,7 @@ class Interpreter:
         if op == "=" and _ltype == "Identifier":
             right = self._eval(node["right"], env)
             # Name inference for functions
-            if right.type in ('function', 'intrinsic', 'class') and isinstance(right.value, dict) and not right.value.get("name"):
+            if right.type in ('function', 'intrinsic', 'class') and right.value.__class__ is dict and not right.value.get("name"):
                 right.value["name"] = left["name"]
             env.set(left["name"], right)
             _name = left["name"]
@@ -4896,10 +4903,17 @@ class Interpreter:
         if env is None: env = self.env
         if _TRACE_ACTIVE[0]:
             _log_eval.debug("eval %s", node["type"])
+        # Fast path: use cached handler if available
         try:
-            return self._EVAL_DISPATCH[node["type"]](node, env)
+            return node['__eh__'](node, env)
         except KeyError:
-            return UNDEFINED
+            ntype = node["type"]
+            try:
+                handler = self._EVAL_DISPATCH[ntype]
+            except KeyError:
+                return UNDEFINED
+            node['__eh__'] = handler
+            return handler(node, env)
 
     def _do_assign_op(self, op, old, val):
         if op == "+=":
@@ -4907,12 +4921,12 @@ class Interpreter:
                 return JsValue("string", self._to_str(old) + self._to_str(val))
             result = self._to_num(old) + self._to_num(val)
             if result.__class__ is int and -1 <= result <= 255:
-                return _JS_SMALL_INTS[result + 1]
+                return _JS_SMALL_INTS[result]
             return JsValue("number", result)
         if op == "-=":
             result = self._to_num(old) - self._to_num(val)
             if result.__class__ is int and -1 <= result <= 255:
-                return _JS_SMALL_INTS[result + 1]
+                return _JS_SMALL_INTS[result]
             return JsValue("number", result)
         if op == "*=":  return JsValue("number", self._to_num(old) * self._to_num(val))
         if op == "/=":  return JsValue("number", self._to_num(old) / self._to_num(val))
@@ -5443,14 +5457,14 @@ class Interpreter:
             if is_new_call:
                 call_env.declare('__new_target__', fn_val, 'const')
             super_proto = info.get('super_proto')
-            if isinstance(super_proto, JsValue):
+            if super_proto.__class__ is JsValue:
                 super_ctor = info.get('superClass')
                 call_env.declare('super', self._make_super_proxy(super_proto, call_env._this, super_ctor), 'const')
             # Bind parameters — fast path for simple Identifier params
             arg_index = 0
             _bindings = call_env.bindings
             for p in params:
-                if isinstance(p, dict):
+                if p.__class__ is dict:
                     _ptype = p["type"]
                     if _ptype == "RestElement":
                         rest = args[arg_index:] if arg_index < len(args) else []
@@ -5463,7 +5477,7 @@ class Interpreter:
                         if val is UNDEFINED or val.type == 'undefined':
                             val = self._eval(p['right'], call_env)
                         left = p['left']
-                        if isinstance(left, dict) and left.get('type') == 'Identifier':
+                        if left.__class__ is dict and left.get('type') == 'Identifier':
                             _bindings[left["name"]] = ['var', val]
                         else:
                             self._bind_pattern(left, val, call_env, 'var', True)
