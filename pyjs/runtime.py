@@ -4217,6 +4217,11 @@ class Interpreter:
         if not arg_nodes:
             return []
         _eval = self._eval
+        # Fast path: single arg, no spread (overwhelmingly common)
+        if len(arg_nodes) == 1:
+            a0 = arg_nodes[0]
+            if a0["type"] != "SpreadElement":
+                return [_eval(a0, env)]
         args = []
         _append = args.append
         for arg in arg_nodes:
@@ -4433,10 +4438,36 @@ class Interpreter:
             return JS_FALSE
         l = self._eval(node["left"], env)
         if op == "||":
-            if self._truthy(l): return l
+            # Inline _truthy
+            _lt = l.type
+            if _lt == 'boolean':
+                if l.value: return l
+            elif _lt == 'number':
+                _lv = l.value
+                if _lv and _lv == _lv: return l
+            elif _lt == 'string':
+                if l.value: return l
+            elif _lt in ('object', 'array', 'function', 'intrinsic', 'symbol', 'regexp', 'bigint'):
+                return l
+            # falsy — evaluate right
             return self._eval(node["right"], env)
         if op == "&&":
-            if not self._truthy(l): return l
+            # Inline _truthy (inverted)
+            _lt = l.type
+            if _lt == 'boolean':
+                if not l.value: return l
+            elif _lt == 'number':
+                _lv = l.value
+                if not _lv or _lv != _lv: return l
+            elif _lt == 'string':
+                if not l.value: return l
+            elif _lt in ('undefined', 'null'):
+                return l
+            # truthy — evaluate right
+            return self._eval(node["right"], env)
+        if op == "??":
+            if l.type != 'undefined' and l.type != 'null':
+                return l
             return self._eval(node["right"], env)
         r = self._eval(node["right"], env)
         # Fast path: number op number (the overwhelmingly common case)
@@ -4446,17 +4477,17 @@ class Interpreter:
                 result = lv + rv
                 ival = int(result)
                 if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
-                return JsValue('number', result)
+                return JsValue("number", result)
             if op == '-':
                 result = lv - rv
                 ival = int(result)
                 if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
-                return JsValue('number', result)
+                return JsValue("number", result)
             if op == '*':
                 result = lv * rv
                 ival = int(result)
                 if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
-                return JsValue('number', result)
+                return JsValue("number", result)
             if op == '/':
                 if rv == 0:
                     if lv == 0 or lv != lv:
@@ -4465,16 +4496,16 @@ class Interpreter:
                 result = lv / rv
                 ival = int(result)
                 if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
-                return JsValue('number', result)
+                return JsValue("number", result)
             if op == '%':
                 if rv == 0 or lv != lv:
                     return _JS_NAN
-                return JsValue('number', math.fmod(lv, rv))
+                return JsValue("number", math.fmod(lv, rv))
             if op == '**':
                 result = lv ** rv
                 ival = int(result)
                 if result == ival and -1 <= ival <= 255: return _JS_SMALL_INTS[ival]
-                return JsValue('number', result)
+                return JsValue("number", result)
             if op == '<':  return JS_TRUE if lv < rv else JS_FALSE
             if op == '>':  return JS_TRUE if lv > rv else JS_FALSE
             if op == '<=': return JS_TRUE if lv <= rv else JS_FALSE
@@ -4483,6 +4514,18 @@ class Interpreter:
             if op == '!==': return JS_FALSE if lv == rv else JS_TRUE
             if op == '==':  return JS_TRUE if lv == rv else JS_FALSE
             if op == '!=':  return JS_FALSE if lv == rv else JS_TRUE
+        # Fast path: string op string (common for concatenation and comparison)
+        if l.type == 'string' and r.type == 'string':
+            lv, rv = l.value, r.value
+            if op == '+': return JsValue("string", lv + rv)
+            if op == '===': return JS_TRUE if lv == rv else JS_FALSE
+            if op == '!==': return JS_FALSE if lv == rv else JS_TRUE
+            if op == '==':  return JS_TRUE if lv == rv else JS_FALSE
+            if op == '!=':  return JS_FALSE if lv == rv else JS_TRUE
+            if op == '<':  return JS_TRUE if lv < rv else JS_FALSE
+            if op == '>':  return JS_TRUE if lv > rv else JS_FALSE
+            if op == '<=': return JS_TRUE if lv <= rv else JS_FALSE
+            if op == '>=': return JS_TRUE if lv >= rv else JS_FALSE
         if op == "+":
             if l.type == "bigint" and r.type == "bigint":
                 return JsValue("bigint", l.value + r.value)
@@ -4505,7 +4548,7 @@ class Interpreter:
             lv, rv = self._to_num(l), self._to_num(r)
             if rv == 0:
                 if lv == 0 or (isinstance(lv, float) and math.isnan(lv)):
-                    return JsValue("number", float('nan'))
+                    return _JS_NAN
                 return JsValue("number", math.copysign(float('inf'), lv * rv if rv != 0 else lv))
             return JsValue("number", lv / rv)
         if op == "%":
@@ -4513,7 +4556,7 @@ class Interpreter:
                 return JsValue("bigint", l.value % r.value)
             lv, rv = self._to_num(l), self._to_num(r)
             if rv == 0 or (isinstance(lv, float) and math.isnan(lv)):
-                return JsValue("number", float('nan'))
+                return _JS_NAN
             return JsValue("number", math.fmod(lv, rv))
         if op == "**":
             if l.type == "bigint" and r.type == "bigint":
@@ -4647,11 +4690,35 @@ class Interpreter:
         l = self._eval(node["left"], env)
         op = node["operator"]
         if op == "&&":
-            return self._eval(node["right"], env) if self._truthy(l) else l
+            # Inline _truthy (inverted)
+            _lt = l.type
+            if _lt == 'boolean':
+                if not l.value: return l
+            elif _lt == 'number':
+                _lv = l.value
+                if not _lv or _lv != _lv: return l
+            elif _lt == 'string':
+                if not l.value: return l
+            elif _lt in ('undefined', 'null'):
+                return l
+            return self._eval(node["right"], env)
         if op == "||":
-            return l if self._truthy(l) else self._eval(node["right"], env)
+            # Inline _truthy
+            _lt = l.type
+            if _lt == 'boolean':
+                if l.value: return l
+            elif _lt == 'number':
+                _lv = l.value
+                if _lv and _lv == _lv: return l
+            elif _lt == 'string':
+                if l.value: return l
+            elif _lt in ('object', 'array', 'function', 'intrinsic', 'symbol', 'regexp', 'bigint'):
+                return l
+            return self._eval(node["right"], env)
         if op == "??":
-            return l if l.type not in ("null","undefined") else self._eval(node["right"], env)
+            if l.type != 'undefined' and l.type != 'null':
+                return l
+            return self._eval(node["right"], env)
         return l
 
     def _eval_update_expression(self, node, env):
@@ -4691,12 +4758,12 @@ class Interpreter:
         _ltype = left["type"]
         # Fast path: simple `identifier = expr` (the most common case)
         if op == "=" and _ltype == "Identifier":
+            _name = left["name"]
             right = self._eval(node["right"], env)
             # Name inference for functions
             if right.type in ('function', 'intrinsic', 'class') and right.value.__class__ is dict and not right.value.get("name"):
-                right.value["name"] = left["name"]
-            env.set(left["name"], right)
-            _name = left["name"]
+                right.value["name"] = _name
+            env.set(_name, right)
             if env is self.genv and self._global_object is not None and _name != 'globalThis':
                 self._global_object.value[_name] = right
             return right
@@ -4739,6 +4806,13 @@ class Interpreter:
                     elif op == "-=":
                         if old.type == 'number' and right.type == 'number':
                             result = old.value - right.value
+                            ival = int(result)
+                            new_value = _JS_SMALL_INTS[ival] if (result == ival and -1 <= ival <= 255) else JsValue("number", result)
+                        else:
+                            new_value = self._do_assign_op(op, old, right)
+                    elif op == "*=":
+                        if old.type == 'number' and right.type == 'number':
+                            result = old.value * right.value
                             ival = int(result)
                             new_value = _JS_SMALL_INTS[ival] if (result == ival and -1 <= ival <= 255) else JsValue("number", result)
                         else:
@@ -5160,10 +5234,14 @@ class Interpreter:
                 and _body_stmts[0].__class__ is dict
                 and _body_stmts[0].get("type") == "ReturnStatement"):
             _fast_return = (_body_stmts[0].get("argument"),)
+        # Pre-compute simple param names: tuple of names if all params are plain Identifiers
+        _simple_param_names = None
+        if _params and all(p.__class__ is dict and p.get("type") == "Identifier" for p in _params):
+            _simple_param_names = tuple(p["name"] for p in _params)
         fn_val = JsValue("function", {
             "node": node, "env": closure_env, "name": node.get("id") or "",
             # Pre-computed metadata to avoid repeated .get() in _call_js_impl
-            "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts, _fast_return),
+            "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts, _fast_return, _simple_param_names),
         })
         if not _is_arrow and not _is_gen:
             proto = JsValue("object", {"constructor": fn_val})
@@ -5640,7 +5718,7 @@ class Interpreter:
             # Use pre-computed metadata if available (from _make_fn)
             try:
                 meta = info["__meta__"]
-                _is_arrow, _is_gen, _is_async, params, body, body_stmts, _fast_return = meta
+                _is_arrow, _is_gen, _is_async, params, body, body_stmts, _fast_return, _simple_param_names = meta
             except KeyError:
                 node = info["node"]
                 _is_arrow = bool(node.get("arrow"))
@@ -5650,6 +5728,7 @@ class Interpreter:
                 body = node["body"]
                 body_stmts = body.get("body", []) if isinstance(body, dict) and body.get("type") == "BlockStatement" else []
                 _fast_return = None
+                _simple_param_names = None
             # Generator function — return generator object immediately
             if _is_gen:
                 if _is_async:
@@ -5675,34 +5754,39 @@ class Interpreter:
             if super_proto.__class__ is JsValue:
                 super_ctor = info.get('superClass')
                 call_env.declare('super', self._make_super_proxy(super_proto, call_env._this, super_ctor), 'const')
-            # Bind parameters — fast path for simple Identifier params
-            arg_index = 0
+            # Bind parameters — fast path for all-Identifier params
             _bindings = call_env.bindings
             _nargs = len(args)
-            for p in params:
-                if p.__class__ is dict:
-                    _ptype = p["type"]
-                    if _ptype == "RestElement":
-                        rest = args[arg_index:] if arg_index < _nargs else []
-                        self._bind_pattern(p["argument"], JsValue("array", list(rest)), call_env, 'var', True)
-                        break
-                    val = args[arg_index] if arg_index < _nargs else UNDEFINED
-                    if _ptype == "Identifier":
-                        _bindings[p["name"]] = ['var', val]
-                    elif _ptype == "AssignmentPattern":
-                        if val is UNDEFINED or val.type == 'undefined':
-                            val = self._eval(p['right'], call_env)
-                        left = p['left']
-                        if left.__class__ is dict and left.get('type') == 'Identifier':
-                            _bindings[left["name"]] = ['var', val]
+            if _simple_param_names is not None:
+                # All params are simple Identifiers — direct binding, no type checks
+                for _idx, _pname in enumerate(_simple_param_names):
+                    _bindings[_pname] = ['var', args[_idx] if _idx < _nargs else UNDEFINED]
+            else:
+                arg_index = 0
+                for p in params:
+                    if p.__class__ is dict:
+                        _ptype = p["type"]
+                        if _ptype == "RestElement":
+                            rest = args[arg_index:] if arg_index < _nargs else []
+                            self._bind_pattern(p["argument"], JsValue("array", list(rest)), call_env, 'var', True)
+                            break
+                        val = args[arg_index] if arg_index < _nargs else UNDEFINED
+                        if _ptype == "Identifier":
+                            _bindings[p["name"]] = ['var', val]
+                        elif _ptype == "AssignmentPattern":
+                            if val is UNDEFINED or val.type == 'undefined':
+                                val = self._eval(p['right'], call_env)
+                            left = p['left']
+                            if left.__class__ is dict and left.get('type') == 'Identifier':
+                                _bindings[left["name"]] = ['var', val]
+                            else:
+                                self._bind_pattern(left, val, call_env, 'var', True)
                         else:
-                            self._bind_pattern(left, val, call_env, 'var', True)
+                            self._bind_pattern(p, val, call_env, 'var', True)
                     else:
+                        val = args[arg_index] if arg_index < _nargs else UNDEFINED
                         self._bind_pattern(p, val, call_env, 'var', True)
-                else:
-                    val = args[arg_index] if arg_index < _nargs else UNDEFINED
-                    self._bind_pattern(p, val, call_env, 'var', True)
-                arg_index += 1
+                    arg_index += 1
             promise = self._new_promise() if _is_async else None
             # Hoist var declarations (cached on body node)
             if body_stmts:
