@@ -210,7 +210,7 @@ class Parser:
         body = []
         while not self._check('EOF'):
             body.append(self._stmt())
-        _log.debug("parsed %d top-level statements", len(body))
+        _log.debug("parsed %d top-level statements", len(body)) if _TRACE_ACTIVE[0] else None
         return N.Program(body)
 
     def _semi(self):

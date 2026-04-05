@@ -402,7 +402,7 @@ class Interpreter:
         return next_promise
 
     def _promise_then(self, source, on_fulfilled=UNDEFINED, on_rejected=UNDEFINED):
-        if _log_promise.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log_promise.log(TRACE, "attach .then handler (fulfilled=%s, rejected=%s)",
                              on_fulfilled.type if isinstance(on_fulfilled, JsValue) else "?",
                              on_rejected.type if isinstance(on_rejected, JsValue) else "?")
@@ -418,7 +418,7 @@ class Interpreter:
             else:
                 self._reject_promise(next_promise, source.value['value'])
             return
-        if _log_promise.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log_promise.log(TRACE, "invoke %s-handler (value=%s)", state, self._to_str(source.value['value'])[:60])
         try:
             result = self._call_js(callback, [source.value['value']], UNDEFINED)
@@ -617,7 +617,8 @@ class Interpreter:
     def _run_event_loop(self, until_promise=None):
         steps = 0
         _pending = len(self._microtasks) + len(self._timers)
-        _log_event.info("event loop start (%d pending)", _pending)
+        if _TRACE_ACTIVE[0]:
+            _log_event.info("event loop start (%d pending)", _pending)
         while True:
             if until_promise and until_promise.value['state'] != 'pending':
                 break
@@ -645,11 +646,12 @@ class Interpreter:
                     self._push_timer(candidate, self._clock + candidate['delay'])
                 else:
                     self._active_timers.pop(candidate['id'], None)
-            if _log_event.isEnabledFor(TRACE):
+            if _TRACE_ACTIVE[0]:
                 _log_event.log(TRACE, "event loop tick %d", steps)
             if steps > self.EVENT_LOOP_LIMIT:
                 raise _JSError(py_to_js('Event loop exceeded limit; possible unbounded interval or promise recursion'))
-        _log_event.info("event loop end (%d ticks)", steps)
+        if _TRACE_ACTIVE[0]:
+            _log_event.info("event loop end (%d ticks)", steps)
         return not until_promise or until_promise.value['state'] != 'pending'
 
     # Class-level cache for global env bindings (shared across instances)
@@ -1716,7 +1718,7 @@ class Interpreter:
             proxy = obj.value
             trap = self._get_trap(proxy.handler, 'set')
             if trap:
-                _log_proxy.debug("proxy trap set(target=%s, prop=%s)", proxy.target.type, key)
+                if _TRACE_ACTIVE[0]: _log_proxy.debug("proxy trap set(target=%s, prop=%s)", proxy.target.type, key)
                 self._call_js(trap, [proxy.target, py_to_js(key), val, obj], UNDEFINED)
                 return
             self._set_prop(proxy.target, key, val)
@@ -3357,25 +3359,24 @@ class Interpreter:
     @staticmethod
     def _collect_var_names(node):
         """Recursively collect all var-declared names in a subtree, skipping nested functions."""
-        cached = node.get('__vn__')
-        if cached is not None:
-            return cached
+        if '__vn__' in node:
+            return node['__vn__']
         names = []
         if node.__class__ is not dict:
             return names
         tp = node.get("type")
-        # Stop at function boundaries
         if tp in ("FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"):
             return names
         if tp == "VariableDeclaration" and node.get("kind") == "var":
             for d in node.get("declarations", []):
                 Interpreter._extract_binding_names(d.get("id"), names)
             return names
-        # Recurse into statement bodies
         _cvn = Interpreter._collect_var_names
         for key in ("body", "consequent", "alternate", "block", "handler", "finalizer",
                      "cases", "declarations", "init", "update"):
-            child = node.get(key)
+            if key not in node:
+                continue
+            child = node[key]
             if child.__class__ is list:
                 for item in child:
                     if item.__class__ is dict:
@@ -3455,7 +3456,7 @@ class Interpreter:
                 _id = d["id"]
                 _vname = _id.get("name", "?") if isinstance(_id, dict) and _id.get("type") == "Identifier" else "<pattern>"
                 _log_scope.debug("declare %s %s", _kind, _vname)
-                if _log_scope.isEnabledFor(TRACE):
+                if _TRACE_ACTIVE[0]:
                     _log_scope.log(TRACE, "  %s = %s", _vname, self._to_str(val)[:60])
             try:
                 self._bind_pattern(d["id"], val, env, _kind, True)
@@ -4403,8 +4404,8 @@ class Interpreter:
     def _exec_import_declaration(self, node, env):
         if getattr(self, '_module_loader', None) is not None:
             source_spec = node["source"]
-            _specifiers = ", ".join(s.get("local", "?") for s in node.get("specifiers", []))
             if _TRACE_ACTIVE[0]:
+                _specifiers = ", ".join(s.get("local", "?") for s in node.get("specifiers", []))
                 _log_module.info("import {%s} from %s", _specifiers, source_spec)
             resolved = self._module_loader.resolve(source_spec, getattr(self, '_module_file', None))
             exports = self._module_loader.load(resolved)
@@ -5646,7 +5647,7 @@ class Interpreter:
         if awaited.value['state'] == 'rejected':
             raise _JSError(awaited.value['value'])
         _result = awaited.value['value']
-        if _log_async.isEnabledFor(TRACE):
+        if _TRACE_ACTIVE[0]:
             _log_async.log(TRACE, "await resolved → %s", self._to_str(_result)[:60])
         return _result
 
@@ -5692,7 +5693,7 @@ class Interpreter:
                     gen.yield_value(val)
             return last
         else:
-            if _log_async.isEnabledFor(TRACE):
+            if _TRACE_ACTIVE[0]:
                 _log_async.log(TRACE, "yield %s", self._to_str(arg)[:60])
             return gen.yield_value(arg)
 
@@ -6253,17 +6254,17 @@ class Interpreter:
         sym_iter_key = SK_ITERATOR
         def _gen_next(tv, a, i):
             _val = a[0] if a else UNDEFINED
-            if _log_async.isEnabledFor(TRACE):
+            if _TRACE_ACTIVE[0]:
                 _log_async.log(TRACE, "generator.next(%s)", i._to_str(_val)[:60])
             return gen.next(_val)
         def _gen_return(tv, a, i):
             _val = a[0] if a else UNDEFINED
-            if _log_async.isEnabledFor(TRACE):
+            if _TRACE_ACTIVE[0]:
                 _log_async.log(TRACE, "generator.return(%s)", i._to_str(_val)[:60])
             return gen.js_return(_val)
         def _gen_throw(tv, a, i):
             _val = a[0] if a else UNDEFINED
-            if _log_async.isEnabledFor(TRACE):
+            if _TRACE_ACTIVE[0]:
                 _log_async.log(TRACE, "generator.throw(%s)", i._to_str(_val)[:60])
             return gen.js_throw(_val)
         gen_obj = JsValue('object', {
@@ -6305,7 +6306,7 @@ class Interpreter:
                 fn_name = fn_val.value.get("name") or "<anonymous>"
             elif fn_val.type == "class" and isinstance(fn_val.value, dict):
                 fn_name = fn_val.value.get("name") or "<class>"
-            if _log_call.isEnabledFor(TRACE):
+            if _TRACE_ACTIVE[0]:
                 arg_strs = [self._to_str(a)[:40] for a in args[:4]]
                 _log_call.log(TRACE, "→ %s(%s)", fn_name, ", ".join(arg_strs))
             push_depth()
@@ -6319,7 +6320,7 @@ class Interpreter:
                 if self._js_call_stack and self._js_call_stack[-1] is frame:
                     self._js_call_stack.pop()
                 self._call_depth -= 1
-                if _log_call.isEnabledFor(TRACE):
+                if _TRACE_ACTIVE[0]:
                     _log_call.log(TRACE, "← %s = %s", fn_name, self._to_str(_call_result)[:80] if _call_result is not None else "undefined")
                 pop_depth()
         else:
@@ -6607,7 +6608,7 @@ class Interpreter:
             pass
         except _JSError as e:
             err_str = self._to_str(e.value)
-            _log_error.info("uncaught JS error: %s", err_str[:120])
+            if _TRACE_ACTIVE[0]: _log_error.info("uncaught JS error: %s", err_str[:120])
             # Build structured error info
             stack_str = ''
             if isinstance(e.value.value, dict):

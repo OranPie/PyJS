@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from .runtime import Interpreter
 
-from .trace import get_logger
+from .trace import get_logger, _any_enabled as _TRACE_ACTIVE
 from .values import JsValue, UNDEFINED
 from .core import py_to_js
 
@@ -43,7 +43,7 @@ class PluginContext:
 
         keyword = 'var' if writable else 'const'
         self._env.declare(name, js_val, keyword)
-        _log.debug("plugin %s: add_global(%s)", self._plugin_name, name)
+        if _TRACE_ACTIVE[0]: _log.debug("plugin %s: add_global(%s)", self._plugin_name, name)
         # Sync with globalThis
         self._interp._sync_global_binding(name, js_val, self._env)
         self._registered_globals.append(name)
@@ -62,7 +62,7 @@ class PluginContext:
         self._env.declare(name, obj, 'var')
         self._interp._sync_global_binding(name, obj, self._env)
         self._registered_globals.append(name)
-        _log.debug("plugin %s: add_global_object(%s)", self._plugin_name, name)
+        if _TRACE_ACTIVE[0]: _log.debug("plugin %s: add_global_object(%s)", self._plugin_name, name)
         return obj
 
     def add_method(self, type_name: str, method_name: str, fn: Callable) -> None:
@@ -90,7 +90,7 @@ class PluginContext:
             self._interp._plugin_methods = {}
         self._interp._plugin_methods[(type_name, method_name)] = fn
         self._registered_methods.append((type_name, method_name))
-        _log.debug("plugin %s: add_method(%s, %s)", self._plugin_name, type_name, method_name)
+        if _TRACE_ACTIVE[0]: _log.debug("plugin %s: add_method(%s, %s)", self._plugin_name, type_name, method_name)
 
     def add_constructor(self, name: str, fn: Callable) -> None:
         """Add a constructor function (callable with `new`).
@@ -106,7 +106,7 @@ class PluginContext:
         self._env.declare(name, js_fn, 'var')
         self._interp._sync_global_binding(name, js_fn, self._env)
         self._registered_globals.append(name)
-        _log.debug("plugin %s: add_constructor(%s)", self._plugin_name, name)
+        if _TRACE_ACTIVE[0]: _log.debug("plugin %s: add_constructor(%s)", self._plugin_name, name)
 
     def get_interpreter(self) -> 'Interpreter':
         """Get the interpreter instance (for advanced use)."""
@@ -164,7 +164,7 @@ class PyJSPlugin:
 
         Override this for custom error handling/logging.
         """
-        _log.debug("plugin on_error: %s", self.name)
+        if _TRACE_ACTIVE[0]: _log.debug("plugin on_error: %s", self.name)
 
     def __repr__(self) -> str:
         return f"<PyJSPlugin {self.name}@{self.version}>"

@@ -7,7 +7,7 @@ import threading
 from .core import py_to_js
 from .environment import Environment
 from .exceptions import _JSReturn, _JSError
-from .trace import get_logger, TRACE
+from .trace import get_logger, TRACE, _any_enabled as _TRACE_ACTIVE
 from .values import JsValue, UNDEFINED, JS_TRUE, JS_FALSE
 
 _log = get_logger("async")
@@ -25,7 +25,7 @@ class JsGenerator:
         self._to_gen   = _queue_mod.Queue()
         self._from_gen = _queue_mod.Queue()
         fn_name = fn_val.value.get('name', '') if isinstance(fn_val.value, dict) else ''
-        _log.debug("generator create: %s", fn_name or "<anonymous>")
+        if _TRACE_ACTIVE[0]: _log.debug("generator create: %s", fn_name or "<anonymous>")
         self._thread = threading.Thread(target=self._body, daemon=True)
         self._thread.start()
 
@@ -95,7 +95,7 @@ class JsGenerator:
         return self._handle_msg(msg)
 
     def js_return(self, value=None):
-        _log.debug("generator return")
+        if _TRACE_ACTIVE[0]: _log.debug("generator return")
         if value is None:
             value = UNDEFINED
         if self._done:
@@ -109,7 +109,7 @@ class JsGenerator:
         return JsValue('object', {'value': value, 'done': JS_TRUE})
 
     def js_throw(self, error):
-        _log.debug("generator throw: %s", type(error).__name__ if not isinstance(error, JsValue) else error.type)
+        if _TRACE_ACTIVE[0]: _log.debug("generator throw: %s", type(error).__name__ if not isinstance(error, JsValue) else error.type)
         if self._done:
             raise _JSError(error)
         self._to_gen.put({'type': 'throw', 'value': error})

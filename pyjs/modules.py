@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .trace import get_logger
+from .trace import get_logger, _any_enabled as _TRACE_ACTIVE
 
 _log = get_logger("module")
 
@@ -23,7 +23,7 @@ class ModuleLoader:
 
     def resolve(self, specifier: str, from_file: str | None) -> str:
         """Resolve a module specifier to an absolute path."""
-        _log.info("resolve module: %s", specifier)
+        if _TRACE_ACTIVE[0]: _log.info("resolve module: %s", specifier)
         if specifier.startswith('.'):
             base = os.path.dirname(from_file) if from_file else os.getcwd()
             path = os.path.normpath(os.path.join(base, specifier))
@@ -43,7 +43,7 @@ class ModuleLoader:
             # Circular import: return empty namespace stub
             _log.warning("circular import detected: %s", path)
             return {}
-        _log.info("load module: %s", path)
+        if _TRACE_ACTIVE[0]: _log.info("load module: %s", path)
         self._loading.add(path)
         source = Path(path).read_text('utf-8')
         interp = self._interp_factory()

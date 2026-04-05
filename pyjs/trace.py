@@ -143,20 +143,27 @@ def configure(
         If True, include call-depth indentation in output format.
     """
     global _CONFIGURED
+
+    # Always recalculate the fast-path flag so that a previous
+    # reconfigure('DEBUG') doesn't leave tracing on for later callers.
+    if level is None:
+        _resolved = os.environ.get("PYJS_LOG_LEVEL", "WARNING")
+    else:
+        _resolved = level
+    _resolved_upper = _resolved.upper()
+    if _resolved_upper == "TRACE":
+        _numeric = TRACE
+    else:
+        _numeric = getattr(logging, _resolved_upper, logging.WARNING)
+    _any_enabled[0] = (_numeric <= logging.DEBUG)
+
     if _CONFIGURED:
         return
     _CONFIGURED = True
 
-    # Resolve level
-    if level is None:
-        level = os.environ.get("PYJS_LOG_LEVEL", "WARNING")
-    level_upper = level.upper()
-    if level_upper == "TRACE":
-        numeric = TRACE
-    else:
-        numeric = getattr(logging, level_upper, logging.WARNING)
-
-    _any_enabled[0] = (numeric <= logging.DEBUG)
+    # Resolve level (use already-computed values)
+    numeric = _numeric
+    level_upper = _resolved_upper
 
     # Resolve filter
     if log_filter is None:
