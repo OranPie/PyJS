@@ -1785,7 +1785,10 @@ class Interpreter:
         def fn(this_val, args, extra_args=None):
             a = arr.value
             if name == 'push':
-                a.extend(args)
+                if len(args) == 1:
+                    a.append(args[0])
+                else:
+                    a.extend(args)
                 _len = len(a)
                 return _JS_SMALL_INTS[_len] if 0 <= _len <= 255 else JsValue("number", _len)
             if name == 'pop':
@@ -3656,7 +3659,7 @@ class Interpreter:
         init = node.get("init")
         # Cache loop metadata on AST node
         try:
-            uses_lex, lex_vars, has_test, has_update = node['__for_cache__']
+            uses_lex, lex_vars, has_test, has_update, _update_ident = node['__for_cache__']
         except KeyError:
             uses_lex = (init is not None and
                         isinstance(init, dict) and
@@ -3670,7 +3673,15 @@ class Interpreter:
                         lex_vars.append(id_node["name"])
             has_test = "test" in node and node["test"] is not None
             has_update = "update" in node and node["update"] is not None
-            node['__for_cache__'] = (uses_lex, lex_vars, has_test, has_update)
+            # Detect simple i++ or ++i update pattern
+            _update_ident = None
+            if has_update:
+                _upd = node["update"]
+                if (_upd.get("type") == "UpdateExpression" and
+                        _upd.get("operator") == "++" and
+                        _upd.get("argument", {}).get("type") == "Identifier"):
+                    _update_ident = _upd["argument"]["name"]
+            node['__for_cache__'] = (uses_lex, lex_vars, has_test, has_update, _update_ident)
         if init:
             self._exec(init, loop_env)
         test_node = node["test"] if has_test else None
@@ -3679,6 +3690,33 @@ class Interpreter:
         _label = node.get('__label__')
         _exec_steps = self._exec_steps
         _MAX_EXEC_STEPS = self.MAX_EXEC_STEPS
+        # Inline i++ update: directly increment binding, skip _eval dispatch
+        _loop_bindings = loop_env.bindings
+        if _update_ident is not None:
+            _cached_binding = [None]  # mutable cell for caching
+            def _do_update():
+                _cb = _cached_binding[0]
+                if _cb is not None:
+                    _old = _cb[1]
+                    nv = _old.value + 1 if _old.type == 'number' else self._to_num(_old) + 1
+                    _cb[1] = _JS_SMALL_INTS[nv] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
+                    return
+                # First call: find binding in scope chain and cache it
+                _uid = _update_ident
+                _e = loop_env
+                while _e is not None:
+                    _eb = _e.bindings
+                    if _uid in _eb:
+                        _b = _eb[_uid]
+                        _old = _b[1]
+                        nv = _old.value + 1 if _old.type == 'number' else self._to_num(_old) + 1
+                        _b[1] = _JS_SMALL_INTS[nv] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
+                        _cached_binding[0] = _b
+                        return
+                    _e = _e.parent
+        elif has_update:
+            def _do_update():
+                self._eval(update_node, loop_env)
         while True:
             if has_test:
                 _tv = self._eval(test_node, loop_env)
@@ -3714,7 +3752,7 @@ class Interpreter:
                             for v in lex_vars:
                                 if v in _ib and v in _loop_bindings:
                                     _loop_bindings[v][1] = _ib[v][1]
-                        if has_update: self._eval(update_node, loop_env)
+                        if has_update: _do_update()
                         continue
                     return r
             except _JSBreak as e:
@@ -3727,7 +3765,7 @@ class Interpreter:
                         for v in lex_vars:
                             if v in _ib and v in _loop_bindings:
                                 _loop_bindings[v][1] = _ib[v][1]
-                    if has_update: self._eval(update_node, loop_env)
+                    if has_update: _do_update()
                     continue
                 raise
             if uses_lex:
@@ -3735,7 +3773,7 @@ class Interpreter:
                 for v in lex_vars:
                     if v in _ib and v in _loop_bindings:
                         _loop_bindings[v][1] = _ib[v][1]
-            if has_update: self._eval(update_node, loop_env)
+            if has_update: _do_update()
         self._exec_steps = _exec_steps
         return None
 
