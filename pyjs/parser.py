@@ -95,16 +95,20 @@ class Parser:
     def __init__(self, tokens: List[Token]):
         self.toks = tokens
         self.pos = 0
+        self._tlen = len(tokens)
         self._tt = tokens[0].type if tokens else 'EOF'
 
     # -- helpers ------------------------------------------------------------
     def _cur(self):       return self.toks[self.pos]
-    def _peek(self, n=1): return self.toks[min(self.pos+n, len(self.toks)-1)]
+    def _peek(self, n=1): return self.toks[min(self.pos+n, self._tlen-1)]
     def _advance(self):
-        t = self.toks[self.pos]
-        self.pos += 1
-        if self.pos < len(self.toks):
-            self._tt = self.toks[self.pos].type
+        _toks = self.toks
+        _pos = self.pos
+        t = _toks[_pos]
+        _pos += 1
+        self.pos = _pos
+        if _pos < self._tlen:
+            self._tt = _toks[_pos].type
         return t
 
     def _check(self, *types):
@@ -869,7 +873,7 @@ class Parser:
         """Pratt precedence-climbing parser for all binary/logical operators."""
         # ES2022 private field brand check: #name in obj
         if self._tt == 'PRIVATE_NAME':
-            nxt = self.toks[min(self.pos + 1, len(self.toks) - 1)]
+            nxt = self.toks[min(self.pos + 1, self._tlen - 1)]
             if nxt.type == 'IN':
                 priv_name = self._advance().value
                 self._advance()

@@ -7,13 +7,14 @@ from .trace import get_logger, TRACE, _any_enabled as _TRACE_ACTIVE
 
 _log = get_logger("lexer")
 
-@dataclass(slots=True)
 class Token:
-    type: str
-    value: Any
-    line: int
-    col: int
-    end_col: int = 0
+    __slots__ = ('type', 'value', 'line', 'col', 'end_col')
+    def __init__(self, type, value, line, col, end_col=0):
+        self.type = type
+        self.value = value
+        self.line = line
+        self.col = col
+        self.end_col = end_col
 
 _SIMPLE_TOKENS = {
     '(':'LPAREN',  ')':'RPAREN',  '{':'LBRACE',  '}':'RBRACE',
@@ -78,10 +79,7 @@ class Lexer:
         return False
 
     def _mk(self, tt, val, sc, sl):
-        tok = Token(tt, val, sl, sc, self.col)
-        if _TRACE_ACTIVE[0]:
-            _log.log(TRACE, "token %s %r (line %d)", tt, str(val)[:40] if val is not None else '', sl)
-        return tok
+        return Token(tt, val, sl, sc, self.col)
 
     # -- skip whitespace / comments ----------------------------------------
     def _skip(self):
