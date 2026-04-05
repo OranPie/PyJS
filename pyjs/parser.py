@@ -13,7 +13,7 @@ class N:
     """Namespace for AST-node constructors (each returns a dict)."""
     @staticmethod
     def _n(tp, **kw):
-        d = {"type": tp}; d.update(kw); return d
+        kw["type"] = tp; return kw
 
     Program        = lambda body:           N._n("Program", body=body)
     Block          = lambda body:           N._n("BlockStatement", body=body)
@@ -80,6 +80,7 @@ class Parser:
     def __init__(self, tokens: List[Token]):
         self.toks = tokens
         self.pos = 0
+        self._tt = tokens[0].type if tokens else 'EOF'
 
     # -- helpers ------------------------------------------------------------
     def _cur(self):       return self.toks[self.pos]
@@ -87,15 +88,17 @@ class Parser:
     def _advance(self):
         t = self.toks[self.pos]
         self.pos += 1
+        if self.pos < len(self.toks):
+            self._tt = self.toks[self.pos].type
         return t
 
     def _check(self, *types):
-        return self.toks[self.pos].type in types
+        return self._tt in types
 
     def _expect(self, tt, msg=""):
-        if self._cur().type == tt:
+        if self._tt == tt:
             return self._advance()
-        t = self._cur()
+        t = self.toks[self.pos]
         _log.warning("parse error at line %d: expected %s, got %s %r", t.line, tt, t.type, t.value)
         raise SyntaxError(f"Line {t.line}:{t.col} — expected {tt}, got {t.type} {t.value!r}  {msg}")
 
@@ -340,7 +343,7 @@ class Parser:
                     left = N.VarDecl(kind, [N.VarDeclarator(pattern)])
                     body = self._stmt()
                     return N.ForInStmt(left, right, body) if tp == 'IN' else N.ForOfStmt(left, right, body, is_await)
-                self.pos = sv                     # backtrack — not for-in/of
+                self.pos = sv; self._tt = self.toks[sv].type                     # backtrack — not for-in/of
             else:
                 name = self._expect('IDENTIFIER').value
                 if self._check('IN','OF'):
@@ -349,7 +352,7 @@ class Parser:
                     left = N.VarDecl(kind, [N.VarDeclarator(name)])
                     body = self._stmt()
                     return N.ForInStmt(left, right, body) if tp=='IN' else N.ForOfStmt(left, right, body, is_await)
-                self.pos = sv                         # backtrack
+                self.pos = sv; self._tt = self.toks[sv].type                         # backtrack
         # -- regular for --
         init = None
         if self._check('VAR','LET','CONST'):
@@ -363,9 +366,9 @@ class Parser:
                     right = self._expr(); self._expect('RPAREN')
                     body = self._stmt()
                     return N.ForInStmt(init, right, body) if tp=='IN' else N.ForOfStmt(init, right, body, is_await)
-                self.pos = sv
+                self.pos = sv; self._tt = self.toks[sv].type
             except Exception:
-                self.pos = sv
+                self.pos = sv; self._tt = self.toks[sv].type
             init = self._assign()
             if self._check('IN','OF'):
                 tp = self._advance().type
@@ -1185,7 +1188,7 @@ class Parser:
         except Exception:
             ok = False
         finally:
-            self.pos = sv
+            self.pos = sv; self._tt = self.toks[sv].type
         return ok
 
     def _parse_async_arrow(self):
@@ -1238,7 +1241,7 @@ class Parser:
         except Exception:
             ok = False
         finally:
-            self.pos = sv
+            self.pos = sv; self._tt = self.toks[sv].type
         return ok
 
     def _parse_arrow_params(self, async_=False):
