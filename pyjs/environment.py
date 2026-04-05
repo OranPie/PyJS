@@ -63,16 +63,17 @@ class Environment:
         return None
 
     def get(self, name):
-        b = self.bindings.get(name)
-        if b is not None:
-            val = b[1]
-            if val is _TDZ_SENTINEL:
+        _bindings = self.bindings
+        if name in _bindings:
+            b = _bindings[name]
+            if b[1] is _TDZ_SENTINEL:
                 raise ReferenceError(f"Cannot access '{name}' before initialization")
-            return val
+            return b[1]
         e = self.parent
         while e is not None:
-            b = e.bindings.get(name)
-            if b is not None:
+            _b = e.bindings
+            if name in _b:
+                b = _b[name]
                 if b[1] is _TDZ_SENTINEL:
                     raise ReferenceError(f"Cannot access '{name}' before initialization")
                 return b[1]
@@ -80,16 +81,18 @@ class Environment:
         raise ReferenceError(f"{name} is not defined")
 
     def set(self, name, value):
-        b = self.bindings.get(name)
-        if b is not None:
+        _bindings = self.bindings
+        if name in _bindings:
+            b = _bindings[name]
             if b[0] == 'const' and b[1] is not _TDZ_SENTINEL:
                 raise JSTypeError(f"Assignment to constant variable '{name}'")
             b[1] = value
             return
         e = self.parent
         while e is not None:
-            b = e.bindings.get(name)
-            if b is not None:
+            _b = e.bindings
+            if name in _b:
+                b = _b[name]
                 if b[0] == 'const' and b[1] is not _TDZ_SENTINEL:
                     raise JSTypeError(f"Assignment to constant variable '{name}'")
                 b[1] = value
@@ -98,9 +101,10 @@ class Environment:
         raise ReferenceError(f"{name} is not defined")
 
     def set_own(self, name, value):
-        b = self.bindings.get(name)
-        if b is None:
+        _bindings = self.bindings
+        if name not in _bindings:
             raise ReferenceError(f"{name} is not defined")
+        b = _bindings[name]
         if b[0] == 'const' and b[1] is not _TDZ_SENTINEL:
             raise JSTypeError(f"Assignment to constant variable '{name}'")
         b[1] = value

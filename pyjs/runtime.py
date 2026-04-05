@@ -3491,8 +3491,9 @@ class Interpreter:
 
     def _exec_block_statement(self, node, env):
         # Get or compute cached block scope info
-        scope_info = node.get('__scope_info__')
-        if scope_info is None:
+        try:
+            scope_info = node['__scope_info__']
+        except KeyError:
             scope_info = Interpreter._compute_block_scope_info(node["body"])
             node['__scope_info__'] = scope_info
         tdz_entries, needs_env = scope_info
@@ -3595,9 +3596,11 @@ class Interpreter:
         loop_env = Environment(env)
         init = node.get("init")
         # Cache loop metadata on AST node
-        cached = node.get('__for_cache__')
-        if cached is None:
+        try:
+            uses_lex, lex_vars, has_test, has_update = node['__for_cache__']
+        except KeyError:
             uses_lex = (init is not None and
+                        isinstance(init, dict) and
                         init.get("type") == "VariableDeclaration" and
                         init.get("kind") in ("let","const"))
             lex_vars = []
@@ -3606,15 +3609,13 @@ class Interpreter:
                     id_node = decl.get("id")
                     if id_node and id_node.get("type") == "Identifier":
                         lex_vars.append(id_node["name"])
-            has_test = node.get("test") is not None
-            has_update = node.get("update") is not None
+            has_test = "test" in node and node["test"] is not None
+            has_update = "update" in node and node["update"] is not None
             node['__for_cache__'] = (uses_lex, lex_vars, has_test, has_update)
-        else:
-            uses_lex, lex_vars, has_test, has_update = cached
         if init:
             self._exec(init, loop_env)
-        test_node = node.get("test")
-        update_node = node.get("update")
+        test_node = node["test"] if has_test else None
+        update_node = node["update"] if has_update else None
         body_node = node["body"]
         _label = node.get('__label__')
         while True:
@@ -4091,10 +4092,10 @@ class Interpreter:
         if env is None: env = self.env
         if _TRACE_ACTIVE[0]:
             _log_exec.debug("exec %s", node["type"])
-        handler = self._EXEC_DISPATCH.get(node["type"])
-        if handler:
-            return handler(node, env)
-        return None
+        try:
+            return self._EXEC_DISPATCH[node["type"]](node, env)
+        except KeyError:
+            return None
 
     def _eval_arguments(self, arg_nodes, env):
         if not arg_nodes:
@@ -4124,36 +4125,30 @@ class Interpreter:
 
     def _eval_literal(self, node, env):
         # Fast path: return cached JsValue if already computed
-        cached = node.get('__jv__')
-        if cached is not None:
-            return cached
+        try:
+            return node['__jv__']
+        except KeyError:
+            pass
         kind = node.get("raw", "undefined")
         val = node["value"]
         if val is None:
             result = JS_NULL if kind == "null" else UNDEFINED
-            node['__jv__'] = result
-            return result
-        if kind == "bigint":
+        elif kind == "bigint":
             result = JsValue('bigint', val)
-            node['__jv__'] = result
-            return result
-        if kind == "number":
+        elif kind == "number":
             if isinstance(val, float):
                 if val != val:
-                    node['__jv__'] = _JS_NAN
-                    return _JS_NAN
-                ival = int(val)
-                if val == ival and -1 <= ival <= 255:
-                    node['__jv__'] = _JS_SMALL_INTS[ival]
-                    return _JS_SMALL_INTS[ival]
-            result = JsValue('number', val)
-            node['__jv__'] = result
-            return result
-        if kind == "boolean":
+                    result = _JS_NAN
+                elif val == int(val) and -1 <= int(val) <= 255:
+                    result = _JS_SMALL_INTS[int(val)]
+                else:
+                    result = JsValue('number', val)
+            else:
+                result = JsValue('number', val)
+        elif kind == "boolean":
             result = JS_TRUE if val else JS_FALSE
-            node['__jv__'] = result
-            return result
-        result = JsValue(kind, val)
+        else:
+            result = JsValue(kind, val)
         node['__jv__'] = result
         return result
 
@@ -4532,15 +4527,16 @@ class Interpreter:
 
     def _eval_update_expression(self, node, env):
         arg = node["argument"]
-        prefix = node.get("prefix", True)
+        prefix = node["prefix"]
         op = node["operator"]
         if arg["type"] == "Identifier":
             _name = arg["name"]
             # Inline env.get + env.set for speed
             _e = env
             while _e is not None:
-                _b = _e.bindings.get(_name)
-                if _b is not None:
+                _eb = _e.bindings
+                if _name in _eb:
+                    _b = _eb[_name]
                     old = _b[1]
                     nv = self._to_num(old) + (1 if op=="++" else -1)
                     new = _JS_SMALL_INTS[nv + 1] if (nv.__class__ is int and -1 <= nv <= 255) else JsValue("number", nv)
@@ -4561,8 +4557,9 @@ class Interpreter:
     def _eval_assignment_expression(self, node, env):
         left = node["left"]
         op = node["operator"]
+        _ltype = left["type"]
         # Fast path: simple `identifier = expr` (the most common case)
-        if op == "=" and left.get("type") == "Identifier":
+        if op == "=" and _ltype == "Identifier":
             right = self._eval(node["right"], env)
             # Name inference for functions
             if right.type in ('function', 'intrinsic', 'class') and isinstance(right.value, dict) and not right.value.get("name"):
@@ -4572,7 +4569,7 @@ class Interpreter:
             if env is self.genv and self._global_object is not None and _name != 'globalThis':
                 self._global_object.value[_name] = right
             return right
-        if op == "=" and left.get("type") in ("ObjectPattern", "ArrayPattern"):
+        if op == "=" and _ltype in ("ObjectPattern", "ArrayPattern"):
             right = self._eval(node["right"], env)
             self._bind_pattern(left, right, env, 'let', False)
             return right
@@ -4881,10 +4878,10 @@ class Interpreter:
         if env is None: env = self.env
         if _TRACE_ACTIVE[0]:
             _log_eval.debug("eval %s", node["type"])
-        handler = self._EVAL_DISPATCH.get(node["type"])
-        if handler:
-            return handler(node, env)
-        return UNDEFINED
+        try:
+            return self._EVAL_DISPATCH[node["type"]](node, env)
+        except KeyError:
+            return UNDEFINED
 
     def _do_assign_op(self, op, old, val):
         if op == "+=":
@@ -4913,10 +4910,19 @@ class Interpreter:
 
     # --------------------------------------------------------- function creation / calling
     def _make_fn(self, node, closure_env):
-        fn_val = JsValue("function", {"node": node, "env": closure_env, "name": node.get("id") or ""})
-        # Non-arrow, non-generator functions get an auto-created .prototype property
-        # (arrow functions and async arrows don't have .prototype per spec)
-        if not node.get("arrow") and not node.get("generator_"):
+        _is_arrow = bool(node.get("arrow"))
+        _is_gen = bool(node.get("generator_"))
+        _is_async = bool(node.get("async_"))
+        _params = node.get("params", [])
+        _body = node["body"]
+        # Pre-extract body statements for hoisting/strict caching
+        _body_stmts = _body.get("body", []) if isinstance(_body, dict) and _body.get("type") == "BlockStatement" else []
+        fn_val = JsValue("function", {
+            "node": node, "env": closure_env, "name": node.get("id") or "",
+            # Pre-computed metadata to avoid repeated .get() in _call_js_impl
+            "__meta__": (_is_arrow, _is_gen, _is_async, _params, _body, _body_stmts),
+        })
+        if not _is_arrow and not _is_gen:
             proto = JsValue("object", {"constructor": fn_val})
             self._set_desc(proto, "constructor", {'enumerable': False, 'writable': True, 'configurable': True})
             fn_val.value["prototype"] = proto
@@ -5372,38 +5378,46 @@ class Interpreter:
                 self._call_depth -= 1
 
     def _call_js_impl(self, fn_val, args, this_val=None, extra_args=None, is_new_call=False):
-        if fn_val.type == 'proxy':
+        _fntype = fn_val.type
+        if _fntype == 'proxy':
             proxy = fn_val.value
             if is_new_call:
                 trap = self._get_trap(proxy.handler, 'construct')
                 if trap:
-                    _log_proxy.debug("proxy trap construct(target=%s)", proxy.target.type)
                     return self._call_js(trap, [proxy.target, JsValue('array', args), fn_val], UNDEFINED)
             else:
                 trap = self._get_trap(proxy.handler, 'apply')
                 if trap:
-                    _log_proxy.debug("proxy trap apply(target=%s)", proxy.target.type)
                     return self._call_js(trap, [proxy.target, this_val if this_val is not None else UNDEFINED, JsValue('array', args)], UNDEFINED)
             return self._call_js(proxy.target, args, this_val, extra_args, is_new_call)
-        if fn_val.type == "intrinsic":
+        if _fntype == "intrinsic":
+            return fn_val.value["fn"](this_val, args, self)
+        if _fntype == "function":
             info = fn_val.value
-            return info["fn"](this_val, args, self)
-        if fn_val.type == "function":
-            info = fn_val.value
-            node = info["node"]
-            # Generator function — return generator object immediately without running body
-            if node.get("generator_"):
-                if node.get("async_"):
+            # Use pre-computed metadata if available (from _make_fn)
+            meta = info.get("__meta__")
+            if meta is not None:
+                _is_arrow, _is_gen, _is_async, params, body, body_stmts = meta
+            else:
+                node = info["node"]
+                _is_arrow = bool(node.get("arrow"))
+                _is_gen = bool(node.get("generator_"))
+                _is_async = bool(node.get("async_"))
+                params = node.get("params", [])
+                body = node["body"]
+                body_stmts = body.get("body", []) if isinstance(body, dict) and body.get("type") == "BlockStatement" else []
+            # Generator function — return generator object immediately
+            if _is_gen:
+                if _is_async:
                     return self._make_async_generator_obj(fn_val, args, this_val)
                 return self._make_generator_obj(fn_val, args, this_val)
             env = info["env"]
             call_env = Environment(env)
             if _TRACE_ACTIVE[0]:
-                _fn_name = info.get("name") or node.get("id") or "<anonymous>"
+                _fn_name = info.get("name") or "<anonymous>"
                 _log_scope.info("scope create (function %s)", _fn_name)
-            _is_arrow = node.get("arrow")
             call_env._this = this_val if this_val is not None else UNDEFINED
-            call_env._is_arrow = bool(_is_arrow)
+            call_env._is_arrow = _is_arrow
             call_env._is_fn_env = True
             if not _is_arrow:
                 call_env._fn_args = list(args)
@@ -5412,27 +5426,20 @@ class Interpreter:
                 call_env.declare('__new_target__', fn_val, 'const')
             super_proto = info.get('super_proto')
             if isinstance(super_proto, JsValue):
-                # Always set super_ctor for derived-class constructors (they have superClass set),
-                # regardless of is_new_call (handles super() chains: C→B→A)
                 super_ctor = info.get('superClass')
                 call_env.declare('super', self._make_super_proxy(super_proto, call_env._this, super_ctor), 'const')
-            params = node.get("params", [])
+            # Bind parameters — fast path for simple Identifier params
             arg_index = 0
             _bindings = call_env.bindings
             for p in params:
                 if isinstance(p, dict):
-                    _ptype = p.get("type")
+                    _ptype = p["type"]
                     if _ptype == "RestElement":
                         rest = args[arg_index:] if arg_index < len(args) else []
-                        rest_val = JsValue("array", list(rest))
-                        if _log_call.isEnabledFor(TRACE):
-                            _pname = p["argument"].get("name", "?") if isinstance(p["argument"], dict) else str(p["argument"])
-                            _log_call.log(TRACE, "  param ...%s = [%d items]", _pname, len(rest))
-                        self._bind_pattern(p["argument"], rest_val, call_env, 'var', True)
+                        self._bind_pattern(p["argument"], JsValue("array", list(rest)), call_env, 'var', True)
                         break
                     val = args[arg_index] if arg_index < len(args) else UNDEFINED
                     if _ptype == "Identifier":
-                        # Fast path: simple parameter name — inline declare
                         _bindings[p["name"]] = ['var', val]
                     elif _ptype == "AssignmentPattern":
                         if val is UNDEFINED or val.type == 'undefined':
@@ -5448,31 +5455,29 @@ class Interpreter:
                     val = args[arg_index] if arg_index < len(args) else UNDEFINED
                     self._bind_pattern(p, val, call_env, 'var', True)
                 arg_index += 1
-            promise = self._new_promise() if node.get("async_") else None
-            body = node["body"]
-            # Hoist var declarations to function scope (cached on AST node)
-            body_stmts = body.get("body", []) if isinstance(body, dict) and body.get("type") == "BlockStatement" else []
+            promise = self._new_promise() if _is_async else None
+            # Hoist var declarations (cached on body node)
             if body_stmts:
-                # Cache hoisted var names on the body node
-                cached_hoist = body.get('__hoist__')
-                if cached_hoist is None:
+                try:
+                    cached_hoist = body['__hoist__']
+                except KeyError:
                     cached_hoist = []
                     for s in body_stmts:
                         cached_hoist.extend(Interpreter._collect_var_names(s))
                     body['__hoist__'] = cached_hoist
                 for name in cached_hoist:
-                    if name not in call_env.bindings:
-                        call_env.bindings[name] = ['var', UNDEFINED]
-                # Cache use_strict check on body node
-                cached_strict = body.get('__strict__')
-                if cached_strict is None:
+                    if name not in _bindings:
+                        _bindings[name] = ['var', UNDEFINED]
+                try:
+                    cached_strict = body['__strict__']
+                except KeyError:
                     cached_strict = self._has_use_strict(body_stmts)
                     body['__strict__'] = cached_strict
                 if cached_strict:
                     call_env._strict = True
             try:
                 self.env = call_env
-                self._exec(node["body"], call_env)
+                self._exec(body, call_env)
                 result = UNDEFINED
             except _JSReturn as e:
                 result = e.value
@@ -5489,8 +5494,7 @@ class Interpreter:
             if promise is not None:
                 return self._resolve_promise(promise, result)
             return result
-        if fn_val.type == "class":
-            # class constructor call
+        if _fntype == "class":
             return fn_val
         raise _JSError(self._make_js_error('TypeError', f"{self._to_str(fn_val)} is not a function"))
 
